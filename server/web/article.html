@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  記事ページの描画がこのプレースホルダを og メタタグと <title> に置換する。位置と綴りを変えると og が出なくなる。
+  差し込みは「全体公開かつ公開済み」の記事に限られ、それ以外では何も差し込まれない(未公開・限定記事の内容をクローラへ漏らさないため)。下の <title> はその場合の控えであり、差し込まれた <title> はこの位置(=控えより前)に現れるため、クローラとブラウザはそちらを採る。閲覧できる記事の題名は、読み込み後に JavaScript が document.title へ入れ直す。
+-->
+<!-- og:meta -->
+<title>instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="container">
+    <span class="promo">Discord のメンバーシップとロールに基づくニュースプラットフォームです</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord の報道社連合</span>
+    </a>
+    <!-- 検索はトップの一覧が担う(/?q= を読んで /api/search を引く)。素の GET のフォームにしてあるため、JavaScript が動かなくても検索へ行ける。 -->
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" placeholder="記事・タグ・報道社を検索" aria-label="記事を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <div class="actions">
+      <span id="account"></span>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<nav class="globalnav">
+  <div class="container" id="globalnav">
+    <a href="/">トップ</a>
+    <span class="spacer"></span>
+    <a href="/editor" class="write">✍ 記事を書く</a>
+  </div>
+</nav>
+
+<main class="container layout">
+  <div class="main">
+    <article class="card article" id="article">
+      <p class="lede">記事を読み込んでいます…</p>
+    </article>
+  </div>
+  <aside class="side" id="side"></aside>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="/#articles">新着記事</a>
+      <a href="/#publisher-ranking">報道社ランキング</a>
+      <a href="/#tags">タグ一覧</a>
+      <a href="/#series">連載</a>
+      <a href="/editor">記事を書く</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">このサイトは Discord サーバーのメンバー・ロールに基づいて閲覧範囲を制御しています。所属報道社はサーバー内のロールで割り当てられます。</div>
+  </div>
+</footer>
+
+<script type="module">
+import { ApiError, get, me, escapeHtml, formatDateTime, articleUrl, qs, renderAdSlot } from '/static/js/api.js';
+
+/* ============================================================
+   表示の小物
+   ============================================================ */
+
+// 画像を持たない利用者・報道社に割り当てる代替色。style.css が定義するダミー色をそのまま使う。
+const AVATAR_COLORS = ['a1', 'a2', 'a3', 'a4', 'a5'];
+const PUB_COLORS = ['p1', 'p2', 'p3', 'p4'];
+
+const STATUS_LABELS = { draft: '下書き', in_review: 'レビュー中', scheduled: '予約公開', published: '公開済み', archived: 'アーカイブ' };
+const VISIBILITY_LABELS = { public: '全体公開', members: 'メンバー限定', restricted: 'ロール限定' };
+const STANCE_LABELS = { independent: '独立系', state: '国営' };
+
+/** 一覧・詳細の応答が配列でもページ(items 入り)でも同じように扱えるようにする。 */
+function asItems(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.items)) return data.items;
+  return [];
+}
+
+/** 利用者の表示名。Discord の表示名(global_name)が未設定ならユーザー名を使う。 */
+function displayName(user) {
+  if (!user) return '不明';
+  return user.global_name || user.username || '不明';
+}
+
+/** ID から代替色を 1 つ選ぶ。同じ相手には常に同じ色が付き、読者が色で見分けられるようにする。 */
+function pickClass(key, classes) {
+  const s = String(key === null || key === undefined ? '' : key);
+  let sum = 0;
+  for (let i = 0; i < s.length; i += 1) sum = (sum * 31 + s.charCodeAt(i)) % 9973;
+  return classes[sum % classes.length];
+}
+
+/**
+ * 背景画像を指定する style 属性を組み立てる。
+ * CSS の文字列を閉じる " と \ を退避してから HTML エスケープするため、URL に何が入っていても属性の文脈からも CSS の文脈からも抜け出せない。
+ */
+function bgStyle(url) {
+  const css = 'url("' + String(url).replace(/[\\"]/g, '\\$&') + '")';
+  return `style="background-image:${escapeHtml(css)}"`;
+}
+
+/** 利用者のアバター。Discord の CDN にある画像を users.avatar_hash から組み立て、未設定なら頭文字と代替色で描く。 */
+function avatarHtml(user) {
+  if (user && user.avatar_hash && user.discord_user_id) {
+    const url = `https://cdn.discordapp.com/avatars/${encodeURIComponent(user.discord_user_id)}/${encodeURIComponent(user.avatar_hash)}.png?size=64`;
+    return `<span class="avatar ph" ${bgStyle(url)}></span>`;
+  }
+  return `<span class="avatar ${pickClass(user && user.id, AVATAR_COLORS)}">${escapeHtml(displayName(user).slice(0, 1).toUpperCase())}</span>`;
+}
+
+/** 報道社のロゴ。未設定なら社名の頭文字と代替色で描く。 */
+function pubLogoHtml(pub) {
+  if (pub.logo_url) return `<span class="pub-logo ph" ${bgStyle(pub.logo_url)}></span>`;
+  return `<span class="pub-logo ${pickClass(pub.id, PUB_COLORS)}">${escapeHtml(String(pub.name || '?').slice(0, 1))}</span>`;
+}
+
+/** 閲覧範囲のバッジ。輪郭のみで描かれ、塗りの開示(広告)・速報と扱いを分ける。 */
+function visibilityBadgeHtml(visibility) {
+  const label = VISIBILITY_LABELS[visibility] || visibility;
+  return `<span class="badge vis-${escapeHtml(visibility)}">${escapeHtml(label)}</span>`;
+}
+
+/** 例外を利用者に見せる文言にする。サーバーが返した説明を捨てず、そのまま出す。 */
+function errorText(e) {
+  if (e instanceof ApiError && e.body && typeof e.body === 'object' && Array.isArray(e.body.detail)) {
+    return e.body.detail.map((d) => (d && d.msg ? `${(d.loc || []).join('.')}: ${d.msg}` : JSON.stringify(d))).join(' / ');
+  }
+  return e && e.message ? e.message : String(e);
+}
+
+/* ============================================================
+   共通の外枠(ナビゲーション・アカウント・検索)
+   ============================================================ */
+
+/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
+function mountAdminNav(viewer) {
+  if (!viewer || !viewer.is_admin) return;
+  const write = document.querySelector('.globalnav a.write');
+  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
+}
+
+async function renderChrome(activeCategorySlug) {
+  const nav = document.getElementById('globalnav');
+  try {
+    const categories = asItems(await get('/api/categories')).slice().sort((a, b) => a.position - b.position);
+    const links = categories.map((c) => {
+      const active = c.slug === activeCategorySlug ? ' class="active"' : '';
+      return `<a href="/categories/${encodeURIComponent(c.slug)}"${active}>${escapeHtml(c.name)}</a>`;
+    }).join('');
+    nav.innerHTML = `<a href="/">トップ</a>${links}<span class="spacer"></span><a href="/editor" class="write">✍ 記事を書く</a>`;
+  } catch (e) {
+    // カテゴリを引けなくてもトップと執筆への導線は残す(ナビが消えると記事から出られなくなる)。
+  }
+
+  const account = document.getElementById('account');
+  const user = await me();
+  // ナビはこの関数の冒頭で組み直されるため、導線を足すのはその後でなければ消える。
+  mountAdminNav(user);
+  if (user && user.user) {
+    account.innerHTML = `<span class="publisher">${avatarHtml(user.user)}${escapeHtml(displayName(user.user))}</span>`;
+  } else {
+    const back = location.pathname + location.search;
+    account.innerHTML = `<a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`;
+  }
+}
+
+/* ============================================================
+   記事本体
+   ============================================================ */
+
+const slug = decodeURIComponent((location.pathname.split('/').filter(Boolean).pop() || ''));
+
+/**
+ * 賛否の差し引きを描く。0 は中立、正は賛成寄り、負は反対寄りとして色で区別する。
+ * 符号を明示するのは、-3 と 3 が並んだときに読者が見間違えないようにするため。
+ */
+function scoreHtml(score) {
+  const n = Number(score) || 0;
+  const cls = n > 0 ? 'up' : (n < 0 ? 'down' : 'zero');
+  const sign = n > 0 ? '▲' : (n < 0 ? '▼' : '±');
+  return `<b class="score ${cls}">${escapeHtml(sign)}${escapeHtml(Math.abs(n))}</b>`;
+}
+
+/**
+ * コメント 1 件。
+ * 本文は Discord の生の記法のまま届くため、必ずエスケープしてから差し込む。改行だけは CSS(white-space)で活かす。
+ * ここで Discord の記法を解釈しないのは、解釈し始めると Discord 側の見え方と食い違う二つ目の実装を抱えることになるためである。
+ */
+function commentHtml(c) {
+  const author = c.author || {};
+  const name = author.global_name || author.username;
+  // users に居ない相手(guild を抜けた利用者・他の bot)は名前を解決できない。その場合も投稿そのものは出す。
+  const shown = name ? escapeHtml(name) : '不明な利用者';
+  const edited = c.edited_at ? ' <span class="c-edited">(編集済み)</span>' : '';
+  return `<article class="c-item">${avatarHtml(author)}<div class="c-body"><div class="c-head"><span class="c-name">${shown}</span><time datetime="${escapeHtml(c.posted_at)}">${escapeHtml(formatDateTime(c.posted_at))}</time>${edited}</div><div class="c-text">${escapeHtml(c.body)}</div><div class="c-foot">${scoreHtml(c.score)}<span class="c-votes">賛成 ${escapeHtml(c.up_count)} ・ 反対 ${escapeHtml(c.down_count)}</span></div></div></article>`;
+}
+
+/** コメントを読み込んで描く。記事が読めればコメントも読める(閲覧範囲は記事と同じ)。 */
+async function loadComments(slug, page, appending) {
+  const list = document.getElementById('comment-list');
+  const more = document.getElementById('comment-more');
+  if (!list) return;
+  let data;
+  try {
+    data = await get(`/api/articles/${encodeURIComponent(slug)}/comments${qs({ page })}`);
+  } catch (e) {
+    list.innerHTML = '<p class="c-empty">コメントを読み込めませんでした。</p>';
+    return;
+  }
+  const items = Array.isArray(data.items) ? data.items : [];
+  const html = items.map(commentHtml).join('');
+  if (appending) list.insertAdjacentHTML('beforeend', html);
+  // まだ 1 件も無い記事では、コメントが「書ける場所」を示さないと、読者はここが読み取り専用の写しであることに気付けない(書く導線は下の CTA が出す)。
+  else list.innerHTML = html || `<p class="c-empty">まだコメントはありません。${data.thread_url ? 'Discord のスレッドが最初のコメントを待っています。' : ''}</p>`;
+
+  const shown = list.querySelectorAll('.c-item').length;
+  if (more) {
+    const cta = data.thread_url
+      ? `<a class="btn-discord" href="${escapeHtml(data.thread_url)}" target="_blank" rel="noopener noreferrer">Discord でコメントする</a>`
+      : '';
+    const rest = data.total - shown;
+    const moreBtn = rest > 0 ? `<button type="button" id="c-more" data-page="${escapeHtml(page + 1)}">残り ${escapeHtml(rest)} 件を読む</button>` : '';
+    more.innerHTML = `${moreBtn}${cta}`;
+  }
+}
+
+function articleHtml(a, revisions) {
+  const parts = [];
+
+  const crumbs = ['<a href="/">トップ</a>', `<a href="/categories/${encodeURIComponent(a.category.slug)}">${escapeHtml(a.category.name)}</a>`];
+  // 連載には専用のページが無いため、パンくずでは文字のみで示す(同じ連載の記事はサイドバーから辿れる)。
+  if (a.series) crumbs.push(`連載「${escapeHtml(a.series.title)}」`);
+  crumbs.push(escapeHtml(a.title));
+  parts.push(`<div class="breadcrumb">${crumbs.join('<span>›</span>')}</div>`);
+
+  // 報道社ブランドを記事の冒頭に大きく置く。記事は 報道社 × 記者 の二重署名であり、社が主・記者が従である。署名は公開時に凍結されるため、記者が移籍しても過去記事のこの表示は動かない。
+  if (a.publisher) {
+    const p = a.publisher;
+    const label = p.stance === 'state' ? '配信 ・ 国営メディア' : '配信';
+    const state = p.stance === 'state' ? `<span class="state">${escapeHtml(STANCE_LABELS.state)}</span>` : '';
+    parts.push(`<div class="pub-head">${pubLogoHtml(p)}<div><div class="label">${escapeHtml(label)}</div><span class="publisher"><a class="name" href="/publishers/${encodeURIComponent(p.slug)}">${escapeHtml(p.name)}</a>${state}</span></div><a class="btn follow" href="/publishers/${encodeURIComponent(p.slug)}">この社の記事</a></div>`);
+  }
+
+  parts.push(`<h1>${escapeHtml(a.title)}</h1>`);
+  if (a.excerpt) parts.push(`<p class="lede">${escapeHtml(a.excerpt)}</p>`);
+
+  // 署名。byline_mode が publisher の記事は記者名を出さない(相場表のような記事に個人名が出るのは不自然なため)。author_id は保持されており、監査では追える。
+  const byline = [];
+  if (a.byline_mode !== 'publisher') {
+    byline.push(`<span class="author">${avatarHtml(a.author)}${escapeHtml(displayName(a.author))}</span>`);
+  }
+  byline.push(visibilityBadgeHtml(a.visibility));
+  if (a.is_breaking) byline.push('<span class="badge breaking">速報</span>');
+  // 記事広告の開示は帯でも出すが、署名の行にも塗りのバッジで置く。閲覧範囲(輪郭)と扱いを分けているため、開示が閲覧範囲の列に埋もれない。
+  if (a.is_sponsored) byline.push('<span class="badge sponsored">広告</span>');
+  if (a.published_at) {
+    byline.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))} 公開</time>`);
+  }
+  if (a.status !== 'published') {
+    const label = STATUS_LABELS[a.status] || a.status;
+    const at = a.status === 'scheduled' && a.scheduled_at ? `(${escapeHtml(formatDateTime(a.scheduled_at))})` : '';
+    byline.push(`<span>${escapeHtml(label)}${at}</span>`);
+  }
+  if (revisions.length) byline.push(`<span>改版 ${escapeHtml(revisions[revisions.length - 1].revision_number)}</span>`);
+  parts.push(`<div class="byline">${byline.join('')}</div>`);
+
+  // 訂正は末尾の改版表示とは別に、本文の冒頭で明示する。こっそりした書き換えを読者が検出できることが、複数の報道社が集まる場での信頼の基盤になる。単なる更新と訂正はここで区別される。
+  const corrections = a.corrections || [];
+  if (corrections.length) {
+    const items = corrections.map((c) => {
+      const note = c.note ? escapeHtml(c.note) : 'この記事の記述を訂正しました。';
+      const diff = c.revision_number > 1 ? ` ・ <a href="#revisions" data-diff="${escapeHtml(c.revision_number)}">訂正前との差分を表示</a>` : '';
+      return `<div>${note}(${escapeHtml(formatDateTime(c.created_at))})${diff}</div>`;
+    }).join('');
+    parts.push(`<div class="correction"><div class="head">この記事は訂正されました</div>${items}</div>`);
+  }
+
+  // 記事広告(タイアップ記事)の開示。広告主名まで出して初めて開示になるため、両方を必ず描く。この帯は本文の HTML の外側にあり、執筆者の記法では消せない。
+  if (a.is_sponsored) {
+    parts.push(`<div class="sponsor-disclosure"><span class="badge sponsored">広告</span><div>この記事は <b>${escapeHtml(a.sponsor_name || '広告主')}</b> の提供による記事広告です。</div></div>`);
+  }
+
+  if (a.series) {
+    const pos = a.series_position ? `<div class="pos">第 ${escapeHtml(a.series_position)} 回</div>` : '';
+    parts.push(`<div class="series-banner"><div class="cover ph" id="series-cover"></div><div><div class="label">連載</div><div class="name">${escapeHtml(a.series.title)}</div>${pos}</div></div>`);
+  }
+
+  // 本文。body_html はサーバーがレンダリングし nh3 でサニタイズしたものであり、危険なタグ・属性・スキームは既に落ちている。そのため生の HTML として差し込む(ここで再度エスケープすると、記事の見出しや表がそのまま文字として出てしまう)。
+  parts.push(`<div class="prose">${a.body_html || ''}</div>`);
+
+  // 記事内の広告枠。本文と誤読されない境界と「広告」ラベルは style.css の .adslot が描く。
+  parts.push('<div class="adslot article-inline" id="ad-inline"><div class="creative"></div></div>');
+
+  const tags = a.tags || [];
+  if (tags.length) {
+    const chips = tags.map((t) => {
+      const icon = t.icon_url ? `<span class="tag-icon ph" ${bgStyle(t.icon_url)}></span>` : '';
+      return `<a href="/tags/${encodeURIComponent(t.slug)}">${icon}# ${escapeHtml(t.name)}</a>`;
+    }).join('');
+    parts.push(`<div class="tags">${chips}</div>`);
+  }
+
+  // Discord の賛否とコメント。投票もコメントも実体は Discord 側にあり、数はいずれも通知メッセージ側の集計であるため、複数のチャンネルへ通知された記事では全通知の合計になる。
+  const posts = Array.isArray(a.discord_posts) ? a.discord_posts : [];
+  const thread = posts.find((p) => p && p.thread_url);
+  // スレッドへの導線は、記事の応答が通知メッセージの参照を持つときにだけ出す。Discord のスレッド URL には guild の ID が要り、フロントエンドはそれを知る手段を持たないため、URL はサーバーが組み立てたものを受け取る。
+  const cta = thread ? `<a class="btn-discord cta" href="${escapeHtml(thread.thread_url)}" target="_blank" rel="noopener noreferrer">スレッドを開く</a>` : '';
+  const channels = posts.length
+    ? `${escapeHtml(posts.length)} チャンネルへ通知されています。点数とコメント数は全通知の合計です。`
+    : '点数とコメント数は、この記事の通知メッセージ全ての合計です。';
+  parts.push(`<div class="discord-box"><div class="head">🎮 この記事への投票・コメントは Discord で</div><div class="stats"><div class="stat">${scoreHtml(a.score)}<span>賛成 ${escapeHtml(a.up_count)} ・ 反対 ${escapeHtml(a.down_count)}</span></div><div class="stat"><b>${escapeHtml(a.comment_count)}</b><span>💬 コメント</span></div>${cta}</div><div class="channels">${channels}</div></div>`);
+
+  parts.push('<section class="comments" id="comments"><h2>コメント</h2><div id="comment-list" class="c-list">読み込み中…</div><div id="comment-more"></div></section>');
+
+  if (revisions.length) {
+    const last = revisions[revisions.length - 1];
+    parts.push(`<div class="revision" id="revisions">最終更新: ${escapeHtml(formatDateTime(a.updated_at))}(改版 ${escapeHtml(last.revision_number)}) ・ <a href="#revisions" id="rev-toggle">改版履歴を見る</a></div><div id="rev-list" style="display:none"></div><div id="rev-diff" style="display:none"></div>`);
+  } else {
+    parts.push(`<div class="revision">最終更新: ${escapeHtml(formatDateTime(a.updated_at))}</div>`);
+  }
+
+  return parts.join('');
+}
+
+/** 改版履歴の一覧。誰の名前で書かれたか(editor)と、いつ何を直したか(note / is_correction)を並べる。 */
+function revisionListHtml(revisions) {
+  const items = revisions.slice().reverse().map((r) => {
+    const bits = [`改版 ${escapeHtml(r.revision_number)}`, escapeHtml(formatDateTime(r.created_at)), escapeHtml(displayName(r.editor))];
+    if (r.is_correction) bits.push('訂正');
+    if (r.note) bits.push(escapeHtml(r.note));
+    if (r.revision_number > 1) bits.push(`<a href="#revisions" data-diff="${escapeHtml(r.revision_number)}">差分</a>`);
+    return `<li>${bits.join(' ・ ')}</li>`;
+  }).join('');
+  return `<div class="revision"><ul>${items}</ul></div>`;
+}
+
+/** 直前の版との差分を出す。訂正が何を書き換えたのかを読者が自分で確かめられるようにするため、記事面から直接開けるようにする。 */
+async function showDiff(revisionNumber) {
+  const box = document.getElementById('rev-diff');
+  if (!box) return;
+  box.style.display = '';
+  box.innerHTML = '<div class="revision">差分を読み込んでいます…</div>';
+  try {
+    const d = await get(`/api/articles/${encodeURIComponent(slug)}/revisions/${encodeURIComponent(String(revisionNumber))}/diff`);
+    const head = d.previous_revision_number
+      ? `改版 ${escapeHtml(d.previous_revision_number)} → 改版 ${escapeHtml(d.revision_number)} の差分`
+      : `改版 ${escapeHtml(d.revision_number)}(初版)`;
+    const body = (d.diff || []).join('\n');
+    box.innerHTML = `<div class="revision">${head}</div><div class="prose"><pre><code>${escapeHtml(body)}</code></pre></div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="revision">差分を取得できませんでした: ${escapeHtml(errorText(e))}</div>`;
+  }
+  // 訂正の帯から開いた場合、差分は記事の末尾に出るため、そこまで運ぶ。開いたのに何も変わらないように見えてはならない。
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+/* ============================================================
+   サイドバー
+   ============================================================ */
+
+async function renderSide(a) {
+  const cards = [];
+
+  // 報道社。実績と所属記者の数は報道社ページの応答から取る。
+  if (a.publisher) {
+    let detail = null;
+    try {
+      detail = await get(`/api/publishers/${encodeURIComponent(a.publisher.slug)}`);
+    } catch (e) {
+      detail = null;
+    }
+    const bits = [STANCE_LABELS[a.publisher.stance] || a.publisher.stance];
+    if (detail && detail.stats) bits.push(`記事 ${detail.stats.article_count} 本`);
+    if (detail && detail.members) bits.push(`記者 ${detail.members.length} 人`);
+    cards.push(`<section class="card"><div class="section-head"><h2>報道社</h2></div><div style="display:flex; gap:12px; align-items:center; padding:14px 16px;">${pubLogoHtml(a.publisher)}<div><a class="s-title" href="/publishers/${encodeURIComponent(a.publisher.slug)}">${escapeHtml(a.publisher.name)}</a><div class="s-count">${escapeHtml(bits.join(' ・ '))}</div></div></div></section>`);
+  }
+
+  // 執筆者。署名が報道社のみの記事では出さない(表示から記者を外した記事で、脇から記者名が出てしまう)。
+  if (a.byline_mode !== 'publisher') {
+    const sub = a.publisher ? escapeHtml(a.publisher.name) : '';
+    cards.push(`<section class="card"><div class="section-head"><h2>執筆者</h2></div><div style="display:flex; gap:12px; align-items:center; padding:14px 16px;">${avatarHtml(a.author)}<div><div class="s-title">${escapeHtml(displayName(a.author))}</div><div class="s-count">${sub}</div></div></div></section>`);
+  }
+
+  // 同じ連載の記事。連載の専用ページが無いため、連載内の移動はここが担う。
+  if (a.series) {
+    // 連載のカバー画像は記事の応答に含まれないため、連載を引いて記事冒頭のバナーへ後から入れる。
+    try {
+      const series = await get(`/api/series/${encodeURIComponent(a.series.slug)}`);
+      const cover = document.getElementById('series-cover');
+      if (cover && series && series.cover_image_url) cover.style.backgroundImage = `url("${String(series.cover_image_url).replace(/[\\"]/g, '\\$&')}")`;
+    } catch (e) {
+      // カバーが引けなくても、バナーは灰色の枠のまま成立する。
+    }
+    let siblings = [];
+    try {
+      siblings = asItems(await get('/api/articles' + qs({ series: a.series.slug, per_page: 20 })));
+    } catch (e) {
+      siblings = [];
+    }
+    if (siblings.length) {
+      siblings.sort((x, y) => (x.series_position || 0) - (y.series_position || 0));
+      const items = siblings.map((s) => {
+        const badge = s.series_position ? escapeHtml(s.series_position) : '−';
+        const when = s.published_at ? escapeHtml(formatDateTime(s.published_at)) : escapeHtml(STATUS_LABELS[s.status] || s.status);
+        return `<li><span class="rank-badge">${badge}</span><div><a class="r-title" href="${articleUrl(s.slug)}">${escapeHtml(s.title)}</a><div class="r-meta">${when}</div></div></li>`;
+      }).join('');
+      cards.push(`<section class="card"><div class="section-head"><h2>連載「${escapeHtml(a.series.title)}」</h2></div><ol class="ranking">${items}</ol></section>`);
+    }
+  }
+
+  cards.push('<div class="adslot sidebar card" id="ad-sidebar"><div class="creative"></div></div>');
+
+  // 人気のタグ。件数はタグの一覧が article_count を返すときにだけ出し、返さないときは順序も件数も主張しない。
+  try {
+    const tags = asItems(await get('/api/tags'));
+    if (tags.length) {
+      const hasCount = tags.some((t) => typeof t.article_count === 'number');
+      const sorted = hasCount ? tags.slice().sort((x, y) => (y.article_count || 0) - (x.article_count || 0)) : tags;
+      const chips = sorted.slice(0, 12).map((t) => {
+        const icon = t.icon_url ? `<span class="tag-icon ph" ${bgStyle(t.icon_url)}></span>` : '';
+        const count = typeof t.article_count === 'number' ? ` <b>${escapeHtml(t.article_count)}</b>` : '';
+        return `<a href="/tags/${encodeURIComponent(t.slug)}">${icon}#${escapeHtml(t.name)}${count}</a>`;
+      }).join('');
+      cards.push(`<section class="card"><div class="section-head"><h2>${hasCount ? '人気のタグ' : 'タグ'}</h2></div><div class="tagcloud">${chips}</div></section>`);
+    }
+  } catch (e) {
+    // タグを引けなくても記事の表示は続ける。
+  }
+
+  // 報道社ランキング。投票もコメントも Discord へ委譲しているため、その写しの集計だけで出せる。
+  try {
+    const ranking = asItems(await get('/api/rankings/publishers' + qs({ days: 7, limit: 5 })));
+    if (ranking.length) {
+      const items = ranking.map((r, i) => {
+        const p = r.publisher;
+        const meta = `記事 ${escapeHtml(r.article_count)} 本 ・ ▲ ${escapeHtml(r.up_count)} ・ 💬 ${escapeHtml(r.comment_count)}`;
+        return `<li><span class="rank-badge">${i + 1}</span>${pubLogoHtml(p)}<div><a class="p-name" href="/publishers/${encodeURIComponent(p.slug)}">${escapeHtml(p.name)}</a><div class="p-meta">${meta}</div></div><span class="p-score">${escapeHtml(r.score)}</span></li>`;
+      }).join('');
+      cards.push(`<section class="card"><div class="section-head"><h2>報道社ランキング</h2><span class="more">過去 7 日</span></div><ol class="pub-ranking">${items}</ol></section>`);
+    }
+  } catch (e) {
+    // ランキングを引けなくても記事の表示は続ける。
+  }
+
+  document.getElementById('side').innerHTML = cards.join('');
+  await renderAdSlot(document.getElementById('ad-sidebar'), 'sidebar');
+}
+
+/* ============================================================
+   読み込み
+   ============================================================ */
+
+function renderError(e) {
+  const missing = e instanceof ApiError && (e.status === 401 || e.status === 404);
+  const back = location.pathname + location.search;
+  // 閲覧できない記事は 404 になる(存在を教えないため)。読者にはその可能性も併せて示すが、この記事があるともないとも言わない。
+  const hint = missing
+    ? `<p class="lede">URL が誤っているか、この記事が閲覧できる範囲にない可能性があります。</p><a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`
+    : `<p class="lede">${escapeHtml(errorText(e))}</p>`;
+  document.getElementById('article').innerHTML = `<h1>記事を表示できません</h1>${hint}`;
+}
+
+async function main() {
+  let article = null;
+  try {
+    article = await get(`/api/articles/${encodeURIComponent(slug)}`);
+  } catch (e) {
+    renderError(e);
+    await renderChrome(null);
+    return;
+  }
+
+  document.title = `${article.title} | instant-news`;
+
+  // 改版履歴は、改版の数と最終更新の表示、および訂正の差分に使う。引けない場合でも記事本体は出す。
+  let revisions = [];
+  try {
+    revisions = asItems(await get(`/api/articles/${encodeURIComponent(slug)}/revisions`));
+  } catch (e) {
+    revisions = [];
+  }
+  revisions.sort((x, y) => x.revision_number - y.revision_number);
+
+  const root = document.getElementById('article');
+  root.innerHTML = articleHtml(article, revisions);
+
+  root.addEventListener('click', (ev) => {
+    const diffLink = ev.target.closest('[data-diff]');
+    if (diffLink) {
+      ev.preventDefault();
+      showDiff(diffLink.dataset.diff);
+      return;
+    }
+    if (ev.target.closest('#rev-toggle')) {
+      ev.preventDefault();
+      const list = document.getElementById('rev-list');
+      if (!list) return;
+      const opening = list.style.display === 'none';
+      list.style.display = opening ? '' : 'none';
+      if (opening && !list.innerHTML) list.innerHTML = revisionListHtml(revisions);
+    }
+  });
+
+  const more = document.getElementById('comment-more');
+  if (more) {
+    more.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('#c-more');
+      if (!btn) return;
+      await loadComments(slug, Number(btn.dataset.page) || 2, true);
+    });
+  }
+  // コメントは記事本体より後で読む。件数が多く、記事が出るまでの時間を延ばす理由が無い。
+  loadComments(slug, 1, false);
+
+  await Promise.all([
+    renderChrome(article.category.slug),
+    renderSide(article),
+    renderAdSlot(document.getElementById('ad-inline'), 'article_inline'),
+  ]);
+}
+
+main();
+</script>
+
+</body>
+</html>

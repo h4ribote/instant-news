@@ -1,0 +1,1283 @@
+/*
+ * instant-news — デザインサンプル用スタイルシート
+ *
+ * Yahoo!ニュース(news.yahoo.co.jp)のトップページのレイアウト・配色・情報配置を参照し、
+ * instant-news のドメイン(Discord 認証・報道社・カテゴリ・タグ・閲覧範囲・
+ * Discord リアクション/スレッド・広告)へ置き換えたデザイン検討用のサンプル。
+ * ビルド不要の素の HTML/CSS で構成する。
+ *
+ * グローバルナビの主役はカテゴリ(記事の主分類、単一必須)。機能系の導線(タグ/連載/記事を書く)は
+ * 右側に寄せる。タグは数が可変でナビに列挙できないため、トピック別に辿る入口は
+ * サイドバーの「人気のタグ」・トップの「トレンドタグ」・記事メタ行のタグが担う。
+ *
+ * 配色はライト/ダークの両対応。OS の設定(prefers-color-scheme)に従い、
+ * data-theme 属性による手動トグルがそれを上書きする。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ブランド */
+  --brand-red: #ff0033;      /* ロゴ */
+  --discord: #5865f2;        /* Discord ブランドカラー(ログイン導線) */
+  --discord-hover: #4752c4;
+
+  /* ナビゲーション */
+  --nav-bg: #44739c;         /* グローバルナビの青帯 */
+  --nav-bg-hover: #3a648a;
+  --nav-bg-active: #2f5d86;  /* 現在地の項目 */
+
+  /* テキスト・リンク */
+  --link: #0033cc;
+  --link-visited: #551a8b;
+  --ink: #333333;            /* 本文 */
+  --ink-strong: #131924;     /* 強調見出し */
+  --muted: #767676;          /* 出典・日時などのメタ */
+
+  /* アクセント */
+  --rank: #f14b43;           /* ランキング番号・NEW バッジ */
+  --breaking: #d6001c;       /* 速報 */
+  --sponsored: #a15c00;      /* 記事広告の開示。閲覧範囲バッジと混同されないよう塗りで出す。 */
+
+  /* 面・罫線 */
+  --page-bg: #f4f4f4;
+  --surface: #ffffff;
+  --surface-2: #fafafa;      /* 引用・入力欄などの一段沈んだ面 */
+  --line: #e6e6e6;
+  --line-strong: #d6d6d6;
+  --chip-bg: #eef1f6;
+  --chip-bg-hover: #e2e8f2;
+  --code-bg: #f2f2f4;
+  --th-bg: #f5f5f5;
+  --ph-bg: #dfe3e8;          /* 画像プレースホルダー */
+  --rank-badge-bg: #b8b8b8;
+  --accent-bg: #f7f5ff;      /* 連載バナーなどの淡い帯 */
+  --accent-line: #e4defb;
+
+  /* 閲覧範囲(visibility)バッジ */
+  --vis-public: #2b8a3e;     /* 全体公開 */
+  --vis-members: #6741d9;    /* メンバー限定 */
+  --vis-restricted: #e8590c; /* ロール限定 */
+
+  /* 投票(:arrow_up: / :arrow_down:)。賛否は色だけで伝えず、▲▼ の記号を併記する(色覚に依らず読めるようにするため)。 */
+  --vote-up: #2b8a3e;
+  --vote-down: #c92a2a;
+
+  /* 注意喚起(訂正・警告) */
+  --warn-bg: #fff8e1;
+  --warn-line: #f0d68a;
+  --warn-ink: #8a6100;
+
+  --content-w: 990px;
+  --radius: 4px;
+}
+
+/*
+ * ダークテーマ。OS 設定と手動トグルの両方から適用する。
+ * 同じ値を 2 箇所に書いているのは、メディアクエリと属性セレクタを 1 つの規則にまとめられないため。
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --nav-bg: #22384a;
+    --nav-bg-hover: #2c485e;
+    --nav-bg-active: #35576f;
+    --link: #7db3ff;
+    --link-visited: #c4a5e8;
+    --ink: #d6d9de;
+    --ink-strong: #f2f4f7;
+    --muted: #8f959e;
+    --rank: #ff6b62;
+    --breaking: #ff4d5e;
+    --sponsored: #e0a94a;
+    --page-bg: #0f1216;
+    --surface: #171b21;
+    --surface-2: #1e232b;
+    --line: #2a3038;
+    --line-strong: #3a424c;
+    --chip-bg: #232b35;
+    --chip-bg-hover: #2c3742;
+    --code-bg: #232830;
+    --th-bg: #1f242c;
+    --ph-bg: #2a3038;
+    --rank-badge-bg: #4a525c;
+    --accent-bg: #1e1b2b;
+    --accent-line: #322c48;
+    --vis-public: #5cc26e;
+    --vis-members: #a58bf0;
+    --vis-restricted: #ff9248;
+    --vote-up: #5cc26e;
+    --vote-down: #ff6b6b;
+    --warn-bg: #2b2415;
+    --warn-line: #55431c;
+    --warn-ink: #e8c169;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --nav-bg: #22384a;
+  --nav-bg-hover: #2c485e;
+  --nav-bg-active: #35576f;
+  --link: #7db3ff;
+  --link-visited: #c4a5e8;
+  --ink: #d6d9de;
+  --ink-strong: #f2f4f7;
+  --muted: #8f959e;
+  --rank: #ff6b62;
+  --breaking: #ff4d5e;
+  --sponsored: #e0a94a;
+  --page-bg: #0f1216;
+  --surface: #171b21;
+  --surface-2: #1e232b;
+  --line: #2a3038;
+  --line-strong: #3a424c;
+  --chip-bg: #232b35;
+  --chip-bg-hover: #2c3742;
+  --code-bg: #232830;
+  --th-bg: #1f242c;
+  --ph-bg: #2a3038;
+  --rank-badge-bg: #4a525c;
+  --accent-bg: #1e1b2b;
+  --accent-line: #322c48;
+  --vis-public: #5cc26e;
+  --vis-members: #a58bf0;
+  --vis-restricted: #ff9248;
+  --vote-up: #5cc26e;
+  --vote-down: #ff6b6b;
+  --warn-bg: #2b2415;
+  --warn-line: #55431c;
+  --warn-ink: #e8c169;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--ink);
+  font-family: "ヒラギノ角ゴ Pro W3", "Hiragino Kaku Gothic Pro", メイリオ, Meiryo, "Segoe UI", Osaka, "MS PGothic", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+img { max-width: 100%; display: block; }
+
+.container {
+  width: var(--content-w);
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 0 15px;
+}
+
+/* ============================================================
+   ヘッダー
+   ============================================================ */
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+.topbar .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+}
+.topbar .promo { color: var(--ink); }
+.topbar nav a { color: var(--muted); margin-left: 16px; }
+
+.masthead { background: var(--surface); }
+.masthead .container {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+.logo {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+.logo .mark {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  color: var(--brand-red);
+}
+.logo .mark span { color: var(--ink-strong); }
+.logo .tag {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.search {
+  flex: 1;
+  display: flex;
+  max-width: 520px;
+}
+.search input {
+  flex: 1;
+  height: 34px;
+  border: 2px solid var(--nav-bg);
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  padding: 0 12px;
+  font-size: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  outline: none;
+}
+.search button {
+  width: 46px;
+  border: none;
+  background: var(--nav-bg);
+  color: #fff;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.masthead .actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+.btn-discord {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 14px;
+  background: var(--discord);
+  color: #fff;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 700;
+}
+.btn-discord:hover { text-decoration: none; background: var(--discord-hover); }
+.icon-btn {
+  width: 34px; height: 34px;
+  display: grid; place-items: center;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  font-size: 16px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.icon-btn:hover { text-decoration: none; background: var(--chip-bg); }
+
+/* グローバルナビ(青帯 1 本)。主役はカテゴリ(記事の主分類)。機能系の導線は右へ寄せる。
+   現在地は背景の濃青と下線の二重で示す。 */
+.globalnav { background: var(--nav-bg); }
+.globalnav .container {
+  display: flex;
+  gap: 2px;
+  padding: 0 15px;
+  overflow-x: auto;
+}
+.globalnav a {
+  color: #fff;
+  padding: 10px 18px;
+  font-size: 15px;
+  font-weight: 700;
+  border-bottom: 3px solid transparent;
+  white-space: nowrap;
+}
+.globalnav a:hover { background: var(--nav-bg-hover); text-decoration: none; }
+.globalnav a.active {
+  background: var(--nav-bg-active);
+  border-bottom-color: #fff;
+}
+.globalnav .spacer { flex: 1; }
+/* 機能系の導線。カテゴリと同じ帯に置くが、区切りを入れて別種であることを示す。 */
+.globalnav a.util {
+  font-weight: 400;
+  font-size: 13px;
+  opacity: 0.9;
+}
+.globalnav a.write { font-weight: 700; }
+
+/* ============================================================
+   広告枠
+   ============================================================
+   「広告」ラベルはコアが必ず描画し、外部の広告管理アプリや広告主が消せない。
+   ニュースであり、かつ複数の報道社が加盟する場であるため、
+   広告が見出しと見分けられない状態は記事の信頼性を直接損なう。装飾ではなく要件。 */
+.adslot {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.adslot::after {
+  content: "広告";
+  position: absolute;
+  right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 2px 0 0 0;
+  pointer-events: none;
+}
+.adslot .creative {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+/* 枠ごとの推奨寸法。ad_slots の recommended_width / recommended_height に対応する。 */
+.adslot.header .creative { height: 90px; }
+.adslot.article-inline .creative { height: 120px; }
+.adslot.sidebar .creative { height: 250px; }
+
+.adslot.header { margin: 20px 0 0; }
+.adslot.article-inline { margin: 28px 0; }
+
+/* ============================================================
+   本体レイアウト(左:メイン / 右:サイドバー)
+   ============================================================ */
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 24px;
+  padding: 20px 0 48px;
+  align-items: start;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+}
+.card > .body { padding: 8px 16px 16px; }
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.section-head h2 {
+  margin: 0;
+  font-size: 17px;
+  color: var(--ink-strong);
+}
+.section-head .more { font-size: 13px; }
+
+/* ============================================================
+   速報帯
+   ============================================================
+   一覧内でバッジだけでは埋もれるため、トップに専用の帯を置く。 */
+.breaking-band {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--breaking);
+  border-left: 5px solid var(--breaking);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+.breaking-band .label {
+  flex: none;
+  background: var(--breaking);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  padding: 4px 10px;
+  border-radius: 2px;
+}
+.breaking-band .headline {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink-strong);
+  line-height: 1.4;
+}
+.breaking-band .headline:hover { color: var(--link); }
+.breaking-band time { margin-left: auto; font-size: 12px; color: var(--muted); flex: none; }
+
+/* ============================================================
+   トピックス(見出しリスト + 注目記事)
+   ============================================================ */
+.topics { display: grid; grid-template-columns: 1fr 300px; gap: 20px; }
+.topics .headlines { list-style: none; margin: 0; padding: 0; }
+.topics .headlines li {
+  border-bottom: 1px dotted var(--line-strong);
+}
+.topics .headlines li:last-child { border-bottom: none; }
+.topics .headlines a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 4px;
+  font-size: 15px;
+  color: var(--link);
+  line-height: 1.4;
+}
+.topics .headlines a::before {
+  content: "";
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--nav-bg);
+  flex: none;
+}
+
+.featured a { color: var(--link); }
+.featured .thumb { height: 168px; border-radius: var(--radius); }
+.featured .caption { padding-top: 8px; font-size: 14px; line-height: 1.5; }
+
+.topics-footer {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+}
+
+/* ============================================================
+   バッジ
+   ============================================================
+   閲覧範囲は輪郭のみ、開示(広告)と速報は塗り。
+   記事広告の開示が閲覧範囲バッジの列に埋もれてはならないため、扱いを分ける。 */
+.badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 2px;
+  vertical-align: middle;
+  white-space: nowrap;  /* 「メンバー限定」等が 2 行に割れると見出しの行送りが乱れる */
+}
+.badge.new { background: var(--rank); color: #fff; }
+.badge.breaking { background: var(--breaking); color: #fff; letter-spacing: 0.5px; }
+.badge.sponsored { background: var(--sponsored); color: #fff; }
+:root[data-theme="dark"] .badge.sponsored { color: #1a1204; }
+.badge.vis-public { color: var(--vis-public); border: 1px solid currentColor; }
+.badge.vis-members { color: var(--vis-members); border: 1px solid currentColor; }
+.badge.vis-restricted { color: var(--vis-restricted); border: 1px solid currentColor; }
+
+/* ============================================================
+   報道社ブランド
+   ============================================================
+   記事は 報道社 × 記者 の二重署名。社を主、記者を従として出す。
+   所属は Discord のロールで決まるが、署名は公開時に凍結される
+   (記者が移籍しても過去記事の署名は変わらない)。 */
+.publisher {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-weight: 700;
+}
+.publisher:hover { color: var(--link); text-decoration: none; }
+.pub-logo {
+  width: 20px; height: 20px;
+  border-radius: 3px;
+  display: grid; place-items: center;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  flex: none;
+}
+.publisher .state {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  padding: 1px 4px;
+}
+
+/* ============================================================
+   トレンドタグ
+   ============================================================ */
+.trend .body { padding-top: 12px; }
+.trend ol {
+  list-style: none;
+  margin: 0; padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 4px 24px;
+}
+.trend li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dotted var(--line);
+}
+.trend .rank {
+  font-weight: 800;
+  color: var(--muted);
+  min-width: 16px;
+}
+.trend li:nth-child(-n+3) .rank { color: var(--rank); }
+.trend .kw { color: var(--link); font-size: 15px; font-weight: 700; }
+.trend .count { color: var(--muted); font-size: 11px; margin-left: auto; }
+
+/* ============================================================
+   記事リスト(サムネ + 見出し + メタ)
+   ============================================================ */
+.articles { list-style: none; margin: 0; padding: 0; }
+.articles > li { border-bottom: 1px solid var(--line); }
+.articles > li:last-child { border-bottom: none; }
+.article-row {
+  display: grid;
+  grid-template-columns: 128px 1fr;
+  gap: 14px;
+  padding: 14px 4px;
+  align-items: start;
+}
+.article-row .thumb { height: 82px; border-radius: var(--radius); }
+.article-row .title {
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--link);
+  margin: 0 0 8px;
+  font-weight: 400;
+}
+.article-row .title:hover { text-decoration: underline; }
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.meta .author {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink);
+}
+.meta .publisher { font-size: 12px; }
+.avatar {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  flex: none;
+}
+.meta .thread::before { content: "💬 "; }
+.cat-chip {
+  color: var(--nav-bg);
+  border: 1px solid var(--nav-bg);
+  padding: 1px 7px;
+  border-radius: 2px;
+  font-size: 11px;
+  font-weight: 700;
+}
+:root[data-theme="dark"] .cat-chip { color: var(--link); border-color: var(--link); }
+.cat-chip:hover { text-decoration: none; background: var(--chip-bg); }
+.tag-chip {
+  color: var(--nav-bg);
+  background: var(--chip-bg);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+:root[data-theme="dark"] .tag-chip { color: var(--link); }
+.tag-chip:hover { text-decoration: none; background: var(--chip-bg-hover); }
+
+/* ============================================================
+   サイドバー
+   ============================================================ */
+.side .card { margin-bottom: 20px; }
+
+.login-card { text-align: center; }
+.login-card .body { padding: 18px 16px; }
+.login-card p { margin: 0 0 12px; font-size: 13px; color: var(--ink); }
+.login-card .btn-discord { width: 100%; justify-content: center; height: 40px; }
+
+/* 人気のタグ。タグは数が可変でナビに列挙できないため、トピック別に辿る入口はここが担う。
+   国もタグで表すため、アイコン(国旗)を伴う。 */
+.tagcloud { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 16px 16px; }
+.tagcloud a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--nav-bg);
+  background: var(--chip-bg);
+  padding: 5px 10px;
+  border-radius: 14px;
+}
+:root[data-theme="dark"] .tagcloud a { color: var(--link); }
+.tagcloud a:hover { text-decoration: none; background: var(--chip-bg-hover); }
+.tagcloud a b { color: var(--muted); font-weight: 400; margin-left: 3px; }
+.tag-icon {
+  width: 14px; height: 10px;
+  border-radius: 1px;
+  flex: none;
+}
+
+/* 番号付きランキング */
+.ranking { list-style: none; margin: 0; padding: 0; }
+.ranking li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.ranking li:last-child { border-bottom: none; }
+.rank-badge {
+  width: 20px; height: 20px;
+  background: var(--rank-badge-bg);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 2px;
+  display: grid; place-items: center;
+}
+.ranking li:nth-child(-n+3) .rank-badge { background: var(--rank); }
+.ranking .r-title {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.ranking .r-title:hover { color: var(--link); }
+.ranking .r-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.ranking .r-thumb { width: 52px; height: 52px; border-radius: var(--radius); }
+
+/* 報道社ランキング。
+   投票もコメントも Discord へ委譲しているため、その写しの集計で出せる。
+   社どうしの競争そのものがエンゲージメント源になる。 */
+.pub-ranking { list-style: none; margin: 0; padding: 0; }
+.pub-ranking li {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.pub-ranking li:last-child { border-bottom: none; }
+.pub-ranking .rank-badge { align-self: center; }
+.pub-ranking .pub-logo { width: 28px; height: 28px; font-size: 12px; border-radius: 4px; }
+.pub-ranking .p-name { font-size: 13px; font-weight: 700; color: var(--ink); line-height: 1.3; }
+.pub-ranking .p-name:hover { color: var(--link); }
+.pub-ranking .p-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.pub-ranking .p-score { font-size: 13px; font-weight: 800; color: var(--rank); }
+
+/* 連載(マガジン) */
+.series { list-style: none; margin: 0; padding: 0; }
+.series li {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.series li:last-child { border-bottom: none; }
+.series .cover { width: 64px; height: 44px; border-radius: var(--radius); }
+.series .s-title { font-size: 13px; color: var(--ink); font-weight: 700; line-height: 1.4; }
+.series .s-title:hover { color: var(--link); }
+.series .s-count { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* ============================================================
+   記事詳細(article.html)
+   ============================================================ */
+.breadcrumb {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 0 12px;
+}
+.breadcrumb a { color: var(--muted); }
+.breadcrumb span { margin: 0 6px; }
+
+.article { padding: 24px 28px 32px; }
+.article h1 {
+  font-size: 26px;
+  line-height: 1.4;
+  color: var(--ink-strong);
+  margin: 6px 0 12px;
+}
+/* リード文(excerpt)。見出しとメタ情報の間に置く。 */
+.lede {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+
+/* 記事冒頭の報道社ブランド。VOLTNEWS も記事冒頭にロゴ + 社名を大きく置いており、
+   これが通信社としての体裁を作っている。 */
+.pub-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 18px;
+}
+.pub-head .pub-logo { width: 40px; height: 40px; font-size: 15px; border-radius: 6px; }
+.pub-head .label { font-size: 11px; color: var(--muted); }
+.pub-head .name { font-size: 16px; font-weight: 800; color: var(--ink-strong); line-height: 1.3; }
+.pub-head .name:hover { color: var(--link); }
+.pub-head .follow { margin-left: auto; }
+
+.byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--muted);
+}
+.byline .author { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 700; }
+.byline .author .avatar { width: 28px; height: 28px; font-size: 13px; }
+
+/* 記事広告(タイアップ記事)の開示。
+   モデル化しない選択はタイアップ記事を防がず、開示だけを防いでしまうため、
+   明示的に扱ってコアが開示を担保する。埋もれてはならないので帯で出す。 */
+.sponsor-disclosure {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  padding: 12px 16px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-left: 5px solid var(--sponsored);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--warn-ink);
+}
+.sponsor-disclosure .badge { flex: none; }
+.sponsor-disclosure b { color: var(--ink-strong); }
+
+/* 訂正の明示。
+   改版履歴は VOLTNEWS が持てない差別化点。訂正が入った記事は末尾ではなく本文冒頭で明示する
+   (報道の説明責任として、単なる更新と訂正を区別する)。 */
+.correction {
+  margin: 18px 0;
+  padding: 12px 16px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-left: 5px solid var(--vis-restricted);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--warn-ink);
+}
+.correction .head { font-weight: 800; color: var(--ink-strong); margin-bottom: 4px; }
+.correction .head::before { content: "⚠ "; }
+.correction a { color: var(--link); }
+
+.series-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 18px 0;
+  padding: 12px 16px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-line);
+  border-left: 4px solid var(--vis-members);
+  border-radius: var(--radius);
+}
+.series-banner .cover { width: 56px; height: 40px; border-radius: 3px; }
+.series-banner .label { font-size: 11px; color: var(--vis-members); font-weight: 700; }
+.series-banner .name { font-size: 15px; font-weight: 700; color: var(--ink-strong); }
+.series-banner .pos { font-size: 12px; color: var(--muted); }
+
+/* 本文(GFM レンダリング結果) */
+.prose { font-size: 16px; line-height: 1.9; color: var(--ink); padding-top: 20px; }
+.prose > * { margin: 0 0 1.2em; }
+.prose h2 {
+  font-size: 21px;
+  color: var(--ink-strong);
+  border-bottom: 2px solid var(--line-strong);
+  padding-bottom: 8px;
+  margin-top: 1.8em;
+}
+.prose h3 { font-size: 18px; color: var(--ink-strong); margin-top: 1.6em; }
+.prose a { color: var(--link); text-decoration: underline; }
+.prose ul, .prose ol { padding-left: 1.6em; }
+.prose li { margin-bottom: 0.4em; }
+.prose blockquote {
+  margin-left: 0;
+  padding: 4px 16px;
+  border-left: 4px solid var(--line-strong);
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.prose code {
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.88em;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+.prose pre {
+  background: #1f2430;
+  color: #e6e6e6;
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+.prose pre code { background: none; padding: 0; color: inherit; font-size: 13.5px; }
+.prose img.figure { width: 100%; height: 260px; border-radius: 6px; }
+.prose figcaption { font-size: 12px; color: var(--muted); text-align: center; margin-top: 6px; }
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+}
+.prose th, .prose td { border: 1px solid var(--line-strong); padding: 8px 12px; text-align: left; }
+.prose th { background: var(--th-bg); }
+
+.tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0; }
+.tags a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--nav-bg);
+  background: var(--chip-bg);
+  padding: 5px 12px;
+  border-radius: 14px;
+}
+:root[data-theme="dark"] .tags a { color: var(--link); }
+.tags a:hover { text-decoration: none; background: var(--chip-bg-hover); }
+
+/* Discord 反応・スレッド */
+.discord-box {
+  margin-top: 24px;
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.discord-box .head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--discord);
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+}
+.discord-box .stats {
+  display: flex;
+  gap: 24px;
+  padding: 16px;
+  align-items: center;
+  background: var(--surface);
+}
+.discord-box .stat { text-align: center; }
+.discord-box .stat b { display: block; font-size: 22px; color: var(--ink-strong); }
+.discord-box .stat span { font-size: 11px; color: var(--muted); }
+.discord-box .cta { margin-left: auto; }
+/* 複数チャンネルへ通知された記事は、通知ごとに独立したスレッドとリアクションを持つ。
+   記事としての反応数はその合計。 */
+.discord-box .channels {
+  padding: 0 16px 14px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface);
+}
+
+/* 賛否の差し引き。記号(▲▼±)と色の両方で向きを示す。 */
+.score { font-variant-numeric: tabular-nums; }
+.score.up { color: var(--vote-up); }
+.score.down { color: var(--vote-down); }
+.score.zero { color: var(--muted); }
+
+/* コメント。実体は Discord のスレッドにあり、ここは読むだけの写しである(書く導線は Discord へ送る)。 */
+.comments { margin-top: 24px; }
+.comments h2 {
+  font-size: 15px;
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--line-strong);
+  color: var(--ink-strong);
+}
+.c-list { display: flex; flex-direction: column; gap: 2px; }
+.c-item {
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.c-item + .c-item { border-top: none; }
+.c-body { min-width: 0; flex: 1; }
+.c-head { display: flex; align-items: baseline; gap: 8px; font-size: 11px; color: var(--muted); }
+.c-name { font-weight: 700; color: var(--ink-strong); font-size: 12px; }
+.c-edited { font-size: 10px; }
+/* Discord の記法は解釈せずそのまま出す。改行だけは活かし、長い URL でも桁を溢れさせない。 */
+.c-text {
+  margin: 4px 0 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.c-foot { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.c-votes { color: var(--muted); }
+.c-empty { color: var(--muted); font-size: 13px; padding: 12px; background: var(--surface); border: 1px solid var(--line); }
+#comment-more { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+#comment-more button {
+  font: inherit;
+  font-size: 12px;
+  padding: 8px 14px;
+  color: var(--link);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  cursor: pointer;
+}
+#comment-more button:hover { background: var(--chip-bg); }
+
+.revision {
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.revision a { color: var(--link); }
+
+/* ============================================================
+   報道社ページ(publisher.html)
+   ============================================================ */
+.pub-hero {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 24px 28px;
+}
+.pub-hero .pub-logo { width: 72px; height: 72px; font-size: 26px; border-radius: 10px; }
+.pub-hero h1 { margin: 0 0 4px; font-size: 24px; color: var(--ink-strong); }
+.pub-hero .desc { font-size: 13px; color: var(--muted); margin: 0 0 8px; }
+.pub-hero .role-note {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--chip-bg);
+  border-radius: 3px;
+  padding: 3px 8px;
+  display: inline-block;
+}
+.pub-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid var(--line);
+}
+.pub-stats div {
+  text-align: center;
+  padding: 14px 8px;
+  border-right: 1px solid var(--line);
+}
+.pub-stats div:last-child { border-right: none; }
+.pub-stats b { display: block; font-size: 20px; color: var(--ink-strong); }
+.pub-stats span { font-size: 11px; color: var(--muted); }
+
+.member-list { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 16px 16px; }
+.member-list .m {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  background: var(--chip-bg);
+  border-radius: 14px;
+  padding: 4px 10px 4px 4px;
+  color: var(--ink);
+}
+
+/* ============================================================
+   タグページ(tag.html)。国のプロフィールとしても使う。
+   ============================================================ */
+.tag-hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 22px 28px;
+}
+.tag-hero .flag {
+  width: 72px; height: 48px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  flex: none;
+}
+.tag-hero h1 { margin: 0 0 4px; font-size: 24px; color: var(--ink-strong); }
+.tag-hero .desc { font-size: 13px; color: var(--muted); margin: 0; }
+.tag-hero .subscribe { margin-left: auto; flex: none; }
+
+/* タグの年表。タグで絞った記事を時系列に並べる。Marv では国史になる。
+   VOLTNEWS は時系列で辿る手段を持たない。 */
+.timeline { list-style: none; margin: 0; padding: 16px 16px 20px 16px; position: relative; }
+.timeline::before {
+  content: "";
+  position: absolute;
+  left: 84px; top: 16px; bottom: 20px;
+  width: 2px;
+  background: var(--line-strong);
+}
+.timeline li {
+  display: grid;
+  grid-template-columns: 68px 24px 1fr;
+  gap: 0 8px;
+  align-items: baseline;
+  padding: 8px 0;
+}
+.timeline .t-date { font-size: 11px; color: var(--muted); text-align: right; }
+.timeline .t-dot { justify-self: center; position: relative; }
+.timeline .t-dot::before {
+  content: "";
+  position: absolute;
+  left: 50%; top: 6px;
+  transform: translateX(-50%);
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--nav-bg);
+  border: 2px solid var(--surface);
+}
+.timeline li.major .t-dot::before { background: var(--breaking); width: 12px; height: 12px; }
+.timeline .t-title { font-size: 14px; color: var(--link); line-height: 1.45; }
+.timeline .t-meta { font-size: 11px; color: var(--muted); }
+
+/* ============================================================
+   フォーム(エディタ・設定)
+   ============================================================ */
+.form-row { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.form-row:last-child { border-bottom: none; }
+.form-row > label.lbl {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-strong);
+  margin-bottom: 6px;
+}
+.form-row .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.form-row .cols { display: flex; gap: 12px; flex-wrap: wrap; }
+.form-row .cols > * { flex: 1; min-width: 160px; }
+
+input[type="text"], input[type="datetime-local"], select, textarea {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--nav-bg); }
+textarea { resize: vertical; line-height: 1.7; }
+textarea.md {
+  min-height: 300px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+}
+.btn:hover { text-decoration: none; background: var(--chip-bg); }
+.btn.primary { background: var(--nav-bg); border-color: var(--nav-bg); color: #fff; }
+.btn.primary:hover { background: var(--nav-bg-hover); }
+.btn.danger { color: var(--breaking); border-color: var(--breaking); }
+.btn.danger:hover { background: var(--warn-bg); }
+
+.radio-set { display: flex; flex-direction: column; gap: 8px; }
+.radio-set label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.radio-set .note { font-size: 11px; color: var(--muted); }
+
+.form-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 14px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.form-actions .spacer { flex: 1; }
+
+/* 画像の取り込み・アップロード */
+.dropzone {
+  border: 2px dashed var(--line-strong);
+  border-radius: 6px;
+  padding: 18px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.dropzone b { color: var(--ink-strong); display: block; margin-bottom: 4px; }
+
+/* 注意喚起。取り込み失敗・機密カバー・Discord URL の失効など。 */
+.notice {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  color: var(--warn-ink);
+  margin-top: 10px;
+}
+.notice .ic { flex: none; }
+.notice b { color: var(--ink-strong); }
+.notice.info {
+  background: var(--chip-bg);
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
+/* API キーの一覧 */
+.keys { width: 100%; border-collapse: collapse; font-size: 13px; }
+.keys th, .keys td {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 16px;
+  text-align: left;
+}
+.keys th { font-size: 11px; color: var(--muted); font-weight: 700; }
+.keys .prefix {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  color: var(--muted);
+}
+/* スコープ表示。キーの一覧の外(注意書きなど)でも使うため、.keys に閉じ込めない。 */
+.scope {
+  display: inline-block;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--chip-bg);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 1px 6px;
+  margin: 2px 4px 2px 0;
+}
+/* 管理者だけが発行できるスコープ。通常のスコープと見分けられるようにする。 */
+.scope.admin { color: var(--vis-restricted); border-color: currentColor; background: none; }
+
+.key-reveal {
+  margin: 0 16px 16px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--vis-public);
+  border-radius: var(--radius);
+}
+.key-reveal .head { font-size: 12px; font-weight: 700; color: var(--vis-public); margin-bottom: 6px; }
+.key-reveal .val {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+  color: var(--ink-strong);
+  word-break: break-all;
+}
+.key-reveal .note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+/* ============================================================
+   フッター
+   ============================================================ */
+.site-footer {
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+}
+.site-footer .container { padding-top: 24px; padding-bottom: 32px; }
+.site-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+.site-footer nav a { color: var(--ink); }
+.site-footer .copy { font-size: 12px; color: var(--muted); }
+
+/* サムネイル・アバターのプレースホルダー(画像未接続でも配置を確認できるように) */
+.thumb, .cover, .r-thumb, .figure, .flag { background: var(--ph-bg); }
+.ph { background-size: cover; background-position: center; }
+.g1 { background: linear-gradient(135deg, #5b8def, #7f53ac); }
+.g2 { background: linear-gradient(135deg, #f7971e, #ffd200); }
+.g3 { background: linear-gradient(135deg, #11998e, #38ef7d); }
+.g4 { background: linear-gradient(135deg, #ee0979, #ff6a00); }
+.g5 { background: linear-gradient(135deg, #2193b0, #6dd5ed); }
+.g6 { background: linear-gradient(135deg, #cc2b5e, #753a88); }
+.g7 { background: linear-gradient(135deg, #334d50, #cbcaa5); }
+.g8 { background: linear-gradient(135deg, #42275a, #734b6d); }
+.a1 { background: #5865f2; }
+.a2 { background: #2b8a3e; }
+.a3 { background: #e8590c; }
+.a4 { background: #1971c2; }
+.a5 { background: #c2255c; }
+/* 報道社ロゴ・国旗のプレースホルダー */
+.p1 { background: #1d4ed8; }
+.p2 { background: #b91c1c; }
+.p3 { background: #047857; }
+.p4 { background: #7c3aed; }
+.f-eng { background: linear-gradient(180deg, #fff 0 33%, #cf142b 33% 66%, #00247d 66%); }
+.f-jpn { background: radial-gradient(circle at 50% 50%, #bc002d 0 30%, #fff 30%); }
+.f-ned { background: linear-gradient(180deg, #ae1c28 0 33%, #fff 33% 66%, #21468b 66%); }
+.f-yar { background: linear-gradient(135deg, #f59e0b, #7c3aed); }
+
+/* ============================================================
+   レスポンシブ(狭幅ではサイドバーを畳む)
+   ============================================================ */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .topics { grid-template-columns: 1fr; }
+  .trend ol { grid-template-columns: 1fr; }
+  .search { display: none; }
+  .globalnav a { padding: 10px 14px; }
+  .pub-stats { grid-template-columns: repeat(2, 1fr); }
+  .pub-stats div:nth-child(2) { border-right: none; }
+  .breaking-band { flex-wrap: wrap; }
+  .breaking-band time { margin-left: 0; }
+  .timeline::before { left: 68px; }
+  .timeline li { grid-template-columns: 52px 24px 1fr; }
+}

@@ -1,1 +1,6 @@
-discord.py
+# 2.x に固定する。bot はゲートウェイのイベント名・raw イベントの持つ項目・intents のビットに依存しており、
+# それらは major 版の境界で変わりうる。上限が無いと、再ビルドしただけでイベントが静かに届かなくなる。
+discord.py>=2.7,<3
+pyyaml
+aiomysql
+cryptography

@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>記事を書く | instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="container">
+    <span class="promo">Discord のメンバーシップとロールに基づくニュースプラットフォームです</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord の報道社連合</span>
+    </a>
+    <!-- 検索はトップの一覧が担う(/?q= を読んで /api/search を引く)。素の GET のフォームにしてあるため、JavaScript が動かなくても検索へ行ける。 -->
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" placeholder="記事・タグ・報道社を検索" aria-label="記事を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <div class="actions">
+      <span id="account"></span>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<nav class="globalnav">
+  <div class="container" id="globalnav">
+    <a href="/">トップ</a>
+    <span class="spacer"></span>
+    <a href="/editor" class="write active">✍ 記事を書く</a>
+  </div>
+</nav>
+
+<main class="container layout" id="editor" style="display:none">
+  <!-- ===================== 本文の編集 ===================== -->
+  <div class="main">
+    <section class="card">
+      <div class="section-head">
+        <h2>記事を書く</h2>
+        <span class="badge vis-members" id="status-badge">下書き</span>
+      </div>
+
+      <div class="form-row">
+        <label class="lbl" for="title">見出し</label>
+        <input id="title" type="text">
+      </div>
+
+      <div class="form-row">
+        <label class="lbl" for="excerpt">リード文</label>
+        <textarea id="excerpt" rows="2"></textarea>
+        <div class="hint">見出しの直下と、一覧・Discord の embed に出ます。</div>
+      </div>
+
+      <div class="form-row">
+        <label class="lbl" for="body">本文(GitHub Flavored Markdown)</label>
+        <textarea id="body" class="md"></textarea>
+        <div class="dropzone" id="body-dropzone" style="margin-top:10px;">
+          <b>画像をドラッグ&ドロップ、または貼り付け</b>
+          アップロードすると WebP に変換され、カーソル位置に Markdown が挿入されます。本文の画像は記事と同じ閲覧範囲で守られます。
+        </div>
+        <input type="file" id="body-file" accept="image/*" multiple style="display:none">
+        <!-- 保存時に取り込む画像の予告と、取り込みの結果。どちらも黙って済ませず必ず出す。 -->
+        <div id="body-notices"></div>
+        <div id="media-notices"></div>
+      </div>
+
+      <!-- 改版のメモ。既存の記事を編集するときだけ出す。 -->
+      <div class="form-row" id="revision-row" style="display:none">
+        <label class="lbl" for="revision-note">この編集のメモ(改版に残ります)</label>
+        <input id="revision-note" type="text" placeholder="例: 発効日を訂正">
+        <div style="margin-top:8px;">
+          <label><input type="checkbox" id="is-correction"> <b>訂正として記録する</b></label>
+        </div>
+        <div class="hint">訂正として記録すると、記事の冒頭に「この記事は訂正されました」とメモが出て、訂正前との差分を誰でも開けます。単なる更新と訂正はここで区別されます。</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===================== 公開設定 ===================== -->
+  <aside class="side">
+
+    <section class="card">
+      <div class="section-head"><h2>公開設定</h2></div>
+
+      <!-- 報道社。所属は Discord のロールで決まる。掛け持ちの場合はここで選ばせ、公開時に記事へ凍結する。 -->
+      <div class="form-row">
+        <label class="lbl" for="publisher">報道社</label>
+        <select id="publisher"></select>
+        <div class="hint" id="publisher-hint">Discord のロールで所属している社から選べます。公開後は変更できません(署名は公開の時点で凍結されます)。</div>
+      </div>
+
+      <!-- 署名の表示。author_id は必ず保持され、表示だけを切り替える。 -->
+      <div class="form-row">
+        <label class="lbl">署名の表示</label>
+        <div class="radio-set">
+          <label><input type="radio" name="byline" value="author" checked> <span>報道社 と 記者名<span class="note" id="byline-preview"></span></span></label>
+          <label><input type="radio" name="byline" value="publisher"> <span>報道社のみ<span class="note"> — 相場表など、記者名を出さない記事向け</span></span></label>
+        </div>
+        <div class="hint">どちらでも投稿者の記録は残ります(改版履歴に編集者として記録され、監査で追えます)。</div>
+      </div>
+
+      <!-- カテゴリは単一必須。主分類が 1 つに定まり、通知先チャンネルもここで決まる。 -->
+      <div class="form-row">
+        <label class="lbl" for="category">カテゴリ(必須)</label>
+        <select id="category"></select>
+        <div class="hint" id="notify-hint">主分類は 1 つだけ。</div>
+      </div>
+
+      <div class="form-row">
+        <label class="lbl" for="tags">タグ</label>
+        <input id="tags" type="text" placeholder="#tag-slug #tag-slug">
+        <div class="hint">タグは slug で指定します(空白区切り)。国もタグで表します。通知先を持つタグは追加のチャンネルへも流れます。</div>
+        <div class="tagcloud" id="tagcloud" style="padding-left:0; padding-right:0;"></div>
+      </div>
+
+      <div class="form-row">
+        <label class="lbl" for="series">連載</label>
+        <div class="cols">
+          <select id="series"></select>
+          <input id="series-position" type="text" inputmode="numeric" placeholder="第 N 回(任意)">
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head"><h2>閲覧範囲</h2></div>
+      <div class="form-row">
+        <div class="radio-set">
+          <label><input type="radio" name="vis" value="public" checked> <span><span class="badge vis-public">全体公開</span><span class="note"> 未ログインを含む誰でも</span></span></label>
+          <label><input type="radio" name="vis" value="members"> <span><span class="badge vis-members">メンバー限定</span><span class="note"> サーバーに参加しているログイン済みユーザー</span></span></label>
+          <label><input type="radio" name="vis" value="restricted"> <span><span class="badge vis-restricted">ロール限定</span><span class="note"> 指定したロールを持つユーザーのみ</span></span></label>
+        </div>
+
+        <div id="roles-wrap" style="display:none; margin-top:10px;">
+          <div class="radio-set" id="roles"></div>
+          <div class="hint">あなたが持っているロールから選べます。報道社もロールであるため、その社のロールを選べば社内限定の記事になります。</div>
+        </div>
+
+        <!--
+          カバー画像は Discord の embed に出すため認証なしで配信される。閲覧制限はカバーに及ばない。
+          注意は閲覧範囲を選ぶこの場に置く(カバーを選ぶ時点では、その記事が機密かどうかを考えていない)。
+        -->
+        <div class="notice">
+          <span class="ic">🔓</span>
+          <div>
+            <b>カバー画像は閲覧制限の対象外です。</b>
+            Discord の embed に出すため、カバーは URL を知る誰もが見られます。機密の記事では、中身が分かる画像をカバーに選ばないでください。本文中の画像は閲覧範囲で保護されます。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head"><h2>カバー画像</h2></div>
+      <div class="form-row">
+        <div class="cover ph" id="cover-preview" style="width:100%;height:120px;border-radius:4px;"></div>
+        <div class="dropzone" id="cover-dropzone" style="margin-top:10px;">
+          <b>カバー画像をアップロード</b>
+          WebP に変換されます。og:image にも使われます。
+        </div>
+        <input type="file" id="cover-file" accept="image/*" style="display:none">
+        <div id="cover-actions" style="display:none; margin-top:10px;">
+          <button class="btn danger" type="button" id="cover-clear">カバーを外す</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head"><h2>速報・広告</h2></div>
+
+      <div class="form-row">
+        <label><input type="checkbox" id="breaking"> <b>速報として出す</b></label>
+        <div class="hint">トップに速報帯で出し、通知時に設定されたロールをメンションします。立てられるロールは限られており、権限が無い場合は保存時にエラーになります。</div>
+      </div>
+
+      <!-- 記事広告(タイアップ記事)。コアが開示を担保するため、広告主名は必須。 -->
+      <div class="form-row">
+        <label><input type="checkbox" id="sponsored"> <b>記事広告(タイアップ記事)</b></label>
+        <div id="sponsor-wrap" style="display:none">
+          <div class="cols" style="margin-top:8px;">
+            <input id="sponsor-name" type="text" placeholder="広告主名(必須)">
+          </div>
+          <div class="hint">記事面・一覧・Discord の embed のすべてに「広告」と広告主名が表示されます。この表示は消せません。</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head"><h2>公開</h2></div>
+      <div class="form-row">
+        <label class="lbl" for="sched">予約公開</label>
+        <input id="sched" type="datetime-local">
+        <div class="hint">時刻を入れて「公開」を押すと予約になります。時刻になるとサーバーが公開し、bot が通知します。空のまま「公開」を押すと即時に公開します。</div>
+      </div>
+      <div class="form-actions">
+        <button class="btn" type="button" id="btn-draft">下書き保存</button>
+        <button class="btn" type="button" id="btn-review">レビューへ</button>
+        <span class="spacer"></span>
+        <button class="btn primary" type="button" id="btn-publish">公開</button>
+      </div>
+      <div id="save-notices" style="padding:0 16px 14px"></div>
+    </section>
+
+  </aside>
+</main>
+
+<div class="container" id="gate" style="display:none"></div>
+
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="/#articles">新着記事</a>
+      <a href="/#publisher-ranking">報道社ランキング</a>
+      <a href="/#tags">タグ一覧</a>
+      <a href="/#series">連載</a>
+      <a href="/editor">記事を書く</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">このサイトは Discord サーバーのメンバー・ロールに基づいて閲覧範囲を制御しています。所属報道社はサーバー内のロールで割り当てられます。</div>
+  </div>
+</footer>
+
+<script type="module">
+import { ApiError, get, post, patch, upload, me, escapeHtml, formatDateTime, articleUrl, qs } from '/static/js/api.js';
+
+/* ============================================================
+   表示の小物
+   ============================================================ */
+
+const AVATAR_COLORS = ['a1', 'a2', 'a3', 'a4', 'a5'];
+const STATUS_LABELS = { draft: '下書き', in_review: 'レビュー中', scheduled: '予約公開', published: '公開済み', archived: 'アーカイブ' };
+// Discord の CDN。ここに置かれた画像の URL はおよそ 24 時間で失効するため、取り込みの予告を出す対象になる。
+const DISCORD_CDN = /(?:^|\/\/)(?:cdn\.discordapp\.com|media\.discordapp\.net)\//i;
+
+/** 一覧の応答が配列でもページ(items 入り)でも同じように扱えるようにする。 */
+function asItems(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.items)) return data.items;
+  return [];
+}
+
+function displayName(user) {
+  if (!user) return '不明';
+  return user.global_name || user.username || '不明';
+}
+
+function pickClass(key, classes) {
+  const s = String(key === null || key === undefined ? '' : key);
+  let sum = 0;
+  for (let i = 0; i < s.length; i += 1) sum = (sum * 31 + s.charCodeAt(i)) % 9973;
+  return classes[sum % classes.length];
+}
+
+/** CSS の文字列を閉じる " と \ を退避した url(...) を作る。URL に何が入っていても CSS の文脈から抜け出せない。 */
+function cssUrl(url) {
+  return 'url("' + String(url).replace(/[\\"]/g, '\\$&') + '")';
+}
+
+function avatarHtml(user) {
+  if (user && user.avatar_hash && user.discord_user_id) {
+    const url = `https://cdn.discordapp.com/avatars/${encodeURIComponent(user.discord_user_id)}/${encodeURIComponent(user.avatar_hash)}.png?size=64`;
+    return `<span class="avatar ph" style="background-image:${escapeHtml(cssUrl(url))}"></span>`;
+  }
+  return `<span class="avatar ${pickClass(user && user.id, AVATAR_COLORS)}">${escapeHtml(displayName(user).slice(0, 1).toUpperCase())}</span>`;
+}
+
+/**
+ * 要素の表示を切り替える。
+ * style.css には display を指定するクラス(.btn の inline-flex、.notice や .cols の flex など)があり、hidden 属性の display:none はそれらに負けて効かないため、style で直接切り替える。
+ */
+function show(el, visible) {
+  if (el) el.style.display = visible ? '' : 'none';
+}
+
+/** 注意書きを描く。icon は行頭の記号、html は組み立て済みの断片。 */
+function noticeHtml(icon, html, info) {
+  return `<div class="notice${info ? ' info' : ''}"><span class="ic">${escapeHtml(icon)}</span><div>${html}</div></div>`;
+}
+
+/** 例外を利用者に見せる文言にする。サーバーが返した説明を握りつぶさず、そのまま出す。 */
+function errorText(e) {
+  if (e instanceof ApiError && e.body && typeof e.body === 'object' && Array.isArray(e.body.detail)) {
+    return e.body.detail.map((d) => (d && d.msg ? `${(d.loc || []).join('.')}: ${d.msg}` : JSON.stringify(d))).join(' / ');
+  }
+  return e && e.message ? e.message : String(e);
+}
+
+/**
+ * datetime-local の値(閲覧者のローカル時刻)を UTC の ISO 8601 にする。
+ * サーバーはタイムゾーンを持たない日時を UTC とみなすため、ローカル時刻の文字列をそのまま送ると時差の分だけずれた時刻に公開される。
+ */
+function localToUtcIso(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+/** UTC の ISO 8601 を datetime-local の値(ローカル時刻)にする。 */
+function utcIsoToLocal(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/* ============================================================
+   状態
+   ============================================================ */
+
+const params = new URLSearchParams(location.search);
+// 編集対象。id は更新の宛先(PATCH /api/articles/{id})、slug は読み込みの鍵(GET /api/articles/{slug})。
+const state = {
+  articleId: params.get('id'),
+  slug: params.get('slug'),
+  status: 'draft',
+  coverUrl: null,
+  user: null,
+  categories: [],
+  tags: [],
+  series: [],
+  publishers: [],
+  roles: [],
+};
+
+const el = (id) => document.getElementById(id);
+
+/* ============================================================
+   共通の外枠
+   ============================================================ */
+
+/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
+function mountAdminNav(viewer) {
+  if (!viewer || !viewer.is_admin) return;
+  const write = document.querySelector('.globalnav a.write');
+  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
+}
+
+async function renderChrome() {
+  try {
+    const categories = asItems(await get('/api/categories')).slice().sort((a, b) => a.position - b.position);
+    const links = categories.map((c) => `<a href="/categories/${encodeURIComponent(c.slug)}">${escapeHtml(c.name)}</a>`).join('');
+    el('globalnav').innerHTML = `<a href="/">トップ</a>${links}<span class="spacer"></span><a href="/editor" class="write active">✍ 記事を書く</a>`;
+  } catch (e) {
+    // カテゴリを引けなくても編集は続けられる。
+  }
+}
+
+/* ============================================================
+   入力の組み立てと反映
+   ============================================================ */
+
+/** タグの入力欄を slug の配列にする。先頭の # は付けても付けなくてもよい。 */
+function parseTags(text) {
+  const slugs = String(text || '').split(/[\s,、]+/).map((s) => s.replace(/^#+/, '').trim()).filter(Boolean);
+  return Array.from(new Set(slugs));
+}
+
+function selectedVisibility() {
+  const checked = document.querySelector('input[name="vis"]:checked');
+  return checked ? checked.value : 'public';
+}
+
+function selectedBylineMode() {
+  const checked = document.querySelector('input[name="byline"]:checked');
+  return checked ? checked.value : 'author';
+}
+
+function selectedRoleIds() {
+  return Array.from(document.querySelectorAll('#roles input[type="checkbox"]:checked')).map((c) => c.value);
+}
+
+/**
+ * 通知先の見込みを示す。
+ * 宛先は記事のカテゴリとタグの通知先チャンネルを重複排除した集合であり、0 件なら記事はどこにも通知されない(既定のチャンネルへ流れることはない)。選んだ時点でその結果が分かるようにする。
+ */
+function updateNotifyHint() {
+  const category = state.categories.find((c) => c.id === el('category').value);
+  const chosen = new Set(parseTags(el('tags').value));
+  const channels = new Set();
+  if (category && category.notify_channel_id) channels.add(category.notify_channel_id);
+  for (const t of state.tags) {
+    if (chosen.has(t.slug) && t.notify_channel_id) channels.add(t.notify_channel_id);
+  }
+  const hint = el('notify-hint');
+  if (channels.size === 0) {
+    hint.textContent = '主分類は 1 つだけ。このカテゴリと選んだタグはどちらも通知先チャンネルを持たないため、公開しても Discord のチャンネルへは通知されません(タグを購読している人への DM は届きます)。';
+  } else {
+    hint.textContent = `主分類は 1 つだけ。公開すると Discord の ${channels.size} チャンネル(ID: ${Array.from(channels).join(', ')})へ通知されます。`;
+  }
+}
+
+/** 署名の見本。どの社の名で、誰として出るのかを選ぶ前に見せる。 */
+function updateBylinePreview() {
+  const pub = state.publishers.find((p) => p.id === el('publisher').value);
+  const name = displayName(state.user && state.user.user);
+  el('byline-preview').textContent = ` — ${pub ? pub.name : '(報道社なし)'} / ${name}`;
+}
+
+function updateStatusBadge() {
+  el('status-badge').textContent = STATUS_LABELS[state.status] || state.status;
+  // 公開済みの記事は報道社の署名が凍結されている。以後ロールが変わっても動かさないため、選び直せないようにする。
+  const published = state.status === 'published';
+  el('publisher').disabled = published;
+  el('publisher-hint').textContent = published
+    ? 'この記事は公開済みのため、報道社は変更できません(署名は公開の時点で凍結されます)。'
+    : 'Discord のロールで所属している社から選べます。公開後は変更できません(署名は公開の時点で凍結されます)。';
+  el('btn-draft').textContent = published ? '更新を保存' : '下書き保存';
+  show(el('btn-review'), !published);
+  show(el('revision-row'), Boolean(state.articleId));
+}
+
+/**
+ * 選択肢に無い値を選べるようにする。
+ * 記事に凍結された報道社のロールを執筆者が既に失っている場合、その社は選択肢に現れない。選択肢が無いまま保存すると、値が空として送られて署名が黙って外れるため、現在の値は必ず残す。
+ */
+function ensureOption(select, value, label) {
+  if (!value) return;
+  if (Array.from(select.options).some((o) => o.value === value)) return;
+  const option = document.createElement('option');
+  option.value = value;
+  option.textContent = label;
+  select.appendChild(option);
+}
+
+function updateCoverPreview() {
+  const preview = el('cover-preview');
+  preview.style.backgroundImage = state.coverUrl ? cssUrl(state.coverUrl) : '';
+  show(el('cover-actions'), Boolean(state.coverUrl));
+}
+
+/**
+ * 本文に含まれる画像 URL を拾う。
+ * これは注意書きを出すための近似であり、取り込みの対象を決めるのはサーバー側の Markdown の構文木である(コードブロックの中の記述など、ここでの検出と厳密には一致しない)。
+ */
+function imageUrlsInBody(md) {
+  const urls = [];
+  const markdown = /!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)/g;
+  const html = /<img[^>]+src\s*=\s*["']([^"']+)["']/gi;
+  let m;
+  while ((m = markdown.exec(md)) !== null) urls.push(m[1]);
+  while ((m = html.exec(md)) !== null) urls.push(m[1]);
+  return urls;
+}
+
+/**
+ * 保存時の取り込みの予告。
+ * Discord の CDN の URL はおよそ 24 時間で失効するため、取り込まなければ翌日には画像が壊れる。取り込みは公開時ではなく保存のたびに行われるので、下書きのまま置いても失効前に写し取られる。
+ */
+function updateBodyNotices() {
+  const discordUrls = imageUrlsInBody(el('body').value).filter((u) => DISCORD_CDN.test(u));
+  const box = el('body-notices');
+  if (!discordUrls.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = noticeHtml('⏳', `<b>本文に Discord の画像 URL が ${discordUrls.length} 件あります。</b> 保存時にこのサーバーへ取り込みます。Discord の画像 URL はおよそ 24 時間で失効するため、取り込まないまま放置すると翌日には表示されなくなります。`);
+}
+
+/* ============================================================
+   画像のアップロード
+   ============================================================ */
+
+/** カーソル位置に文字列を差し込む。 */
+function insertAtCursor(textarea, text) {
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  textarea.value = textarea.value.slice(0, start) + text + textarea.value.slice(end);
+  const pos = start + text.length;
+  textarea.setSelectionRange(pos, pos);
+  textarea.focus();
+  updateBodyNotices();
+}
+
+/** 本文の画像。記事と同じ閲覧範囲の判定を受けさせるため、非公開のまま取り込む。 */
+async function uploadBodyImages(files) {
+  const box = el('media-notices');
+  for (const file of files) {
+    box.innerHTML = noticeHtml('⬆', `<b>${escapeHtml(file.name)}</b> をアップロードしています…`, true);
+    try {
+      const media = await upload(file, { isPublic: false });
+      insertAtCursor(el('body'), `\n![${file.name.replace(/[[\]]/g, '')}](${media.url})\n`);
+      box.innerHTML = noticeHtml('✔', `<b>${escapeHtml(file.name)}</b> を取り込み、カーソル位置に Markdown を挿入しました。`, true);
+    } catch (e) {
+      box.innerHTML = noticeHtml('⚠', `<b>${escapeHtml(file.name)}</b> をアップロードできませんでした。${escapeHtml(errorText(e))}`);
+    }
+  }
+}
+
+/** カバー画像。Discord の embed と og:image に出すため、認証なしで配信される公開の画像として取り込む。 */
+async function uploadCover(file) {
+  const box = el('media-notices');
+  box.innerHTML = noticeHtml('⬆', `<b>${escapeHtml(file.name)}</b> をアップロードしています…`, true);
+  try {
+    const media = await upload(file, { isPublic: true });
+    state.coverUrl = media.url;
+    updateCoverPreview();
+    box.innerHTML = '';
+  } catch (e) {
+    box.innerHTML = noticeHtml('⚠', `<b>${escapeHtml(file.name)}</b> をアップロードできませんでした。${escapeHtml(errorText(e))}`);
+  }
+}
+
+/** ドロップ領域とファイル選択を結ぶ。 */
+function wireDropzone(zone, input, handler) {
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', (ev) => { ev.preventDefault(); });
+  zone.addEventListener('drop', (ev) => {
+    ev.preventDefault();
+    const files = Array.from(ev.dataTransfer.files || []).filter((f) => f.type.startsWith('image/'));
+    if (files.length) handler(files);
+  });
+  input.addEventListener('change', () => {
+    const files = Array.from(input.files || []);
+    if (files.length) handler(files);
+    input.value = '';
+  });
+}
+
+/* ============================================================
+   読み込み
+   ============================================================ */
+
+function fillArticle(a) {
+  state.articleId = a.id;
+  state.slug = a.slug;
+  state.status = a.status;
+  state.coverUrl = a.cover_image_url || null;
+
+  el('title').value = a.title || '';
+  el('excerpt').value = a.excerpt || '';
+  el('body').value = a.body_md || '';
+  if (a.publisher) ensureOption(el('publisher'), a.publisher.id, a.publisher.name);
+  if (a.series) ensureOption(el('series'), a.series.id, a.series.title);
+  el('publisher').value = a.publisher ? a.publisher.id : '';
+  el('category').value = a.category ? a.category.id : '';
+  el('tags').value = (a.tags || []).map((t) => `#${t.slug}`).join(' ');
+  el('series').value = a.series ? a.series.id : '';
+  el('series-position').value = a.series_position ? String(a.series_position) : '';
+  el('breaking').checked = Boolean(a.is_breaking);
+  el('sponsored').checked = Boolean(a.is_sponsored);
+  el('sponsor-name').value = a.sponsor_name || '';
+  el('sched').value = utcIsoToLocal(a.scheduled_at);
+
+  const byline = document.querySelector(`input[name="byline"][value="${a.byline_mode === 'publisher' ? 'publisher' : 'author'}"]`);
+  if (byline) byline.checked = true;
+  const vis = document.querySelector(`input[name="vis"][value="${a.visibility}"]`);
+  if (vis) vis.checked = true;
+  // 記事が閲覧を許しているロールのうち、編集者が保有していないものは選択肢に無い。そのまま保存すると閲覧範囲が黙って広がる(そのロールの人が読めなくなるのではなく、制限が外れて他の人に読まれる)ため、名前が引けなくても ID のまま残して選択状態にする。
+  const roleIds = new Set(a.visibility_role_ids || []);
+  const known = new Set(state.roles.map((r) => r.id));
+  const extra = Array.from(roleIds).filter((id) => !known.has(id));
+  if (extra.length) {
+    el('roles').insertAdjacentHTML('beforeend', extra.map((id) => `<label><input type="checkbox" value="${escapeHtml(id)}"> <span>ロール ID ${escapeHtml(id)}<span class="note"> — あなたが保有していないロールです</span></span></label>`).join(''));
+  }
+  for (const box of document.querySelectorAll('#roles input[type="checkbox"]')) box.checked = roleIds.has(box.value);
+
+  show(el('sponsor-wrap'), el('sponsored').checked);
+  show(el('roles-wrap'), selectedVisibility() === 'restricted');
+  updateCoverPreview();
+  updateStatusBadge();
+  updateBylinePreview();
+  updateNotifyHint();
+  updateBodyNotices();
+  document.title = `${a.title} を編集 | instant-news`;
+}
+
+/* ============================================================
+   保存・公開
+   ============================================================ */
+
+/** 入力を保存の要求本文にする。省略ではなく明示的な未指定として送るため、空の値は null にする。 */
+function collect() {
+  const position = el('series-position').value.trim();
+  const visibility = selectedVisibility();
+  const sponsored = el('sponsored').checked;
+  return {
+    title: el('title').value.trim(),
+    body_md: el('body').value,
+    excerpt: el('excerpt').value.trim() || null,
+    category_id: el('category').value || null,
+    publisher_id: el('publisher').value || null,
+    series_id: el('series').value || null,
+    series_position: position ? Number(position) : null,
+    tags: parseTags(el('tags').value),
+    visibility,
+    visibility_role_ids: visibility === 'restricted' ? selectedRoleIds() : [],
+    cover_image_url: state.coverUrl,
+    byline_mode: selectedBylineMode(),
+    is_breaking: el('breaking').checked,
+    is_sponsored: sponsored,
+    sponsor_name: sponsored ? (el('sponsor-name').value.trim() || null) : null,
+    // 予約の時刻は下書きの段階でも保存する。入力した時刻が保存のたびに消えると、公開の直前に入れ直す運用になり、押し間違えれば即時公開になる。
+    scheduled_at: localToUtcIso(el('sched').value),
+  };
+}
+
+/** 送る前に分かる誤りを拾う。サーバーも同じ規則で弾くが、往復させずにその場で伝える。 */
+function validate(payload) {
+  const problems = [];
+  if (!payload.title) problems.push('見出しを入れてください。');
+  if (!payload.body_md.trim()) problems.push('本文を入れてください。');
+  if (!payload.category_id) problems.push('カテゴリを選んでください(主分類は単一必須です)。');
+  if (payload.is_sponsored && !payload.sponsor_name) problems.push('記事広告には広告主名が必要です(「広告」とだけ書いても開示になりません)。');
+  if (payload.visibility === 'restricted' && payload.visibility_role_ids.length === 0) problems.push('ロール限定にするには、閲覧を許すロールを 1 つ以上選んでください。');
+  const known = new Set(state.tags.map((t) => t.slug));
+  const unknown = payload.tags.filter((s) => !known.has(s));
+  if (unknown.length) problems.push(`存在しないタグです: ${unknown.join(', ')}(タグの新設は管理者の担当です)。`);
+  if (el('series-position').value.trim() && !Number.isInteger(payload.series_position)) problems.push('連載の回は数字で入れてください。');
+  return problems;
+}
+
+function setSaveNotices(html) {
+  el('save-notices').innerHTML = html;
+}
+
+function busy(on) {
+  for (const id of ['btn-draft', 'btn-review', 'btn-publish']) el(id).disabled = on;
+}
+
+/**
+ * 保存する。
+ * 取り込めなかった画像(media_failures)は必ず画面へ出す。取り込めなかった URL は元のまま本文に残り、投稿自体は失敗しないが、黙って残すと朽ちるリンクが気付かれないまま残る。
+ */
+async function save(overrides) {
+  const payload = Object.assign(collect(), overrides || {});
+  const problems = validate(payload);
+  if (problems.length) {
+    setSaveNotices(problems.map((p) => noticeHtml('⚠', escapeHtml(p))).join(''));
+    return null;
+  }
+
+  const note = el('revision-note').value.trim();
+  if (state.articleId) {
+    payload.revision_note = note || null;
+    payload.is_correction = el('is-correction').checked;
+  }
+
+  busy(true);
+  try {
+    const res = state.articleId
+      ? await patch(`/api/articles/${encodeURIComponent(state.articleId)}`, payload)
+      : await post('/api/articles', payload);
+    const article = res.article;
+    const failures = res.media_failures || [];
+
+    state.articleId = article.id;
+    state.slug = article.slug;
+    state.status = article.status;
+    updateStatusBadge();
+    history.replaceState(null, '', '/editor' + qs({ id: article.id, slug: article.slug }));
+
+    el('media-notices').innerHTML = failures.length
+      ? noticeHtml('⚠', `<b>${failures.length} 件の画像を取り込めませんでした。</b> 元の URL のまま残るため、いずれ表示されなくなる可能性があります。<br>${failures.map((f) => `<code>${escapeHtml(f.source_url)}</code> — ${escapeHtml(f.reason)}`).join('<br>')}`)
+      : '';
+    return article;
+  } catch (e) {
+    setSaveNotices(noticeHtml('⚠', `<b>保存できませんでした。</b> ${escapeHtml(errorText(e))}`));
+    return null;
+  } finally {
+    busy(false);
+  }
+}
+
+async function publish() {
+  // 時刻の指定がある場合は予約として保存する。実際に公開するのはサーバーの巡回であり、bot が落ちていても公開は進む。
+  const scheduled = localToUtcIso(el('sched').value);
+  if (scheduled) {
+    const article = await save({ status: 'scheduled', scheduled_at: scheduled });
+    if (article) {
+      // 予約した時刻は応答の値で示す。送った値ではなく保存された値を出すことで、実際に効いている時刻が読める。
+      const when = article.scheduled_at ? `${formatDateTime(article.scheduled_at)} に公開を予約しました。` : '公開を予約しました。';
+      setSaveNotices(noticeHtml('🕒', `<b>${escapeHtml(when)}</b> 時刻になるとサーバーが公開し、bot が通知します。`, true));
+    }
+    return;
+  }
+
+  const article = await save({ scheduled_at: null });
+  if (!article) return;
+  busy(true);
+  try {
+    await post(`/api/articles/${encodeURIComponent(article.id)}/publish`);
+    state.status = 'published';
+    updateStatusBadge();
+    setSaveNotices(noticeHtml('✔', `<b>公開しました。</b> <a href="${articleUrl(article.slug)}">記事を開く</a>`, true));
+  } catch (e) {
+    setSaveNotices(noticeHtml('⚠', `<b>公開できませんでした。</b> ${escapeHtml(errorText(e))}`));
+  } finally {
+    busy(false);
+  }
+}
+
+/* ============================================================
+   立ち上げ
+   ============================================================ */
+
+function renderGate(html) {
+  show(el('editor'), false);
+  const gate = el('gate');
+  show(gate, true);
+  gate.innerHTML = `<section class="card" style="margin-top:20px"><div class="section-head"><h2>記事を書く</h2></div><div class="body">${html}</div></section>`;
+}
+
+async function main() {
+  await renderChrome();
+
+  const user = await me();
+  // ナビは renderChrome が組み直すため、導線を足すのはその後でなければ消える。
+  mountAdminNav(user);
+  const account = el('account');
+  if (!user || !user.user) {
+    const back = location.pathname + location.search;
+    account.innerHTML = `<a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`;
+    renderGate(`<p>記事を書くには Discord でログインしてください。</p><a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`);
+    return;
+  }
+  state.user = user;
+  state.publishers = user.publishers || [];
+  state.roles = user.roles || [];
+  account.innerHTML = `<span class="publisher">${avatarHtml(user.user)}${escapeHtml(displayName(user.user))}</span>`;
+
+  try {
+    const [categories, tags, series] = await Promise.all([get('/api/categories'), get('/api/tags'), get('/api/series')]);
+    state.categories = asItems(categories).slice().sort((a, b) => a.position - b.position);
+    state.tags = asItems(tags);
+    state.series = asItems(series);
+  } catch (e) {
+    renderGate(`<p>編集に必要な分類を読み込めませんでした。${escapeHtml(errorText(e))}</p>`);
+    return;
+  }
+  if (!state.categories.length) {
+    renderGate('<p>カテゴリが 1 つも登録されていないため、記事を書けません(カテゴリは単一必須です)。管理者にカテゴリの登録を依頼してください。</p>');
+    return;
+  }
+
+  el('category').innerHTML = state.categories.map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('');
+  el('publisher').innerHTML = ['<option value="">(報道社を指定しない)</option>']
+    .concat(state.publishers.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`)).join('');
+  el('series').innerHTML = ['<option value="">(連載に含めない)</option>']
+    .concat(state.series.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.title)}</option>`)).join('');
+  el('roles').innerHTML = state.roles.length
+    ? state.roles.map((r) => `<label><input type="checkbox" value="${escapeHtml(r.id)}"> <span>${escapeHtml(r.name)}</span></label>`).join('')
+    : '<span class="note">保有しているロールがありません。</span>';
+  // クリックで入力欄へ足せるようにする。タグは slug で指定するため、一覧を見せないと書けない。
+  el('tagcloud').innerHTML = state.tags.map((t) => {
+    const bell = t.notify_channel_id ? ' <b>📣</b>' : '';
+    return `<a href="#" data-tag="${escapeHtml(t.slug)}">#${escapeHtml(t.name)}${bell}</a>`;
+  }).join('');
+
+  if (!state.publishers.length) {
+    el('publisher-hint').textContent = '所属している報道社がありません(所属は Discord のロールで決まります)。報道社なしで記事を出せますが、社の署名は付きません。';
+  }
+
+  show(el('editor'), true);
+  updateStatusBadge();
+  updateBylinePreview();
+  updateNotifyHint();
+
+  // 既存の記事の読み込み。読み込みは slug で行い、更新の宛先には応答の id を使う。
+  const ref = state.slug || state.articleId;
+  if (ref) {
+    try {
+      fillArticle(await get(`/api/articles/${encodeURIComponent(ref)}`));
+    } catch (e) {
+      setSaveNotices(noticeHtml('⚠', `<b>編集する記事を読み込めませんでした。</b> ${escapeHtml(errorText(e))} このまま保存すると新しい記事になります。`));
+      state.articleId = null;
+      state.slug = null;
+      updateStatusBadge();
+    }
+  }
+
+  /* 入力の結線 */
+  el('category').addEventListener('change', updateNotifyHint);
+  el('tags').addEventListener('input', updateNotifyHint);
+  el('publisher').addEventListener('change', updateBylinePreview);
+  el('body').addEventListener('input', updateBodyNotices);
+  el('sponsored').addEventListener('change', () => show(el('sponsor-wrap'), el('sponsored').checked));
+  for (const radio of document.querySelectorAll('input[name="vis"]')) {
+    radio.addEventListener('change', () => show(el('roles-wrap'), selectedVisibility() === 'restricted'));
+  }
+  el('tagcloud').addEventListener('click', (ev) => {
+    const link = ev.target.closest('[data-tag]');
+    if (!link) return;
+    ev.preventDefault();
+    const slugs = parseTags(el('tags').value);
+    const slug = link.dataset.tag;
+    el('tags').value = (slugs.includes(slug) ? slugs.filter((s) => s !== slug) : slugs.concat([slug])).map((s) => `#${s}`).join(' ');
+    updateNotifyHint();
+  });
+
+  wireDropzone(el('body-dropzone'), el('body-file'), uploadBodyImages);
+  wireDropzone(el('cover-dropzone'), el('cover-file'), (files) => uploadCover(files[0]));
+  el('cover-clear').addEventListener('click', () => { state.coverUrl = null; updateCoverPreview(); });
+  el('body').addEventListener('paste', (ev) => {
+    const files = Array.from(ev.clipboardData ? ev.clipboardData.files : []).filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    ev.preventDefault();
+    uploadBodyImages(files);
+  });
+
+  el('btn-draft').addEventListener('click', () => save(state.status === 'published' ? {} : { status: 'draft' }));
+  el('btn-review').addEventListener('click', () => save({ status: 'in_review' }));
+  el('btn-publish').addEventListener('click', publish);
+}
+
+main();
+</script>
+
+</body>
+</html>

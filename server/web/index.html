@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<!-- theme.js はモジュールではないため type を付けずに読み込む。head で同期的に読むのは、保存されたテーマを描画前に適用し、既定テーマで一瞬描画されてから切り替わるのを避けるため。 -->
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<!-- 上部ユーティリティ帯 -->
+<div class="topbar">
+  <div class="container">
+    <span class="promo">Discord サーバーのメンバーとロールに基づいて閲覧範囲が決まるニュースプラットフォームです</span>
+  </div>
+</div>
+
+<!-- ロゴ・検索・ログイン -->
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord コミュニティの報道社連合</span>
+    </a>
+    <!-- 検索の宛先はトップ自身(/?q=)。検索結果の専用ページは無く、記事一覧の絞り込みをトップの状態として表す。 -->
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" id="search-input" placeholder="記事を検索" aria-label="記事を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <div class="actions" id="actions">
+      <a class="btn-discord" id="account-login" data-login href="/auth/login">🎮 Discord でログイン</a>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<!--
+  グローバルナビ。主役はカテゴリ(記事の主分類、単一必須)で、GET /api/categories から position 順に組み立てる。
+  カテゴリ集合はデプロイごとに異なるため、この HTML には 1 つも書かない。
+  機能系の導線は spacer の右へ寄せて、別種であることを示す。
+-->
+<nav class="globalnav">
+  <div class="container">
+    <a href="/" id="nav-top" class="active">トップ</a>
+    <span class="spacer" id="nav-spacer"></span>
+    <a href="#tags" class="util">タグ</a>
+    <a href="#series" class="util">連載</a>
+    <a href="/editor" class="write">✍ 記事を書く</a>
+  </div>
+</nav>
+
+<noscript>
+  <div class="container">
+    <div class="notice"><span class="ic">⚠</span><div>このページは記事を JavaScript で読み込みます。JavaScript を有効にしてください。個々の記事のページは JavaScript 無しでも読めます。</div></div>
+  </div>
+</noscript>
+
+<div class="container">
+  <!-- 広告枠(header)。「広告」ラベルは style.css の .adslot::after が描画するため、この class を外してはならない。候補が無ければ api.js が枠ごと取り除く。 -->
+  <div class="adslot header" id="ad-header">
+    <div class="creative"></div>
+  </div>
+</div>
+
+<main class="container layout">
+  <!-- ===================== メイン列 ===================== -->
+  <div class="main">
+
+    <!-- 速報帯。一覧内のバッジだけでは埋もれるため専用の帯を置く。速報が無ければ帯そのものを出さない。 -->
+    <div class="breaking-band" id="breaking" hidden></div>
+
+    <!-- トピックス -->
+    <section class="card">
+      <div class="section-head">
+        <h2>トピックス</h2>
+      </div>
+      <div class="body" id="topics-body"></div>
+    </section>
+
+    <!-- タグ。並べ替えと件数表示は応答に記事数が含まれる場合のみ行い、含まれない場合は取得した順に出す。 -->
+    <section class="card trend">
+      <div class="section-head">
+        <h2>タグ</h2>
+        <a class="more" href="#tags">すべてのタグ</a>
+      </div>
+      <div class="body" id="trend-body"></div>
+    </section>
+
+    <!--
+      記事一覧。トップでは新着(latest_only=1)、/categories/{slug} ではその欄、?q= では検索結果、?series= ではその連載を出す。
+      各行に 報道社 → カテゴリ → タグ → 記者 の順でメタを出す。報道社を一覧でも出すのは、加盟社の可視性を担保するため。
+    -->
+    <section class="card" id="articles">
+      <div class="section-head">
+        <h2 id="articles-title">新着記事</h2>
+        <span class="more" id="articles-count" hidden></span>
+      </div>
+      <ul class="articles" id="articles-list"></ul>
+      <div class="body" id="articles-status" hidden></div>
+      <div class="body" id="articles-pager" style="text-align:center;" hidden></div>
+    </section>
+
+  </div>
+
+  <!-- ===================== サイドバー ===================== -->
+  <aside class="side">
+
+    <!-- ログイン導線。ログイン済みなら取り除く。 -->
+    <section class="card login-card" id="login-card">
+      <div class="body">
+        <p>Discord でログインすると、メンバー限定・ロール限定の記事も読めます。</p>
+        <a class="btn-discord" data-login href="/auth/login">🎮 Discord でログイン</a>
+      </div>
+    </section>
+
+    <!-- 報道社ランキング。投票もコメントも Discord へ委譲しているため、その写しの集計で算出できる。 -->
+    <section class="card" id="publisher-ranking">
+      <div class="section-head">
+        <h2>報道社ランキング</h2>
+        <span class="more">今週</span>
+      </div>
+      <div id="publisher-ranking-body"></div>
+    </section>
+
+    <!-- タグの全件。数が可変でナビに列挙できないため、トピック別に辿る入口はここが担う。 -->
+    <section class="card" id="tags">
+      <div class="section-head">
+        <h2>タグ一覧</h2>
+      </div>
+      <div id="tagcloud-body"></div>
+    </section>
+
+    <!-- 広告枠(sidebar) -->
+    <div class="adslot sidebar card" id="ad-sidebar">
+      <div class="creative"></div>
+    </div>
+
+    <!-- アクセスランキング。全期間を集計する API は無いため、新着の取得結果を閲覧数で並べ替えたものであることを見出しの脇に明示する。 -->
+    <section class="card">
+      <div class="section-head">
+        <h2>アクセスランキング</h2>
+        <span class="more">直近の新着</span>
+      </div>
+      <div id="view-ranking-body"></div>
+    </section>
+
+    <!-- 連載(マガジン) -->
+    <section class="card" id="series">
+      <div class="section-head">
+        <h2>連載</h2>
+      </div>
+      <div id="series-body"></div>
+    </section>
+
+    <!-- リアクションランキング。アクセスランキングと同じく、直近の新着の中での順位。 -->
+    <section class="card">
+      <div class="section-head">
+        <h2>リアクションランキング</h2>
+        <span class="more">直近の新着</span>
+      </div>
+      <div id="reaction-ranking-body"></div>
+    </section>
+
+  </aside>
+</main>
+
+<!-- フッター -->
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="#articles">新着記事</a>
+      <a href="#publisher-ranking">報道社ランキング</a>
+      <a href="#tags">タグ一覧</a>
+      <a href="#series">連載</a>
+      <a href="/editor">記事を書く</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">このサイトは Discord サーバーのメンバー・ロールに基づいて閲覧範囲を制御しています。所属報道社はサーバー内のロールで割り当てられます。</div>
+  </div>
+</footer>
+
+<script type="module">
+import { get, post, me, qs, escapeHtml, formatDateTime, articleUrl, renderAdSlot } from '/static/js/api.js';
+
+/* 1 度に取得する記事の件数。記事一覧に加えて、速報帯・トピックス・サイドバーの 2 つのランキングも同じ取得結果から組み立てる。 */
+const PER_PAGE = 20;
+
+/* 直近の新着。速報帯・トピックス・サイドバーのランキングが共有する。latest_only=1 は、相場のような定期記事の欄(categories.include_in_latest = 0)を横断的な新着から外す。 */
+const LATEST_URL = '/api/articles' + qs({ latest_only: 1, page: 1, per_page: PER_PAGE });
+
+/* 公開からこの時間内なら NEW を付ける。 */
+const NEW_WITHIN_MS = 24 * 60 * 60 * 1000;
+
+/* 一覧 1 行に出すタグの上限。全て出すと行が伸びて見出しが埋もれるため、残りは記事面に譲る。 */
+const TAGS_PER_ROW = 3;
+
+/* サイドバーのタグ一覧に出す上限。超えた分は件数だけを伝える(タグの索引ページが無く、リンク先を作れないため)。 */
+const TAGCLOUD_LIMIT = 40;
+
+const VISIBILITY_BADGE = {
+  public: { cls: 'vis-public', label: '全体公開' },
+  members: { cls: 'vis-members', label: 'メンバー限定' },
+  restricted: { cls: 'vis-restricted', label: 'ロール限定' },
+};
+
+/* ---------------------------------------------------------------- 取得 */
+
+/** 複数の描画で使い回す取得。await する箇所が非同期に散り、その間だけ未処理の rejection として警告されるため、ここで空の catch を足しておく。実際のエラー処理は await する側の try/catch が行う。 */
+function share(promise) {
+  promise.catch(() => {});
+  return promise;
+}
+
+/** 一覧の応答から項目の配列を取り出す。ページングを伴う一覧は {items, page, total, has_next} で返り、分類のように全件を返す一覧は配列そのもので返るため、両方を受ける。 */
+function itemsOf(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.items)) return data.items;
+  return [];
+}
+
+/** 例外から読者に見せる短い理由を取り出す。 */
+function reasonOf(e) {
+  return e && e.message ? e.message : String(e);
+}
+
+/* ---------------------------------------------------------------- 描画の部品 */
+
+/** 空状態・エラーの文言。空を黙って隠すと、読み込みに失敗したのか本当に無いのかが読者にも運用者にも分からなくなる。 */
+function noticeHtml(text, kind = 'info') {
+  const cls = kind === 'error' ? 'notice' : 'notice info';
+  const ic = kind === 'error' ? '⚠' : 'ℹ';
+  return `<div class="${cls}"><span class="ic">${ic}</span><div>${escapeHtml(text)}</div></div>`;
+}
+
+/** CSS の url() の値を組み立てる。URL は記事・利用者に由来するため、引用符とバックスラッシュを CSS 文字列として退避する。 */
+function cssUrl(url) {
+  return 'url("' + String(url).replace(/[\\"]/g, '\\$&') + '")';
+}
+
+/** data-bg へ退避しておいた画像 URL を背景として適用する。HTML を組み立てる段では属性値としてエスケープしておき、CSS としての解釈をこの 1 箇所へ集約する(style 属性へ文字列連結で差し込むと、URL の中身が CSS として解釈されうる)。 */
+function applyBackgrounds(root) {
+  for (const el of root.querySelectorAll('[data-bg]')) {
+    el.style.backgroundImage = cssUrl(el.dataset.bg);
+    el.removeAttribute('data-bg');
+  }
+}
+
+/** 差し込みと背景の適用をまとめて行う。 */
+function setHtml(el, html) {
+  el.innerHTML = html;
+  applyBackgrounds(el);
+}
+
+/** 文言を出して領域を見せる。空の .body を残すと余白だけが居座るため、出すときに hidden を外す。 */
+function showNotice(el, text, kind) {
+  el.innerHTML = noticeHtml(text, kind);
+  el.hidden = false;
+}
+
+/** 画像を持たない箱に出す頭文字。 */
+function initial(text) {
+  const chars = [...String(text ?? '').trim()];
+  return chars.length ? chars[0].toUpperCase() : '';
+}
+
+/** 画像を持たない箱の色。ID から決めるため、同じ報道社・同じ利用者には常に同じ色が付く。ID は文字列のまま扱う(数値化するとスノーフレークの下位桁が壊れる)。 */
+function paletteClass(prefix, id, count) {
+  const s = String(id ?? '');
+  let n = 0;
+  for (let i = 0; i < s.length; i++) n = (n * 31 + s.charCodeAt(i)) % count;
+  return `${prefix}${n + 1}`;
+}
+
+/** 利用者の表示名。Discord の表示名を優先し、未設定ならユーザー名。 */
+function userName(user) {
+  return (user && (user.global_name || user.username)) || '';
+}
+
+/** Discord のアバター画像。既定アバターの利用者は avatar_hash を持たないため null を返し、頭文字で代替する。 */
+function avatarUrl(user) {
+  if (!user || !user.avatar_hash) return null;
+  return `https://cdn.discordapp.com/avatars/${encodeURIComponent(user.discord_user_id)}/${encodeURIComponent(user.avatar_hash)}.png?size=64`;
+}
+
+function avatarHtml(user) {
+  const url = avatarUrl(user);
+  if (url) return `<span class="avatar ph" data-bg="${escapeHtml(url)}"></span>`;
+  return `<span class="avatar ${paletteClass('a', user && user.id, 5)}">${escapeHtml(initial(userName(user)))}</span>`;
+}
+
+function pubLogoHtml(publisher) {
+  if (publisher.logo_url) return `<span class="pub-logo ph" data-bg="${escapeHtml(publisher.logo_url)}"></span>`;
+  return `<span class="pub-logo ${paletteClass('p', publisher.id, 4)}">${escapeHtml(initial(publisher.name))}</span>`;
+}
+
+/** サムネイル。カバー画像を持たない記事は灰色の枠のままにする(別の画像で埋めない)。 */
+function thumbHtml(article, cls) {
+  if (article.cover_image_url) return `<div class="${cls} ph" data-bg="${escapeHtml(article.cover_image_url)}"></div>`;
+  return `<div class="${cls}"></div>`;
+}
+
+/** 公開直後の記事か。 */
+function isNew(article) {
+  const t = article.published_at ? new Date(article.published_at).getTime() : NaN;
+  return Number.isFinite(t) && Date.now() - t < NEW_WITHIN_MS;
+}
+
+/** 公開時刻。秒まで出すのは、同じ分内に並んだ記事の前後関係を読めるようにするため。 */
+function timeHtml(iso) {
+  if (!iso) return '';
+  return `<time datetime="${escapeHtml(iso)}">${escapeHtml(formatDateTime(iso))}</time>`;
+}
+
+/* ---------------------------------------------------------------- 記事一覧の行 */
+
+/** 記事広告の開示。「広告」の 2 文字だけでは誰の広告か分からず開示にならないため、広告主名を必ず添える。名前が欠けている場合は黙って省かずに欠落そのものを出す(開示の不備は隠すべきものではない)。 */
+function sponsorHtml(article) {
+  if (article.sponsor_name) return `<span>提供: ${escapeHtml(article.sponsor_name)}</span>`;
+  return '<span>提供元の表示がありません</span>';
+}
+
+/** 一覧 1 行のメタ情報。報道社を先頭側に置くのは、加盟社の可視性を一覧でも担保するため。 */
+function metaHtml(article) {
+  const parts = [];
+  if (article.is_breaking) parts.push('<span class="badge breaking">速報</span>');
+  if (article.is_sponsored) parts.push('<span class="badge sponsored">広告</span>');
+  if (article.publisher) {
+    const state = article.publisher.stance === 'state' ? '<span class="state">国営</span>' : '';
+    parts.push(`<span class="publisher">${pubLogoHtml(article.publisher)}${escapeHtml(article.publisher.name)}${state}</span>`);
+  }
+  if (article.category) parts.push(`<span class="cat-chip">${escapeHtml(article.category.name)}</span>`);
+  for (const tag of (article.tags || []).slice(0, TAGS_PER_ROW)) parts.push(`<span class="tag-chip">#${escapeHtml(tag.name)}</span>`);
+  if (article.is_sponsored) parts.push(sponsorHtml(article));
+  // byline_mode が publisher の記事は報道社名だけで署名する(著者は監査のために保持されるが表には出さない)。
+  if (article.byline_mode !== 'publisher' && article.author) parts.push(`<span class="author">${avatarHtml(article.author)}${escapeHtml(userName(article.author))}</span>`);
+  if (article.comment_count) parts.push(`<span class="thread">${article.comment_count}</span>`);
+  // 0 は「まだ誰も投票していない」ことを表すため出さないが、負の点数は出す(隠すと賛否が割れた記事が無風に見える)。
+  if (article.score) parts.push(`<span class="react">${article.score > 0 ? '▲' : '▼'}${Math.abs(article.score)}</span>`);
+  const vis = VISIBILITY_BADGE[article.visibility];
+  if (vis) parts.push(`<span class="badge ${vis.cls}">${vis.label}</span>`);
+  parts.push(timeHtml(article.published_at));
+  return `<div class="meta">${parts.join('')}</div>`;
+}
+
+/** 記事一覧の 1 行。行全体が記事へのリンクであるため、報道社・カテゴリ・タグは入れ子のリンクにできない(HTML として不正になる)。 */
+function articleRowHtml(article) {
+  return `<li><a class="article-row" href="${escapeHtml(articleUrl(article.slug))}">${thumbHtml(article, 'thumb')}<div><p class="title">${escapeHtml(article.title)}</p>${metaHtml(article)}</div></a></li>`;
+}
+
+/** トピックスの見出しに添えるバッジ。全体公開は付けない(ここでは既定であり、付けると限定公開の記事が埋もれる)。 */
+function topicBadgesHtml(article) {
+  const parts = [];
+  if (article.is_breaking) parts.push('<span class="badge breaking">速報</span>');
+  if (isNew(article)) parts.push('<span class="badge new">NEW</span>');
+  if (article.is_sponsored) parts.push('<span class="badge sponsored">広告</span>');
+  const vis = VISIBILITY_BADGE[article.visibility];
+  if (vis && article.visibility !== 'public') parts.push(`<span class="badge ${vis.cls}">${vis.label}</span>`);
+  return parts.join('');
+}
+
+/* ---------------------------------------------------------------- 表示する一覧の決定 */
+
+/**
+ * URL から、記事一覧に何を出すかを決める。
+ * /categories/{slug} は欄のページ(この場合 latest_only は付けない。新着一覧から外した欄の記事も、その欄のページには出る)。
+ * 検索(?q=)と連載(?series=)に専用のページ経路が無いため、トップの状態として表す。
+ */
+function resolveView() {
+  const params = new URLSearchParams(location.search);
+  const parsed = Number.parseInt(params.get('page') || '1', 10);
+  const page = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+
+  const matched = location.pathname.match(/^\/categories\/([^/]+)\/?$/);
+  if (matched) return { kind: 'category', slug: decodeURIComponent(matched[1]), page };
+
+  const q = (params.get('q') || '').trim();
+  if (q) return { kind: 'search', q, page };
+
+  const series = (params.get('series') || '').trim();
+  if (series) return { kind: 'series', slug: series, page };
+
+  return { kind: 'latest', page };
+}
+
+/** 表示する一覧の取得先。 */
+function listUrl(view) {
+  switch (view.kind) {
+    case 'category': return '/api/articles' + qs({ category: view.slug, page: view.page, per_page: PER_PAGE });
+    case 'search': return '/api/search' + qs({ q: view.q, page: view.page });
+    case 'series': return '/api/articles' + qs({ series: view.slug, page: view.page, per_page: PER_PAGE });
+    default: return '/api/articles' + qs({ latest_only: 1, page: view.page, per_page: PER_PAGE });
+  }
+}
+
+/** ページを送る先。現在の絞り込み(欄・検索語・連載)を保ったままページ番号だけを差し替える。 */
+function pageHref(page) {
+  const url = new URL(location.href);
+  if (page <= 1) url.searchParams.delete('page');
+  else url.searchParams.set('page', String(page));
+  return url.pathname + url.search;
+}
+
+/** 一覧の見出し。連載の題は記事が持つ連載情報から取る(連載 1 件を引く要求を増やさずに済む)。 */
+function headingFor(view, categories, items) {
+  if (view.kind === 'category') {
+    const found = categories.find((c) => c.slug === view.slug);
+    return found ? found.name : view.slug;
+  }
+  if (view.kind === 'search') return `「${view.q}」の検索結果`;
+  if (view.kind === 'series') {
+    const withSeries = items.find((a) => a.series && a.series.title);
+    return `連載「${withSeries ? withSeries.series.title : view.slug}」`;
+  }
+  return '新着記事';
+}
+
+/** 一覧が 0 件のときの文言。 */
+function emptyTextFor(view) {
+  if (view.kind === 'category') return 'この欄の記事はまだありません。';
+  if (view.kind === 'search') return `「${view.q}」に一致する記事はありません。`;
+  if (view.kind === 'series') return 'この連載の記事はまだありません。';
+  return '新着の記事はまだありません。新着一覧に含めない設定の欄(相場のような定期記事の欄)の記事は、その欄のページに出ます。';
+}
+
+/* ---------------------------------------------------------------- 各領域の描画 */
+
+/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
+function mountAdminNav(viewer) {
+  if (!viewer || !viewer.is_admin) return;
+  const write = document.querySelector('.globalnav a.write');
+  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
+}
+
+/** ヘッダとサイドバーのログイン導線。 */
+async function mountAccount(view) {
+  const back = location.pathname + location.search;
+  for (const a of document.querySelectorAll('[data-login]')) a.href = '/auth/login' + qs({ redirect_to: back });
+
+  let user = null;
+  try {
+    const data = await me();
+    user = data && data.user ? data.user : null;
+    mountAdminNav(data);
+  } catch (e) {
+    // 取得できないときはログイン導線のまま出す。ログイン済みだと誤って見せるより、もう一度ログインを促す方が害が無い。
+    console.error('ログイン状態を取得できませんでした', e);
+    return;
+  }
+  if (!user) return;
+
+  const card = document.getElementById('login-card');
+  if (card) card.remove();
+
+  const login = document.getElementById('account-login');
+  if (!login) return;
+  const actions = document.getElementById('actions');
+  login.insertAdjacentHTML('beforebegin', `<a class="btn" href="/settings">${avatarHtml(user)}${escapeHtml(userName(user))}</a><button class="btn" type="button" id="logout">ログアウト</button>`);
+  login.remove();
+  applyBackgrounds(actions);
+
+  document.getElementById('logout').addEventListener('click', async () => {
+    try {
+      await post('/auth/logout');
+    } catch (e) {
+      // 失敗しても読み込み直す。状態はサーバーから取り直すため、破棄できていなければログイン済みのまま表示され、利用者に伝わる。
+      console.error('ログアウトに失敗しました', e);
+    }
+    location.reload();
+  });
+}
+
+/** グローバルナビのカテゴリ。position 順に並べる。 */
+async function mountNav(view, categoriesP) {
+  let categories;
+  try {
+    categories = itemsOf(await categoriesP);
+  } catch (e) {
+    // カテゴリを引けない場合もトップ・タグ・連載・記事を書くの導線は残す。記事一覧の側でも同じ不調が文言として出る。
+    console.error('カテゴリを取得できませんでした', e);
+    return;
+  }
+
+  const ordered = [...categories].sort((a, b) => a.position - b.position || String(a.name).localeCompare(String(b.name), 'ja'));
+  const html = ordered.map((c) => {
+    const active = view.kind === 'category' && c.slug === view.slug ? ' class="active"' : '';
+    return `<a href="/categories/${encodeURIComponent(c.slug)}"${active}>${escapeHtml(c.name)}</a>`;
+  }).join('');
+
+  if (view.kind === 'category') document.getElementById('nav-top').classList.remove('active');
+  document.getElementById('nav-spacer').insertAdjacentHTML('beforebegin', html);
+}
+
+/** 記事一覧。 */
+async function mountArticles(view, listP, categoriesP) {
+  const titleEl = document.getElementById('articles-title');
+  const countEl = document.getElementById('articles-count');
+  const listEl = document.getElementById('articles-list');
+  const statusEl = document.getElementById('articles-status');
+  const pagerEl = document.getElementById('articles-pager');
+
+  let data;
+  try {
+    data = await listP;
+  } catch (e) {
+    showNotice(statusEl, `記事一覧を読み込めませんでした(${reasonOf(e)})`, 'error');
+    return;
+  }
+  const items = itemsOf(data);
+
+  let categories = [];
+  try {
+    categories = itemsOf(await categoriesP);
+  } catch (e) {
+    // 欄の名前を解決できないだけであり、一覧そのものは出せる。見出しは slug のまま出る。
+    console.error('カテゴリを取得できませんでした', e);
+  }
+
+  const heading = headingFor(view, categories, items);
+  titleEl.textContent = heading;
+  document.title = view.kind === 'latest' ? 'instant-news' : `${heading} — instant-news`;
+
+  if (Number.isFinite(data && data.total)) {
+    countEl.textContent = `全 ${data.total} 件`;
+    countEl.hidden = false;
+  }
+
+  if (!items.length) {
+    showNotice(statusEl, emptyTextFor(view), 'info');
+    return;
+  }
+  setHtml(listEl, items.map(articleRowHtml).join(''));
+
+  const prev = view.page > 1 ? `<a href="${escapeHtml(pageHref(view.page - 1))}">← 前のページ</a>` : '';
+  const next = data && data.has_next ? `<a href="${escapeHtml(pageHref(view.page + 1))}">次のページ →</a>` : '';
+  if (prev || next) {
+    pagerEl.innerHTML = prev + (prev && next ? ' ・ ' : '') + next;
+    pagerEl.hidden = false;
+  }
+}
+
+/** 速報帯。速報が無ければ帯そのものを出さない(空の帯は「速報がある」という誤った合図になる)。 */
+function renderBreaking(items) {
+  const el = document.getElementById('breaking');
+  const article = items.find((a) => a.is_breaking);
+  if (!article) {
+    el.remove();
+    return;
+  }
+  el.innerHTML = `<span class="label">速報</span><a class="headline" href="${escapeHtml(articleUrl(article.slug))}">${escapeHtml(article.title)}</a>${timeHtml(article.published_at)}`;
+  el.hidden = false;
+}
+
+/** トピックス。直近の新着の見出しと、カバー画像を持つ最新の記事。 */
+function renderTopics(items, failure) {
+  const el = document.getElementById('topics-body');
+  if (failure) {
+    el.innerHTML = noticeHtml(`トピックスを読み込めませんでした(${reasonOf(failure)})`, 'error');
+    return;
+  }
+  if (!items.length) {
+    el.innerHTML = noticeHtml('記事はまだありません。', 'info');
+    return;
+  }
+
+  const headlines = items.slice(0, 8).map((a) => `<li><a href="${escapeHtml(articleUrl(a.slug))}">${escapeHtml(a.title)}${topicBadgesHtml(a)}</a></li>`).join('');
+  const lead = items.find((a) => a.cover_image_url) || items[0];
+  const featured = `<div class="featured"><a href="${escapeHtml(articleUrl(lead.slug))}">${thumbHtml(lead, 'thumb')}<p class="caption">${escapeHtml(lead.title)}</p></a></div>`;
+  setHtml(el, `<div class="topics"><ul class="headlines">${headlines}</ul>${featured}</div><div class="topics-footer"><a href="#articles">記事一覧へ</a><a href="#tags">タグから探す</a></div>`);
+}
+
+/** サイドバーの記事ランキングの 1 行。 */
+function rankingRowHtml(article, index, metaText) {
+  return `<li><span class="rank-badge">${index + 1}</span><div><a class="r-title" href="${escapeHtml(articleUrl(article.slug))}">${escapeHtml(article.title)}</a><div class="r-meta">${escapeHtml(metaText)}</div></div>${thumbHtml(article, 'r-thumb')}</li>`;
+}
+
+/** 記事ランキングの共通の描画。順位は取得済みの新着の中でのものであり、全期間の集計ではない。 */
+function renderRanking(bodyId, items, failure, { limit, compare, meta, empty }) {
+  const el = document.getElementById(bodyId);
+  if (failure) {
+    el.innerHTML = `<div class="body">${noticeHtml(`ランキングを読み込めませんでした(${reasonOf(failure)})`, 'error')}</div>`;
+    return;
+  }
+  const ranked = [...items].sort(compare).slice(0, limit);
+  if (!ranked.length) {
+    el.innerHTML = `<div class="body">${noticeHtml(empty, 'info')}</div>`;
+    return;
+  }
+  setHtml(el, `<ol class="ranking">${ranked.map((a, i) => rankingRowHtml(a, i, meta(a))).join('')}</ol>`);
+}
+
+/** 速報帯・トピックス・サイドバーの記事ランキングを、1 回の新着の取得から組み立てる。 */
+async function mountFromLatest(latestP) {
+  let items = [];
+  let failure = null;
+  try {
+    items = itemsOf(await latestP);
+  } catch (e) {
+    failure = e;
+  }
+
+  if (!failure) renderBreaking(items);
+  else document.getElementById('breaking').remove();
+
+  renderTopics(items, failure);
+
+  renderRanking('view-ranking-body', items, failure, {
+    limit: 5,
+    compare: (a, b) => b.view_count - a.view_count,
+    meta: (a) => {
+      const by = a.publisher ? a.publisher.name : userName(a.author);
+      return by ? `${by} ・ ${a.view_count} 表示` : `${a.view_count} 表示`;
+    },
+    empty: '記事はまだありません。',
+  });
+
+  renderRanking('reaction-ranking-body', items, failure, {
+    limit: 3,
+    compare: (a, b) => (b.score + b.comment_count) - (a.score + a.comment_count),
+    meta: (a) => `${a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')}${Math.abs(a.score)} ・ 💬 ${a.comment_count}`,
+    empty: '記事はまだありません。',
+  });
+}
+
+/** タグのアイコン。持たないタグには何も出さない(意味の無い記号で埋めない)。 */
+function tagIconHtml(tag) {
+  if (!tag.icon_url) return '';
+  return `<span class="tag-icon ph" data-bg="${escapeHtml(tag.icon_url)}"></span>`;
+}
+
+/** 記事数。応答に含まれない場合は出さない(件数を装った値を作らない)。 */
+function tagCount(tag) {
+  return Number.isFinite(tag.article_count) ? tag.article_count : null;
+}
+
+/** タグの 2 つの領域を 1 回の取得から組み立てる。上のカードは記事数の多い順の抜粋、サイドバーは全件の索引。 */
+async function mountTags() {
+  const trendEl = document.getElementById('trend-body');
+  const cloudEl = document.getElementById('tagcloud-body');
+
+  let tags;
+  try {
+    tags = itemsOf(await get('/api/tags'));
+  } catch (e) {
+    const text = `タグを読み込めませんでした(${reasonOf(e)})`;
+    trendEl.innerHTML = noticeHtml(text, 'error');
+    cloudEl.innerHTML = `<div class="body">${noticeHtml(text, 'error')}</div>`;
+    return;
+  }
+
+  if (!tags.length) {
+    trendEl.innerHTML = noticeHtml('タグはまだありません。', 'info');
+    cloudEl.innerHTML = `<div class="body">${noticeHtml('タグはまだありません。', 'info')}</div>`;
+    return;
+  }
+
+  // 記事数が応答に含まれる場合だけ多い順に並べ替える。含まれない場合は並べ替えの根拠が無いため、取得した順のまま出す。
+  const ranked = [...tags].sort((a, b) => (tagCount(b) ?? -1) - (tagCount(a) ?? -1)).slice(0, 9);
+  setHtml(trendEl, `<ol>${ranked.map((tag, i) => {
+    const count = tagCount(tag);
+    const countHtml = count === null ? '' : `<span class="count">${count} 件</span>`;
+    return `<li><span class="rank">${i + 1}</span><a class="kw" href="/tags/${encodeURIComponent(tag.slug)}">#${escapeHtml(tag.name)}</a>${countHtml}</li>`;
+  }).join('')}</ol>`);
+
+  const shown = tags.slice(0, TAGCLOUD_LIMIT);
+  const chips = shown.map((tag) => {
+    const count = tagCount(tag);
+    const countHtml = count === null ? '' : ` <b>${count}</b>`;
+    return `<a href="/tags/${encodeURIComponent(tag.slug)}">${tagIconHtml(tag)}#${escapeHtml(tag.name)}${countHtml}</a>`;
+  }).join('');
+  const rest = tags.length - shown.length;
+  const restHtml = rest > 0 ? `<div class="body">${noticeHtml(`ほかに ${rest} 件のタグがあります。記事のタグから辿れます。`, 'info')}</div>` : '';
+  setHtml(cloudEl, `<div class="tagcloud">${chips}</div>${restHtml}`);
+}
+
+/** 連載。連載そのもののページ経路が無いため、題はトップの一覧を連載で絞った状態(/?series=)へ繋ぐ。 */
+async function mountSeries() {
+  const el = document.getElementById('series-body');
+  let series;
+  try {
+    series = itemsOf(await get('/api/series'));
+  } catch (e) {
+    el.innerHTML = `<div class="body">${noticeHtml(`連載を読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
+    return;
+  }
+  if (!series.length) {
+    el.innerHTML = `<div class="body">${noticeHtml('連載はまだありません。', 'info')}</div>`;
+    return;
+  }
+  setHtml(el, `<ul class="series">${series.slice(0, 5).map((s) => {
+    const cover = s.cover_image_url ? `<div class="cover ph" data-bg="${escapeHtml(s.cover_image_url)}"></div>` : '<div class="cover"></div>';
+    const href = '/' + qs({ series: s.slug });
+    return `<li>${cover}<div><a class="s-title" href="${escapeHtml(href)}">${escapeHtml(s.title)}</a><div class="s-count">${escapeHtml(userName(s.owner))}</div></div></li>`;
+  }).join('')}</ul>`);
+}
+
+/** 報道社ランキング。score はサーバーが記事ごとの規則で求めた値であり(規則は docs/api.md を参照)、賛成数とコメント数はその内訳ではなく素の合計として各行に添える。 */
+async function mountPublisherRanking() {
+  const el = document.getElementById('publisher-ranking-body');
+  let rows;
+  try {
+    rows = itemsOf(await get('/api/rankings/publishers' + qs({ days: 7, limit: 5 })));
+  } catch (e) {
+    el.innerHTML = `<div class="body">${noticeHtml(`報道社ランキングを読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div class="body">${noticeHtml('今週はまだ集計できる記事がありません。', 'info')}</div>`;
+    return;
+  }
+  setHtml(el, `<ol class="pub-ranking">${rows.map((row, i) => {
+    const p = row.publisher;
+    const meta = `記事 ${row.article_count} ・ ▲ ${row.up_count} ・ 💬 ${row.comment_count}`;
+    return `<li><span class="rank-badge">${i + 1}</span>${pubLogoHtml(p)}<div><a class="p-name" href="/publishers/${encodeURIComponent(p.slug)}">${escapeHtml(p.name)}</a><div class="p-meta">${escapeHtml(meta)}</div></div><span class="p-score">${row.score}</span></li>`;
+  }).join('')}</ol>`);
+}
+
+/* ---------------------------------------------------------------- 起点 */
+
+const view = resolveView();
+if (view.kind === 'search') document.getElementById('search-input').value = view.q;
+
+const categoriesP = share(get('/api/categories'));
+const latestP = share(get(LATEST_URL));
+// トップの 1 ページ目は速報帯・トピックス・ランキングと同じ取得で足りるため、同じ約束を使い回して要求を重ねない。
+const listP = listUrl(view) === LATEST_URL ? latestP : share(get(listUrl(view)));
+
+// 各領域は独立して描画する。1 つの取得が失敗しても、他の領域はその領域なりの文言を出して残る。
+mountAccount(view);
+mountNav(view, categoriesP);
+mountArticles(view, listP, categoriesP);
+mountFromLatest(latestP);
+mountTags();
+mountSeries();
+mountPublisherRanking();
+renderAdSlot(document.getElementById('ad-header'), 'header');
+renderAdSlot(document.getElementById('ad-sidebar'), 'sidebar');
+</script>
+</body>
+</html>

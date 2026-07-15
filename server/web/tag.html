@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>タグ | instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="container">
+    <span class="promo">このデプロイは Discord サーバーのニュースプラットフォームです</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord の報道社連合</span>
+    </a>
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" placeholder="記事・タグ・報道社を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <div class="actions" data-actions>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<nav class="globalnav">
+  <div class="container" data-globalnav>
+    <a href="/">トップ</a>
+    <span class="spacer"></span>
+    <a class="write" href="/editor">✍ 記事を書く</a>
+  </div>
+</nav>
+
+<main class="container layout">
+  <div class="main" data-main>
+    <div class="breadcrumb">
+      <a href="/">トップ</a><span>›</span>
+      タグ<span>›</span>
+      <span data-crumb></span>
+    </div>
+
+    <!--
+      タグページ。国のような話題はタグで表すため、このページがそのまま話題のプロフィールになる。
+      説明文とアイコン(国旗にもなる)は tags.description / tags.icon_url が持つ。
+    -->
+    <section class="card">
+      <div class="tag-hero" data-hero></div>
+      <div class="pub-stats" data-stats></div>
+    </section>
+
+    <!-- タグの年表。タグで絞った記事を古い順に並べ、話題の履歴を時系列で辿れるようにする。 -->
+    <section class="card" data-timeline-card hidden>
+      <div class="section-head">
+        <h2>年表</h2>
+        <a class="more" href="#" data-more-timeline hidden>もっと読む</a>
+      </div>
+      <ul class="timeline" data-timeline></ul>
+    </section>
+
+    <section class="card" data-articles-card hidden>
+      <div class="section-head">
+        <h2 data-articles-title>記事</h2>
+        <a class="more" href="#" data-more-articles hidden>もっと読む</a>
+      </div>
+      <ul class="articles" data-articles></ul>
+    </section>
+  </div>
+
+  <aside class="side">
+
+    <section class="card" data-related-card hidden>
+      <div class="section-head"><h2>関連タグ</h2></div>
+      <div class="tagcloud" data-related></div>
+    </section>
+
+    <section class="card" data-pubs-card hidden>
+      <div class="section-head"><h2 data-pubs-title>よく報じる社</h2></div>
+      <ol class="pub-ranking" data-pubs></ol>
+    </section>
+
+    <div class="adslot sidebar card" data-adslot>
+      <div class="creative"></div>
+    </div>
+
+    <section class="card" data-tagcloud-card hidden>
+      <div class="section-head"><h2>タグ一覧</h2></div>
+      <div class="tagcloud" data-tagcloud></div>
+    </section>
+
+  </aside>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">instant-news — Discord コミュニティのニュースプラットフォーム</div>
+  </div>
+</footer>
+
+<script type="module">
+import { api, get, del, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError } from '/static/js/api.js';
+
+/* このページの経路は /tags/{slug} で固定されているため、対象のタグは URL から取り出す。 */
+const SLUG = decodeURIComponent((location.pathname.match(/\/tags\/([^/]+)\/?$/) || [])[1] || '');
+
+/* 一覧の 1 ページの件数。 */
+const PER_PAGE = 20;
+
+/* サイドバーの集計(関連タグ・よく報じる社)の標本にする記事の件数。集計はこのタグの新しい方から標本を取った近似であり、全期間の網羅ではない。 */
+const SAMPLE_SIZE = 100;
+
+/* ログイン中の利用者(未ログインなら null)。 */
+let viewer = null;
+
+/* このタグを購読しているか。購読は個人単位の DM であり、タグのチャンネル通知とは別の仕組み。 */
+let subscribed = false;
+
+/* 年表で直前に描いた項目の年。年が変わる境目にだけ年を出すため、描画をまたいで覚えておく。 */
+let timelineYear = null;
+
+let articlePage = 0;
+let timelinePage = 0;
+
+/** ログインへの導線。認証を終えたら今見ているページへ戻す。 */
+function loginUrl() {
+  return '/auth/login' + qs({ redirect_to: location.pathname + location.search });
+}
+
+/** URL を CSS の url() へ安全に埋める。JSON.stringify が CSS 文字列としての引用符とバックスラッシュを潰し、escapeHtml が属性値としての引用符を潰す。二段で囲わないと、引用符を含む URL から style 属性の外へ抜け出せてしまう。 */
+function cssUrl(url) {
+  return `url(${escapeHtml(JSON.stringify(String(url)))})`;
+}
+
+/** 一覧の応答から配列を取り出す。応答が配列そのものでも、ページ情報を伴うオブジェクトでも受け取れるようにする。 */
+function listOf(data, key) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data[key])) return data[key];
+  return [];
+}
+
+/** まだ次のページがあるか。応答がページ情報を持たない場合は、空になるまで「ある」とみなす。 */
+function hasMore(data, items) {
+  if (data && typeof data.has_more === 'boolean') return data.has_more;
+  if (data && Number.isFinite(data.total) && Number.isFinite(data.page) && Number.isFinite(data.per_page)) {
+    return data.page * data.per_page < data.total;
+  }
+  return items.length > 0;
+}
+
+/** 利用者の表示名。Discord の表示名があればそれを、無ければユーザー名を出す。 */
+function displayName(user) {
+  if (!user) return '';
+  return user.global_name || user.username || '';
+}
+
+/** 文字列の ID から配色を決める。同じ相手には常に同じ色が付く。ID は文字列のまま扱う(数値にするとスノーフレークの下位桁が黙って壊れる)。 */
+function paletteClass(prefix, count, key) {
+  const s = String(key == null ? '' : key);
+  let n = 0;
+  for (let i = 0; i < s.length; i++) n = (n * 31 + s.charCodeAt(i)) % count;
+  return prefix + (n + 1);
+}
+
+/** 報道社のロゴ。未設定なら社名の頭文字を出す(名前が読めれば一覧では足りる)。 */
+function pubLogoHtml(pub) {
+  if (!pub) return '';
+  if (pub.logo_url) return `<span class="pub-logo ph" style="background-image:${cssUrl(pub.logo_url)}"></span>`;
+  const initial = escapeHtml(Array.from(String(pub.name || '?'))[0]);
+  return `<span class="pub-logo ${paletteClass('p', 4, pub.slug || pub.id || pub.name)}">${initial}</span>`;
+}
+
+/** タグのアイコン。国のタグでは国旗になる。未設定なら何も出さない。 */
+function tagIconHtml(tag) {
+  if (!tag || !tag.icon_url) return '';
+  return `<span class="tag-icon ph" style="background-image:${cssUrl(tag.icon_url)}"></span>`;
+}
+
+/** 記事に添えるバッジ。記事広告の開示と速報は必ず出す(開示は装飾ではなく要件であり、一覧でも落としてはならない)。閲覧範囲は public 以外のときだけ出す(既定を明示しても情報は増えない)。 */
+function badgesHtml(a) {
+  const out = [];
+  if (a.is_breaking) out.push('<span class="badge breaking">速報</span>');
+  if (a.is_sponsored) {
+    out.push('<span class="badge sponsored">広告</span>');
+    if (a.sponsor_name) out.push(`<span>提供 ${escapeHtml(a.sponsor_name)}</span>`);
+  }
+  if (a.visibility === 'members') out.push('<span class="badge vis-members">メンバー限定</span>');
+  if (a.visibility === 'restricted') out.push('<span class="badge vis-restricted">ロール限定</span>');
+  return out;
+}
+
+/** 記事一覧の 1 行。タグページでは「どの社が報じたか」が読みどころになるため、メタ行の先頭に報道社を置く。 */
+function articleRowHtml(a) {
+  const meta = [];
+  const pub = a.publisher;
+  if (pub) {
+    const state = pub.stance === 'state' ? '<span class="state">国営</span>' : '';
+    meta.push(`<span class="publisher">${pubLogoHtml(pub)}${escapeHtml(pub.name)}${state}</span>`);
+  }
+  if (a.category) meta.push(`<span class="cat-chip">${escapeHtml(a.category.name)}</span>`);
+  if (a.comment_count != null) meta.push(`<span class="thread">${escapeHtml(a.comment_count)}</span>`);
+  if (a.score != null) meta.push(`<span class="react">${escapeHtml((a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')) + Math.abs(a.score))}</span>`);
+  meta.push(...badgesHtml(a));
+  if (a.published_at) meta.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))}</time>`);
+
+  const thumb = a.cover_image_url
+    ? `<div class="thumb ph" style="background-image:${cssUrl(a.cover_image_url)}"></div>`
+    : '<div class="thumb"></div>';
+
+  return `<li><a class="article-row" href="${escapeHtml(articleUrl(a.slug))}">${thumb}<div>` +
+    `<p class="title">${escapeHtml(a.title)}</p>` +
+    `<div class="meta">${meta.join('')}</div>` +
+    `</div></a></li>`;
+}
+
+/** 年表の日付。年が変わる境目にだけ年を出す。話題の履歴は年をまたぐため、月日だけでは何年の出来事か読めなくなる。 */
+function timelineDateHtml(iso) {
+  const d = new Date(iso);
+  if (!iso || Number.isNaN(d.getTime())) return '<time class="t-date"></time>';
+  const year = d.getFullYear();
+  const head = timelineYear === year ? '' : `${year}年<br>`;
+  timelineYear = year;
+  return `<time class="t-date" datetime="${escapeHtml(iso)}" title="${escapeHtml(formatDateTime(iso))}">${head}${d.getMonth() + 1}月${d.getDate()}日</time>`;
+}
+
+/** 年表の 1 項目。速報として出された記事を節目(major)として強調する。 */
+function timelineItemHtml(a) {
+  const meta = [];
+  if (a.publisher) meta.push(escapeHtml(a.publisher.name));
+  if (a.category) meta.push(escapeHtml(a.category.name));
+  return `<li${a.is_breaking ? ' class="major"' : ''}>` +
+    timelineDateHtml(a.published_at) +
+    '<span class="t-dot"></span>' +
+    `<div><a class="t-title" href="${escapeHtml(articleUrl(a.slug))}">${escapeHtml(a.title)}</a>` +
+    `<div class="t-meta">${meta.join(' ・ ')}</div></div></li>`;
+}
+
+/** 数の表示。値を持たない項目に 0 を出すと「0 件である」と読めてしまうため、分からないものは — にする。 */
+function statValue(v) {
+  return v == null ? '—' : escapeHtml(v);
+}
+
+/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
+function mountAdminNav(viewer) {
+  if (!viewer || !viewer.is_admin) return;
+  const write = document.querySelector('.globalnav a.write');
+  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
+}
+
+/** ヘッダの利用者導線とグローバルナビを結線する。ナビの主役はカテゴリ(記事の主分類)。 */
+async function renderChrome() {
+  mountAdminNav(viewer);
+  const actions = document.querySelector('[data-actions]');
+  if (viewer) {
+    const u = viewer.user || viewer;
+    const name = displayName(u);
+    const initial = name ? escapeHtml(Array.from(name)[0].toUpperCase()) : '?';
+    const avatar = u.avatar_url
+      ? `<span class="avatar ph" style="background-image:${cssUrl(u.avatar_url)}"></span>`
+      : `<span class="avatar ${paletteClass('a', 5, u.discord_user_id || u.id || name)}">${initial}</span>`;
+    actions.insertAdjacentHTML('afterbegin', `<a class="publisher" href="/settings">${avatar}${escapeHtml(name)}</a>`);
+  } else {
+    actions.insertAdjacentHTML('afterbegin', `<a class="btn-discord" href="${escapeHtml(loginUrl())}">🎮 Discord でログイン</a>`);
+  }
+
+  try {
+    const cats = listOf(await get('/api/categories'), 'categories');
+    const html = cats.map((c) => `<a href="/categories/${encodeURIComponent(c.slug)}">${escapeHtml(c.name)}</a>`).join('');
+    document.querySelector('[data-globalnav] .spacer').insertAdjacentHTML('beforebegin', html);
+  } catch (e) {
+    /* カテゴリを引けなくてもページ本体は読める。ナビだけを諦める。 */
+  }
+}
+
+/** タグの見出し・説明・統計を描く。 */
+function renderTag(tag, stats) {
+  const label = `#${tag.name}`;
+  document.title = `${label} | instant-news`;
+  document.querySelector('[data-crumb]').textContent = label;
+  document.querySelector('[data-articles-title]').textContent = `${label} の記事`;
+  document.querySelector('[data-pubs-title]').textContent = `${label} をよく報じる社`;
+
+  const flag = tag.icon_url
+    ? `<span class="flag ph" style="background-image:${cssUrl(tag.icon_url)}"></span>`
+    : '<span class="flag"></span>';
+  document.querySelector('[data-hero]').innerHTML =
+    flag +
+    `<div><h1>${escapeHtml(label)}</h1><p class="desc">${escapeHtml(tag.description || '')}</p></div>` +
+    subscribeHtml();
+
+  /* 統計は 4 列で固定されているため、4 つを必ず埋める。チャンネル通知の有無をここに出すのは、
+     購読(個人宛ての DM)と通知先チャンネルが別の仕組みであることを、同じ面で読み取れるようにするため。 */
+  document.querySelector('[data-stats]').innerHTML =
+    `<div><b>${statValue(stats.article_count)}</b><span>記事</span></div>` +
+    `<div><b>▲ ${statValue(stats.up_count)}</b><span>賛成</span></div>` +
+    `<div><b>💬 ${statValue(stats.comment_count)}</b><span>コメント</span></div>` +
+    `<div><b>${tag.notify_channel_id ? 'あり' : 'なし'}</b><span>チャンネル通知</span></div>`;
+
+  wireSubscribe();
+}
+
+/** 購読ボタン。ボタンの文言そのもので「新着が DM で個人宛てに届く」ことを示す。チャンネル通知はタグに設定された宛先へ流れるものであり、こちらとは別に動く。 */
+function subscribeHtml() {
+  const title = 'このタグの記事が公開されると、あなた個人宛てに Discord の DM が届きます。タグに設定されたチャンネルへの通知とは別の仕組みで、購読はあなただけに効きます。';
+  if (!viewer) {
+    return `<a class="btn primary subscribe" href="${escapeHtml(loginUrl())}" title="${escapeHtml(title)}">🔔 ログインして DM 購読</a>`;
+  }
+  if (subscribed) {
+    return `<button class="btn subscribe" type="button" data-subscribe title="${escapeHtml(title)}">🔔 DM 購読中</button>`;
+  }
+  return `<button class="btn primary subscribe" type="button" data-subscribe title="${escapeHtml(title)}">🔔 新着を DM で受け取る</button>`;
+}
+
+/** 購読ボタンの操作を結ぶ。押されたら購読状態を反転し、ボタンを描き直す。 */
+function wireSubscribe() {
+  const btn = document.querySelector('[data-subscribe]');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const path = '/api/me/subscriptions/' + encodeURIComponent(SLUG);
+    try {
+      if (subscribed) await del(path);
+      else await api(path, { method: 'PUT' });
+      subscribed = !subscribed;
+      btn.outerHTML = subscribeHtml();
+      wireSubscribe();
+    } catch (e) {
+      /* セッションが切れていた場合はログインへ送る。それ以外はボタンを戻して再操作できるようにする。 */
+      if (e instanceof ApiError && e.status === 401) {
+        location.href = loginUrl();
+        return;
+      }
+      btn.disabled = false;
+      alert('購読の変更に失敗しました。時間をおいて再度お試しください。');
+    }
+  });
+}
+
+/** タグの本体を読む。 */
+async function loadTag() {
+  let data;
+  try {
+    data = await get('/api/tags/' + encodeURIComponent(SLUG));
+  } catch (e) {
+    const msg = e instanceof ApiError && e.status === 404
+      ? 'このタグは存在しません。'
+      : 'タグを読み込めませんでした。時間をおいて再度お試しください。';
+    document.querySelector('[data-main]').innerHTML =
+      `<section class="card"><div class="section-head"><h2>タグを表示できません</h2></div>` +
+      `<div class="body">${escapeHtml(msg)}</div></section>`;
+    return false;
+  }
+  const tag = data.tag || data;
+  renderTag(tag, data.stats || tag);
+  return true;
+}
+
+/** 記事一覧を 1 ページ読み、末尾に足す。 */
+async function loadArticles() {
+  const link = document.querySelector('[data-more-articles]');
+  let data;
+  try {
+    data = await get('/api/articles' + qs({ tag: SLUG, page: articlePage + 1, per_page: PER_PAGE }));
+  } catch (e) {
+    link.hidden = true;
+    return;
+  }
+  articlePage += 1;
+  const items = listOf(data, 'articles');
+  const card = document.querySelector('[data-articles-card]');
+  const list = document.querySelector('[data-articles]');
+
+  if (items.length === 0 && articlePage === 1) {
+    card.hidden = false;
+    list.outerHTML = '<div class="body">このタグの記事はまだありません。</div>';
+    return;
+  }
+  list.insertAdjacentHTML('beforeend', items.map(articleRowHtml).join(''));
+  card.hidden = false;
+  link.hidden = !hasMore(data, items);
+}
+
+/** 年表を 1 ページ読み、末尾に足す。並びは古い順で、話題の履歴をそのまま辿れる。 */
+async function loadTimeline() {
+  const link = document.querySelector('[data-more-timeline]');
+  let data;
+  try {
+    data = await get(`/api/tags/${encodeURIComponent(SLUG)}/timeline` + qs({ page: timelinePage + 1 }));
+  } catch (e) {
+    link.hidden = true;
+    return;
+  }
+  timelinePage += 1;
+  const items = listOf(data, 'articles');
+  if (items.length === 0) {
+    link.hidden = true;
+    return;
+  }
+  document.querySelector('[data-timeline]').insertAdjacentHTML('beforeend', items.map(timelineItemHtml).join(''));
+  document.querySelector('[data-timeline-card]').hidden = false;
+  link.hidden = !hasMore(data, items);
+}
+
+/**
+ * サイドバーの集計を描く。関連タグとよく報じる社は、このタグの記事から数えて出す。
+ * 標本は新しい方から SAMPLE_SIZE 件であり、全期間を数え上げたものではない。
+ */
+async function loadAggregates() {
+  let items;
+  try {
+    items = listOf(await get('/api/articles' + qs({ tag: SLUG, per_page: SAMPLE_SIZE })), 'articles');
+  } catch (e) {
+    return;
+  }
+
+  /* 関連タグ。このタグと同じ記事に付いたタグを、件数の多い順に出す。 */
+  const related = new Map();
+  for (const a of items) {
+    for (const t of a.tags || []) {
+      if (!t || t.slug === SLUG) continue;
+      const cur = related.get(t.slug) || { tag: t, count: 0 };
+      cur.count += 1;
+      related.set(t.slug, cur);
+    }
+  }
+  const relatedTop = [...related.values()].sort((x, y) => y.count - x.count).slice(0, 12);
+  if (relatedTop.length > 0) {
+    document.querySelector('[data-related]').innerHTML = relatedTop.map(({ tag, count }) =>
+      `<a href="/tags/${encodeURIComponent(tag.slug)}">${tagIconHtml(tag)}#${escapeHtml(tag.name)} <b>${escapeHtml(count)}</b></a>`
+    ).join('');
+    document.querySelector('[data-related-card]').hidden = false;
+  }
+
+  /* よく報じる社。記事数の多い順に出す。賛成とコメントは、この標本の中の合計。 */
+  const pubs = new Map();
+  for (const a of items) {
+    const p = a.publisher;
+    if (!p) continue;
+    const cur = pubs.get(p.slug) || { pub: p, count: 0, ups: 0, comments: 0 };
+    cur.count += 1;
+    cur.ups += a.up_count || 0;
+    cur.comments += a.comment_count || 0;
+    pubs.set(p.slug, cur);
+  }
+  const pubTop = [...pubs.values()].sort((x, y) => y.count - x.count).slice(0, 5);
+  if (pubTop.length > 0) {
+    document.querySelector('[data-pubs]').innerHTML = pubTop.map((row, i) =>
+      `<li><span class="rank-badge">${i + 1}</span>${pubLogoHtml(row.pub)}` +
+      `<div><a class="p-name" href="/publishers/${encodeURIComponent(row.pub.slug)}">${escapeHtml(row.pub.name)}</a>` +
+      `<div class="p-meta">記事 ${escapeHtml(row.count)} ・ 💬 ${escapeHtml(row.comments)}</div></div>` +
+      `<span class="p-score">▲ ${escapeHtml(row.ups)}</span></li>`
+    ).join('');
+    document.querySelector('[data-pubs-card]').hidden = false;
+  }
+}
+
+/** サイドバーのタグ一覧。タグは数が可変でナビに並べられないため、話題を辿る入口をここに置く。 */
+async function loadTagCloud() {
+  let tags;
+  try {
+    tags = listOf(await get('/api/tags'), 'tags');
+  } catch (e) {
+    return;
+  }
+  if (tags.length === 0) return;
+  document.querySelector('[data-tagcloud]').innerHTML = tags.slice(0, 24).map((t) =>
+    `<a href="/tags/${encodeURIComponent(t.slug)}">${tagIconHtml(t)}#${escapeHtml(t.name)}` +
+    (t.article_count == null ? '' : ` <b>${escapeHtml(t.article_count)}</b>`) + '</a>'
+  ).join('');
+  document.querySelector('[data-tagcloud-card]').hidden = false;
+}
+
+/** 「もっと読む」を結ぶ。一覧の続きはこの場に足していく。 */
+function wireMore(selector, loader) {
+  const link = document.querySelector(selector);
+  link.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    link.hidden = true;
+    loader();
+  });
+}
+
+async function main() {
+  try {
+    viewer = await me();
+  } catch (e) {
+    viewer = null;
+  }
+  if (viewer) {
+    const subs = listOf(viewer.subscriptions, 'subscriptions');
+    subscribed = subs.some((t) => (typeof t === 'string' ? t : t && t.slug) === SLUG);
+  }
+
+  renderChrome();
+  renderAdSlot(document.querySelector('[data-adslot]'), 'sidebar');
+  wireMore('[data-more-articles]', loadArticles);
+  wireMore('[data-more-timeline]', loadTimeline);
+
+  loadTagCloud();
+  if (!(await loadTag())) return;
+  loadTimeline();
+  loadArticles();
+  loadAggregates();
+}
+
+main();
+</script>
+
+</body>
+</html>
