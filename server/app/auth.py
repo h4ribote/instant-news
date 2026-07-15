@@ -6,7 +6,9 @@
 
 **API キーの生値は発行の応答で一度だけ返す。**再取得の手段を用意すると、保存しないという設計そのものが無意味になる。
 
-OAuth2 の資格情報(client_id / client_secret / redirect_uri)と対象 guild は settings 表が真実であり、要求のたびに読んだものを受け取る。起動時に読んで握り込まないため、画面から client_secret を差し替えれば次のログインからその値で交換される。一方、Cookie に Secure を付けるかどうかは config.yaml の server.base_url から決まる(公開 URL が https かどうかは実行環境の性質であって、画面から変えられる設定ではない)。この 2 つは出どころが異なるため、Cookie を扱う関数だけが Config を受け、認可フローそのものは RuntimeSettings を受ける。
+OAuth2 の資格情報(client_id / client_secret)と対象 guild は settings 表が真実であり、要求のたびに読んだものを受け取る。起動時に読んで握り込まないため、画面から client_secret を差し替えれば次のログインからその値で交換される。
+
+一方、config.yaml の server.base_url から決まるものが 2 つある。認可後に戻る URL(oauth_redirect_uri)と、Cookie に Secure を付けるかどうか(_cookies_are_secure)である。どちらも公開 URL がどこにあり https かどうかという実行環境の性質そのものであって、画面から変えられる設定ではない。したがって認可フローに関わる関数は、settings 表から来る RuntimeSettings と config.yaml から来る Config の両方を受ける。
 """
 
 from __future__ import annotations
@@ -40,6 +42,9 @@ DISCORD_TOKEN_URL: Final = f'{DISCORD_API_BASE}/oauth2/token'
 # identify は身元の取得、guilds.members.read は対象 guild でのロールの取得に要る。閲覧範囲も API キーの資格もロールで決まるため、両方が揃って初めて判定が成立する。
 OAUTH_SCOPES: Final = 'identify guilds.members.read'
 DISCORD_TIMEOUT_SECONDS: Final = 10.0
+
+# 認可後に Discord が利用者を戻す先の経路。routers/auth.py の callback がこの定数をそのまま経路の宣言に使うため、認可で申告する戻り先と、実際にそれを受け取る経路が食い違うことがない。
+OAUTH_CALLBACK_PATH: Final = '/auth/callback'
 
 SESSION_COOKIE_NAME: Final = 'session'
 SESSION_LIFETIME: Final = timedelta(days=30)
@@ -112,17 +117,27 @@ def sanitize_redirect_to(value: str | None) -> str:
 # --------------------------------------------------------------------------
 
 
+def oauth_redirect_uri(config: Config) -> str:
+    """認可後に Discord が戻す先の URL。設定としては持たず、公開 URL と経路から組み立てる。
+
+    設定として独立に持つと base_url と食い違う値を保存でき、そのときログインだけが静かに壊れる。入りうる正当な値は 1 つしかない以上、それを設定にする理由が無い。**この値を Discord のアプリケーション設定の Redirects へ登録すること。**登録が無い、または食い違う場合、Discord は認可画面の時点で断る。
+
+    認可の開始とコードの交換の両方でこの関数から取る。Discord は 2 つの要求の redirect_uri が完全に一致することを求めるため、組み立てる場所を 1 つに限って、片方だけが違う値になる余地を無くす。base_url は読み込み時に末尾の / を落としてあるため、そのまま連結してよい。
+    """
+    return f'{config.server.base_url}{OAUTH_CALLBACK_PATH}'
+
+
 def _code_challenge(verifier: str) -> str:
     """PKCE の code_challenge(S256)を作る。パディングの = は付けない(RFC 7636 の base64url は付けない形で定義されている)。"""
     digest = hashlib.sha256(verifier.encode('ascii')).digest()
     return base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
 
 
-def build_authorize_url(settings: RuntimeSettings, *, state: str, code_challenge: str) -> str:
+def build_authorize_url(config: Config, settings: RuntimeSettings, *, state: str, code_challenge: str) -> str:
     """Discord の認可画面の URL を組み立てる。"""
     params = {
         'client_id': settings.discord.oauth.client_id,
-        'redirect_uri': settings.discord.oauth.redirect_uri,
+        'redirect_uri': oauth_redirect_uri(config),
         'response_type': 'code',
         'scope': OAUTH_SCOPES,
         'state': state,
@@ -134,7 +149,7 @@ def build_authorize_url(settings: RuntimeSettings, *, state: str, code_challenge
     return f'{DISCORD_AUTHORIZE_URL}?{urlencode(params)}'
 
 
-async def begin_login(db: Database, settings: RuntimeSettings, redirect_to: str | None) -> tuple[str, str]:
+async def begin_login(db: Database, config: Config, settings: RuntimeSettings, redirect_to: str | None) -> tuple[str, str]:
     """認可フローを開始する。戻り値は (認可画面の URL, state)。
 
     PKCE を使うのは、認可コードを盗まれても交換させないため。code_verifier はこちらの DB にしか無く、コードだけを手に入れても交換に必要な材料が揃わない。
@@ -150,7 +165,7 @@ async def begin_login(db: Database, settings: RuntimeSettings, redirect_to: str 
         sanitize_redirect_to(redirect_to),
         int(OAUTH_STATE_LIFETIME.total_seconds()),
     )
-    return build_authorize_url(settings, state=state, code_challenge=_code_challenge(verifier)), state
+    return build_authorize_url(config, settings, state=state, code_challenge=_code_challenge(verifier)), state
 
 
 async def consume_state(db: Database, state: str) -> dict[str, Any] | None:
@@ -206,7 +221,7 @@ async def _get_json(client: httpx.AsyncClient, url: str, access_token: str, what
     return _require_ok(response, what)
 
 
-async def exchange_code(client: httpx.AsyncClient, settings: RuntimeSettings, code: str, code_verifier: str) -> str:
+async def exchange_code(client: httpx.AsyncClient, config: Config, settings: RuntimeSettings, code: str, code_verifier: str) -> str:
     """認可コードをアクセストークンへ交換する。
 
     得たトークンは identify と guild メンバー情報の取得にだけ使い、保存しない。以後の要求は自前のセッションで認証するため、Discord の資格情報を持ち続ける理由が無い(持てば、漏れたときに漏れるものが増えるだけになる)。
@@ -216,7 +231,7 @@ async def exchange_code(client: httpx.AsyncClient, settings: RuntimeSettings, co
         'client_secret': settings.discord.oauth.client_secret,
         'grant_type': 'authorization_code',
         'code': code,
-        'redirect_uri': settings.discord.oauth.redirect_uri,
+        'redirect_uri': oauth_redirect_uri(config),
         'code_verifier': code_verifier,
     }
     try:
@@ -420,7 +435,7 @@ def clear_state_cookie(response: Response, config: Config) -> None:
     )
 
 
-async def complete_login(db: Database, settings: RuntimeSettings, *, code: str, state: str, state_cookie: str | None) -> tuple[str, str]:
+async def complete_login(db: Database, config: Config, settings: RuntimeSettings, *, code: str, state: str, state_cookie: str | None) -> tuple[str, str]:
     """認可コードからログインを完成させる。戻り値は (セッションの生値, 遷移先のパス)。"""
     if not state_cookie or not secret_equal(state_cookie, state):
         raise BadRequest('ログインの状態を確認できませんでした。もう一度ログインしてください。')
@@ -432,7 +447,7 @@ async def complete_login(db: Database, settings: RuntimeSettings, *, code: str, 
         raise BadRequest('ログインの状態を確認できませんでした。もう一度ログインしてください。')
     # 3 回の要求を 1 本の接続で流す。いずれも同じ相手への短い往復であり、都度つなぎ直す理由が無い。
     async with httpx.AsyncClient(timeout=DISCORD_TIMEOUT_SECONDS) as client:
-        access_token = await exchange_code(client, settings, code, verifier)
+        access_token = await exchange_code(client, config, settings, code, verifier)
         identity = await fetch_identity(client, access_token)
         member = await fetch_guild_member(client, settings, access_token)
     user_id = await sync_user(db, identity, member)

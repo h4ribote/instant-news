@@ -188,7 +188,7 @@ python -m server.cli revoke-token --id <token_id>
 
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
-| `/auth/login?redirect_to=` | GET | 不要 | Discord の認可 URL へ 302。`oauth_states` に state と PKCE の `code_verifier` を保存し、**同じ state を Cookie `oauth_state` にも発行する**(`HttpOnly; SameSite=Lax; Path=/auth`、有効期限 10 分、`base_url` が https なら `Secure`)。scope は `identify guilds.members.read`。 |
+| `/auth/login?redirect_to=` | GET | 不要 | Discord の認可 URL へ 302。`oauth_states` に state と PKCE の `code_verifier` を保存し、**同じ state を Cookie `oauth_state` にも発行する**(`HttpOnly; SameSite=Lax; Path=/auth`、有効期限 10 分、`base_url` が https なら `Secure`)。scope は `identify guilds.members.read`。`redirect_uri` は設定ではなく `base_url` + `/auth/callback` の導出であり、この値を Discord のアプリケーション設定へ登録しておく必要がある(理由は [docs/settings.md](settings.md) の「認可の戻り先は設定ではない」)。 |
 | `/auth/callback?code=&state=` | GET | 不要 | **`oauth_state` Cookie と `oauth_states` の state の両方を照合する**(`hmac.compare_digest`。DB の state は使い捨て)。Cookie が無い・一致しない場合は DB の state が有効でも 400。トークン交換 → `identify` でユーザー取得 → `GET /users/@me/guilds/{guild_id}/member` でロール取得(404 なら非メンバー)。`users` を upsert、`user_roles` を洗い替え、セッションを発行して Cookie `session` を `HttpOnly; SameSite=Lax; Path=/`(`base_url` が https なら `Secure`)で設定し `redirect_to` へ 302。照合後は `oauth_state` Cookie を破棄する。 |
 | `/auth/logout` | POST | 不要 | セッションを削除し Cookie を破棄する。 |
 

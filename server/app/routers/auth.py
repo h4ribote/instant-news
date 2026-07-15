@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from ..auth import (
+    OAUTH_CALLBACK_PATH,
     OAUTH_STATE_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     begin_login,
@@ -36,19 +37,19 @@ async def login(request: Request, redirect_to: str | None = None) -> RedirectRes
 
     redirect_to はログイン後の戻り先。このサイト内のパスに限る(検査は sanitize_redirect_to が行う)。値はブラウザへ返さず oauth_states に預けるため、戻り先の指定が URL の往復で書き換わることがない。
 
-    認可 URL の材料(client_id / redirect_uri)は要求のたびに settings 表から読む。config は state の Cookie に Secure を付けるかどうかの判断にだけ要る。
+    認可 URL の材料のうち client_id は要求のたびに settings 表から読み、認可後に戻る URL は config.yaml の base_url から導出する(auth.oauth_redirect_uri)。config はその導出と、state の Cookie に Secure を付けるかどうかの判断に要る。
     """
     db = await get_db(request)
     config = await get_config(request)
     settings = await get_settings(request)
-    authorize_url, state = await begin_login(db, settings, redirect_to)
+    authorize_url, state = await begin_login(db, config, settings, redirect_to)
     # 302 を明示する。FastAPI の既定である 307 はメソッドを保存するため、認可画面へ GET 以外で送ろうとする経路が生まれうる。
     response = RedirectResponse(authorize_url, status_code=status.HTTP_302_FOUND)
     set_state_cookie(response, config, state)
     return response
 
 
-@router.get('/auth/callback')
+@router.get(OAUTH_CALLBACK_PATH)
 async def callback(
     request: Request,
     code: str | None = None,
@@ -71,6 +72,7 @@ async def callback(
     # 設定を読むのは認可が成立してからでよい。要求のたびに読むため、client_secret を画面から差し替えれば次のログインからその値で交換される。
     raw_session, redirect_to = await complete_login(
         db,
+        config,
         await get_settings(request),
         code=code,
         state=state,

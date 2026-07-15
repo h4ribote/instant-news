@@ -8,7 +8,7 @@
 
 `config.yaml` が**常に真実であり続けるのは `server`・`database`・`media.storage_dir` の 3 つだけ**である。
 
-- `server` と `database` は、設定を DB から読むために先に要る。DB へ繋ぐ前に DB の設定は読めない。
+- `server` と `database` は、設定を DB から読むために先に要る。DB へ繋ぐ前に DB の設定は読めない。ただし `server.base_url`(外部から到達可能な公開 URL)だけは理由が異なり、DB 接続のためではなく、公開 URL がどこにあるかが実行環境そのものであるために `config.yaml` が持つ(後述の「認可の戻り先は設定ではない」も参照)。
 - `media.storage_dir` は名前付きボリュームのマウント先と一体であり、コンテナの外で決まる。マウントを変えずにこの値だけを変えても画像は見つからず、変えた瞬間に既存の全画像が参照できなくなる。画面から触らせる意味がない値である。
 
 それ以外(`discord` / `admin` / `articles` / `media` の各上限)は `settings` 表が持ち、`config.yaml` の対応する値は初回起動時の初期値としてのみ読まれる。**初期値の節は任意である**(後述)。書かれていないキーは登録簿の既定値で埋まる。
@@ -67,17 +67,15 @@ server と bot は、どちらも DB 接続の直後に初期値の投入を行�
 | int | 整数。`true` / `false` は整数として受け付けない。 |
 | number | 数値(小数を含む)。 |
 | str | 空にできない文字列。 |
-| url | `http` または `https` の絶対 URL。末尾の `/` は落として保存する。 |
 | secret | 空にできない文字列。API は生値を返さない。 |
 
-全 20 キーを次に挙げる。既定値が「必須」のものは、その環境でしか決まらないため既定を持てず、初回起動時に `config.yaml` で与える必要がある。値域を外れる値は画面・API・CLI のいずれからも保存できない。
+全 19 キーを次に挙げる。既定値が「必須」のものは、その環境でしか決まらないため既定を持てず、初回起動時に `config.yaml` で与える必要がある。値域を外れる値は画面・API・CLI のいずれからも保存できない。
 
 | キー | 型 | 既定値 | 値域 | 変更可否 | 再起動の要否 | 説明 |
 | --- | --- | --- | --- | --- | --- | --- |
 | discord.guild_id | id | 必須 | — | 不可 | 不要 | このデプロイが対応する唯一の guild。画面には表示するが変更できない(理由は後述)。 |
 | discord.oauth.client_id | str | 必須 | — | 可 | 不要 | 利用者認証に使う Discord アプリケーションの ID。 |
 | discord.oauth.client_secret | secret | 必須 | — | 可 | 不要 | 利用者認証に使う Discord アプリケーションのシークレット。設定済みかどうかだけを表示し、生値は返さない。 |
-| discord.oauth.redirect_uri | url | 必須 | — | 可 | 不要 | 認可後に戻る URL。Discord のアプリケーション設定に登録した値と一致させること。 |
 | discord.bot.token | secret | 必須 | — | 可 | **要** | 新着記事を通知する bot の資格情報。bot は起動時にのみ読むため、変更を反映するには bot の再起動が要る。 |
 | discord.bot.publish_poll_interval_seconds | int | 15 | 1〜3600 | 可 | 不要 | 公開された記事の通知の待ち行列を bot が確認する間隔(秒)。server が予約公開の時刻到来を確かめる間隔でもある。**この 2 つだけは Discord のイベントで駆動できない**(公開を決めるのは server であり、Discord は記事が公開されたことを知らない)。 |
 | discord.bot.guild_reconcile_interval_seconds | int | 3600 | 1〜3600 | 可 | 不要 | guild のロール・メンバー・オーナーを Discord と突き合わせて補正する間隔(秒)。**ロールの変更はこの間隔を待たずにイベントで即座に反映されるため、これは反映の速さを決める設定ではない。**イベントを取りこぼした場合にそれが正される時刻の上限である。**上限があるのは安全のためである**(後述)。 |
@@ -114,6 +112,16 @@ bot は 2 つの経路でこれを書く。常態では、Discord のゲート�
 `discord.guild_id` は `settings` 表が持つが、登録簿で `editable=False` としてあり、画面からも API からも変更できない(`PATCH /api/admin/settings` は 400 で明示的に断る)。
 
 変更すると、ロールのスナップショット・報道社のロール紐付け・閲覧範囲の判定がすべて別の guild を指すことになり、既存のデータが無意味になる。記事の署名も閲覧制限も、対象 guild のロール ID を前提に保存されているためである。**他の guild へ移すのは再デプロイであって設定変更ではない。**
+
+## 認可の戻り先は設定ではない
+
+Discord OAuth2 の認可後に戻る URL(`redirect_uri`)は、`settings` 表にも `config.yaml` にも無い。`server.base_url` と、戻り先を受け取る経路 `/auth/callback` から導出する(`server/app/auth.py` の `oauth_redirect_uri`)。**この導出結果を Discord のアプリケーション設定の Redirects へ登録すること。**登録が無い、または食い違う場合、Discord は認可画面の時点で断る。
+
+設定として持たないのは、**入りうる正当な値が 1 つしかない**ためである。戻り先の経路を決めているのは `server/app/routers/auth.py` の `callback` であり、オリジンは `base_url` そのものである。他の値を入れて意味のある場面が存在しない。
+
+にもかかわらず設定にすると、`base_url` と食い違った値を保存できてしまう。そのとき壊れるのは**ログインだけ**である。記事の閲覧も画像の配信も正常に見えるため、原因が認証の設定にあることが分かりにくく、Discord 側の登録・こちらの設定・`base_url` の 3 つを突き合わせて初めて食い違いが見える。導出にすれば、この不整合は構造的に起こり得なくなる。
+
+`redirect_uri` は認可の開始(認可 URL)とコードの交換(トークン要求)の両方に現れ、**Discord は 2 つが完全に一致することを求める。**導出の関数を 1 つに限ることで、片方だけが違う値になる余地も無くしている。同じ理由で `/auth/callback` の経路も `server/app/auth.py` の `OAUTH_CALLBACK_PATH` が唯一の定義であり、ルーターはそれをそのまま経路の宣言に使う。認可で申告する戻り先と、実際にそれを受け取る経路が食い違うことはない。
 
 ## 秘密の設定を API から返さない
 
@@ -155,7 +163,7 @@ CLI が `config.yaml` から読むのは `database` 節だけである。締め�
 ```
 python -m server.cli set-setting admin.role_ids '["111111111111111111","222222222222222222"]'
 python -m server.cli set-setting articles.api_rate_limit_per_hour 60
-python -m server.cli set-setting discord.oauth.redirect_uri '"https://news.example.com/auth/callback"'
+python -m server.cli set-setting discord.oauth.client_id '"000000000000000000"'
 ```
 
 - `get-setting` は**秘密の設定でも生値を出す**(秘密である旨を注記する)。API と扱いが違うのは、CLI は DB へ到達できる者しか実行できず、これが復旧の最後の手段であるためである。DB へ到達できる者は `settings` 表を直接読めるのだから、CLI に伏せさせても守るものがない。

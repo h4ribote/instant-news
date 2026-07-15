@@ -28,7 +28,8 @@
 server:
   host: 0.0.0.0
   port: 8000
-  # 記事 URL の生成に用いる、外部から到達可能な公開 URL。
+  # 外部から到達可能な公開 URL。記事 URL・画像の絶対 URL・OAuth2 の戻り先の組み立てに用いる。
+  # 逆プロキシを挟む構成では、上の host / port(待ち受け)ではなく、利用者のブラウザから見えるオリジンを書くこと。
   base_url: "http://localhost:8000"
 
 database:
@@ -85,10 +86,12 @@ discord:
   guild_id: "000000000000000000"
   # 利用者認証(OAuth2)に用いるアプリケーション資格情報。
   # 必要なスコープは identify(ユーザー識別)と guilds.members.read(guild 内のロール取得)。
+  # 認可後に戻る URL は設定として持たない。server.base_url と、戻り先を受け取る経路 /auth/callback から
+  # 導出する(上記の base_url なら http://localhost:8000/auth/callback)。
+  # この導出結果を Discord のアプリケーション設定の Redirects へ登録すること。
   oauth:
     client_id: "000000000000000000"
     client_secret: "change-me"
-    redirect_uri: "http://localhost:8000/auth/callback"
   # 新着記事を通知する bot の設定。
   # 新着記事の通知先は、記事のカテゴリ(categories.notify_channel_id)とタグ(tags.notify_channel_id)を
   # 重複排除した集合として解決する。宛先が 0 件の記事はどこにも通知しない。既定チャンネルへの

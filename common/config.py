@@ -48,7 +48,7 @@ class ServerConfig:
 
     host: str
     port: int
-    # 記事 URL・画像 URL の組み立てに使う。末尾の / は読み込み時に落とすため、base_url + '/path' で連結してよい。
+    # 記事 URL・画像 URL・OAuth2 の認可後に戻る URL の組み立てに使う。末尾の / は読み込み時に落とすため、base_url + '/path' で連結してよい。
     base_url: str
 
 

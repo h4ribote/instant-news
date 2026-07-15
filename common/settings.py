@@ -17,7 +17,6 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
-from urllib.parse import urlsplit
 
 from .snowflake import to_snowflake
 
@@ -27,7 +26,7 @@ if TYPE_CHECKING:
 # 設定の再読み込み間隔(秒)。server と bot は別のプロセスであり、一方が変更した設定を他方が知る手段はこの読み直ししかない。短くすると変更が早く伝わるが DB への問い合わせが増える。設定の変更は稀であり、数秒の遅れは実害にならない。変更した本人には即座に反映される(set_many が自プロセスの caches を捨てるため)。
 CACHE_TTL_SECONDS: Final = 10.0
 
-SettingKind = Literal['id', 'id_list', 'int', 'number', 'str', 'url', 'secret']
+SettingKind = Literal['id', 'id_list', 'int', 'number', 'str', 'secret']
 
 
 class _Required:
@@ -86,11 +85,6 @@ REGISTRY: Final[tuple[SettingDef, ...]] = (
         key='discord.oauth.client_secret', kind='secret',
         label='OAuth2 クライアントシークレット',
         description='利用者認証に使う Discord アプリケーションのシークレット。設定済みかどうかだけを表示し、生値は返さない。',
-    ),
-    SettingDef(
-        key='discord.oauth.redirect_uri', kind='url',
-        label='OAuth2 リダイレクト URI',
-        description='認可後に戻る URL。Discord のアプリケーション設定に登録した値と一致させること。',
     ),
     SettingDef(
         key='discord.bot.token', kind='secret', restart_required=True,
@@ -184,11 +178,13 @@ DEFS_BY_KEY: Final[dict[str, SettingDef]] = {d.key: d for d in REGISTRY}
 
 @dataclass(frozen=True)
 class OAuthConfig:
-    """Discord OAuth2 のアプリケーション資格情報。必要なスコープは identify と guilds.members.read。"""
+    """Discord OAuth2 のアプリケーション資格情報。必要なスコープは identify と guilds.members.read。
+
+    認可後に戻る URL(redirect_uri)は設定として持たない。戻り先の経路はこちらのルーターが決めており(server/app/auth.py の OAUTH_CALLBACK_PATH)、オリジンは config.yaml の server.base_url であるため、入りうる正当な値は 1 つしかない。設定として独立に持つと、base_url と食い違った値を保存できてしまい、そのときログインだけが静かに壊れる(Discord が、認可の結果を受け取る経路が無い場所へ戻す)。導出は server/app/auth.py の oauth_redirect_uri が行う。
+    """
 
     client_id: str
     client_secret: str
-    redirect_uri: str
 
 
 @dataclass(frozen=True)
@@ -325,18 +321,6 @@ def coerce_value(defn: SettingDef, raw: Any) -> Any:
             raise ValueError(f'設定 {defn.key}: 空にできません。')
         return raw
 
-    if defn.kind == 'url':
-        if not isinstance(raw, str):
-            raise ValueError(f'設定 {defn.key}: 文字列である必要があります(実際は {_type_name(raw)})。')
-        value = raw.strip()
-        parsed = urlsplit(value)
-        if parsed.scheme not in ('http', 'https'):
-            raise ValueError(f'設定 {defn.key}: http または https で始まる URL である必要があります: {value!r}')
-        if not parsed.netloc:
-            raise ValueError(f'設定 {defn.key}: ホストを含む絶対 URL である必要があります: {value!r}')
-        # 末尾の / を落とし、URL の連結で // にならないようにする。
-        return value.rstrip('/')
-
     raise ValueError(f'設定 {defn.key}: 未知の型 {defn.kind} です。')
 
 
@@ -373,7 +357,6 @@ def build(values: Mapping[str, Any]) -> RuntimeSettings:
             oauth=OAuthConfig(
                 client_id=values['discord.oauth.client_id'],
                 client_secret=values['discord.oauth.client_secret'],
-                redirect_uri=values['discord.oauth.redirect_uri'],
             ),
             bot=BotConfig(
                 token=values['discord.bot.token'],

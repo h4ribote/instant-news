@@ -373,7 +373,7 @@ function readField(d, el) {
     return { changed: num !== Number(d.value), value: num };
   }
 
-  /* str / url / id。ID は文字列のまま送る。 */
+  /* str / id。ID は文字列のまま送る。 */
   return { changed: text !== String(d.value === null || d.value === undefined ? '' : d.value), value: text };
 }
 
