@@ -257,19 +257,21 @@ cp config.example.yaml config.yaml
 
 ### 3. .env を用意する
 
-compose は YAML の設定ファイルを読めないため、DB の資格情報と公開ポートだけが `config.yaml` と二重に現れます。リポジトリのルートに `.env` を作り、`config.yaml` の対応する値と一致させてください。
-
-```
-MYSQL_DATABASE=instant_news
-MYSQL_USER=instant_news
-MYSQL_PASSWORD=config.yaml の database.password と同じ値に置き換える
-MYSQL_ROOT_PASSWORD=保守用の root パスワードに置き換える
-INSTANT_NEWS_PORT=8000
+```bash
+cp .env.example .env
 ```
 
-`MYSQL_ROOT_PASSWORD` はアプリケーションが使わない保守用のもので、`database.user` とは別に設ける MySQL の root のパスワードです。
+compose は YAML の設定ファイルを読めないため、DB の資格情報と公開ポートだけが `config.yaml` と二重に現れます。`.env` の各値は `config.yaml` の対応する値と一致させてください。`db` は `.env` の値で MySQL の利用者とデータベースを作り、`server` と `bot` は `config.yaml` の値で繋ぎにいくため、食い違うと `server` は起動した MySQL へ繋げません。
 
-`MYSQL_PASSWORD` と `MYSQL_ROOT_PASSWORD` に既定値はなく、未設定なら compose が起動を拒みます。リポジトリに既定の資格情報を置くと、変更されないまま本番へ出るためです。`INSTANT_NEWS_PORT` はコンテナの内と外で同じ番号を使うため、変える場合は `config.yaml` の `server.port` も合わせます。`.env` は `config.yaml` と同じく Git 追跡対象外です。
+| キー | 内容 |
+| --- | --- |
+| `MYSQL_DATABASE` | MySQL のデータベース名。`config.yaml` の `database.name` と一致させる。 |
+| `MYSQL_USER` | アプリケーションが使う MySQL の利用者。`config.yaml` の `database.user` と一致させる。 |
+| `MYSQL_PASSWORD` | 上記の利用者のパスワード。`config.yaml` の `database.password` と一致させる。 |
+| `MYSQL_ROOT_PASSWORD` | MySQL の root のパスワード。アプリケーションは root を使わず、保守用に設けるもので、`MYSQL_USER` とは別である。`config.yaml` に対応する値は無い。 |
+| `INSTANT_NEWS_PORT` | `server` を公開するポート。`config.yaml` の `server.port` と一致させる。コンテナの内と外で同じ番号を使うため、変える場合は両方を合わせる。 |
+
+`MYSQL_PASSWORD` と `MYSQL_ROOT_PASSWORD` に既定値はなく、`.env.example` でも空です。未設定・空のままなら compose が起動を拒みます。ひな形に既定の資格情報を書くと、変更されないまま本番へ出るためです。`.env` は `config.yaml` と同じく Git 追跡対象外です(ひな形の `.env.example` は追跡対象のため、実際の資格情報を書かないでください)。
 
 ### 4. 起動する
 
