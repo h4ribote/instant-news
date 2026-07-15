@@ -190,9 +190,182 @@ flowchart TD
 
 アプリケーションは Docker 上で実行します。server(FastAPI)・bot(Discord bot)・MySQL の各サービスをコンテナとして起動し、`migrations/` の SQL でスキーマを初期化する構成です。
 
-これに加えて、**画像の実体を置く名前付きボリュームが要ります**。画像は外部ホストに依存せず自前で保存するため、`media.storage_dir` にはコンテナのファイルシステムではなく Docker の名前付きボリュームを割り当ててください。コンテナのファイルシステムに置くと、イメージを入れ替えた瞬間に全画像が消えます。
+### 前提
+
+- Docker と Docker Compose(`docker compose`)。
+- 対象とする Discord サーバー(guild)と、そこへ bot を招待できる権限。1 デプロイが 1 つの guild に対応します。
+- Discord の開発者ポータルでアプリケーションを作成できること。
+
+ホスト側に Python は要りません。server も bot も CLI もコンテナの中で動きます。
+
+```mermaid
+flowchart TD
+    step1["1. Discord アプリケーションを用意する<br/>トークン・OAuth2 の資格情報・特権 intent・bot の招待"]
+    step2["2. config.yaml を用意する<br/>base_url / database / guild_id と資格情報"]
+    step3["3. .env を用意する<br/>compose へ渡す DB の資格情報と公開ポート"]
+    step4["4. 起動する<br/>docker compose up -d --build"]
+    step5["5. ログインする<br/>bot が guild を取り込んだ後に行う"]
+    step6["6. カテゴリを作る<br/>記事は必ず 1 つのカテゴリに属する"]
+    step7["7. 記事を出す<br/>/editor で書いて公開する"]
+
+    step1 --> step2 --> step3 --> step4 --> step5 --> step6 --> step7
+```
+
+### 1. Discord アプリケーションを用意する
+
+[Discord 開発者ポータル](https://discord.com/developers/applications) で次を行います。
+
+1. アプリケーションを作成する。
+2. **Bot** タブでトークンを発行して控える(`discord.bot.token`)。トークンは発行の直後にしか表示されません。
+3. 同じ **Bot** タブで特権 intent を 2 つとも有効にする。**SERVER MEMBERS INTENT**(guild のメンバーの取り込みと、参加・離脱・ロール変更のイベントの購読に要る)と **MESSAGE CONTENT INTENT**(記事のコメントの本文の取得に要る)です。どちらかでも欠けると Discord がゲートウェイを切り、bot は起動時に停止します。
+4. **OAuth2** タブで `client_id` と `client_secret` を控える。
+5. 同じ **OAuth2** タブの **Redirects** に、`server.base_url` へ `/auth/callback` を足した URL を登録する(既定の `http://localhost:8000` なら `http://localhost:8000/auth/callback`)。戻り先の URL は設定として持たず `base_url` から導出するため、ここに登録する値と `base_url` は必ず一致していなければなりません。食い違うと、認可の結果を受け取る経路が無い場所へ Discord が戻すため、ログインだけが静かに壊れます。
+6. bot を対象の guild へ招待する(scope は `bot`)。利用者のログインに要る OAuth2 のスコープは `identify` と `guilds.members.read` で、これらは server が認可 URL を組み立てる際に自ら要求するため、ポータル上での設定は要りません。
+
+bot に与える権限は、通知先のチャンネルで行う操作から決まります。
+
+| 操作 | 要る権限 |
+| --- | --- |
+| 新着記事の embed を送る | View Channel / Send Messages / Embed Links |
+| 投票用の `:arrow_up:` / `:arrow_down:` を付ける | Add Reactions |
+| コメント用のスレッドを開く | Create Public Threads / Send Messages in Threads |
+| 投票とコメントを照合し直す | Read Message History |
+
+guild の ID(`discord.guild_id`)は、Discord の詳細設定で開発者モードを有効にし、サーバー名を右クリックして「サーバー ID をコピー」で得られます。
+
+### 2. config.yaml を用意する
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+`config.yaml` は Git 追跡対象外であり、イメージにも焼き込まず実行時にマウントで渡します。設定を変えてもイメージの再ビルドは要りません。
+
+その環境でしか決まらず、既定を持てない値は次のとおりです。残りは既定値のままで動きます。
+
+| キー | 内容 |
+| --- | --- |
+| `server.base_url` | 利用者のブラウザから見えるオリジン。記事 URL・画像の絶対 URL・OAuth2 の戻り先の組み立てに用いる。逆プロキシを挟む構成では、待ち受け先の `server.host` / `server.port` ではなく外から見える URL を書く。 |
+| `database.password` | MySQL のパスワード。`.env` の `MYSQL_PASSWORD` と一致させる。 |
+| `discord.guild_id` | 対象の guild の ID。 |
+| `discord.oauth.client_id` / `discord.oauth.client_secret` | OAuth2 の資格情報。 |
+| `discord.bot.token` | bot のトークン。 |
+
+`database.host` は compose のサービス名である `db` のままにします。`media.storage_dir` は名前付きボリュームのマウント先と一体であるため、`docker-compose.yml` の `media-data` のマウント先と揃えて変えない限り触りません。
+
+`discord` 以下・`admin`・`articles`・`media.fetch` は初期値の節であり、効くのは初回起動時だけです(後述の「設定を変える」を参照)。
+
+### 3. .env を用意する
+
+compose は YAML の設定ファイルを読めないため、DB の資格情報と公開ポートだけが `config.yaml` と二重に現れます。リポジトリのルートに `.env` を作り、`config.yaml` の対応する値と一致させてください。
+
+```
+MYSQL_DATABASE=instant_news
+MYSQL_USER=instant_news
+MYSQL_PASSWORD=config.yaml の database.password と同じ値に置き換える
+MYSQL_ROOT_PASSWORD=保守用の root パスワードに置き換える
+INSTANT_NEWS_PORT=8000
+```
+
+`MYSQL_ROOT_PASSWORD` はアプリケーションが使わない保守用のもので、`database.user` とは別に設ける MySQL の root のパスワードです。
+
+`MYSQL_PASSWORD` と `MYSQL_ROOT_PASSWORD` に既定値はなく、未設定なら compose が起動を拒みます。リポジトリに既定の資格情報を置くと、変更されないまま本番へ出るためです。`INSTANT_NEWS_PORT` はコンテナの内と外で同じ番号を使うため、変える場合は `config.yaml` の `server.port` も合わせます。`.env` は `config.yaml` と同じく Git 追跡対象外です。
+
+### 4. 起動する
+
+```bash
+docker compose up -d --build
+```
+
+初回は db がスキーマを初期化するまで server と bot が待ちます。`migrations/` の SQL は**データディレクトリが空のとき、すなわち初回起動時にしか実行されません**。既存のデータがある環境でスキーマを変える手段にはなりません。
+
+```bash
+docker compose ps
+docker compose logs -f server bot
+```
+
+bot が「対象の guild ... として起動します」と出せば Discord へ繋がっており、server の healthcheck が healthy になればトップページが配信できています。
+
+### 5. ログインする
+
+ブラウザで `server.base_url` を開き、Discord でログインします。ユーザーの行はこのときに作られます。
+
+**bot が guild を取り込む前にログインした場合、ロールが 1 つも写らず管理者と判定されません**。ロールの写しを書くのは bot であり、ログインの経路は bot が取り込み済みのロールしかユーザーへ結びつけません。guild のオーナーであるかどうかも、guild 自体を読める bot だけが知りうる情報です。bot の起動を確かめたうえで、ログインし直してください。
+
+管理者に該当するのは、guild のオーナー、Administrator 権限を持つロールの保有者、`admin.role_ids` に列挙したロールの保有者です。
+
+### 6. カテゴリを作る
+
+**記事は必ず 1 つのカテゴリに属するため、カテゴリが 1 つも無いと記事を作れません**。カテゴリ・タグ・報道社は設定ではなく専用のテーブルを持つ実体であり、`taxonomy:admin` スコープの管理用 API で編集します(`/admin` の画面が扱うのは `settings` 表の設定だけです)。
+
+まず `/settings` を開いて `taxonomy:admin` スコープの API キーを発行します(管理者だけが発行できます)。CLI からも発行できます。
+
+```bash
+docker compose exec server python -m server.cli issue-token --discord-user-id 000000000000000000 --name "初期設定" --scope taxonomy:admin
+```
+
+`--discord-user-id` には自分の Discord ユーザー ID を渡します。生のキーは DB に保存しない(SHA-256 だけを持つ)ため、どちらの経路でも表示は 1 度きりです。
+
+発行したキーでカテゴリを作ります。
+
+```bash
+export API_KEY=発行したキー
+curl -X POST "http://localhost:8000/api/admin/categories" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"world","name":"国際","notify_channel_id":"000000000000000000"}'
+```
+
+`notify_channel_id` には通知先チャンネルの ID を書きます。省いたカテゴリはどこにも通知しません。既定の通知先チャンネルは無く、宛先は記事のカテゴリとタグの通知先を重複排除した集合として解決します。タグ(`/api/admin/tags`)と報道社(`/api/admin/publishers`)も同じ要領で作ります。各エンドポイントの詳細は [docs/api.md](docs/api.md) にあります。
+
+### 7. 記事を出す
+
+`/editor` で記事を書いて公開すると、server が通知の宛先を解決して待ち行列へ積み、bot がその行を拾って該当チャンネルへ embed を送り、コメント用のスレッドを開き、投票用の `:arrow_up:` / `:arrow_down:` を付けます。読者はその 2 つで賛否を投じ、スレッドへコメントします。
+
+### 設定を変える
+
+`config.yaml` の `server`・`database`・`media.storage_dir` を変える場合は、ファイルを書き換えて再起動します。
+
+```bash
+docker compose up -d
+```
+
+**それ以外の設定は `config.yaml` を書き換えても何も起きません**。真実は `settings` 表にあり、`config.yaml` のそれらの値は初回起動時に未登録のキーだけを埋める初期値でしかないためです。管理者は `/admin` の画面から変更します。server と bot は `settings` 表を定期的に読み直すため、変更した本人以外への反映には最大 10 秒かかります。bot のトークンのように再起動を要する設定は、画面がその旨を示します。
+
+管理ロールの設定を誤って画面から締め出された場合は、CLI が唯一の復旧手段です。
+
+```bash
+docker compose exec server python -m server.cli list-settings
+docker compose exec server python -m server.cli set-setting admin.role_ids '["000000000000000000"]'
+```
+
+### 更新する
+
+```bash
+docker compose up -d --build
+```
+
+イメージを入れ替えても、DB と画像の実体は名前付きボリュームに残ります。**ただし `migrations/` の SQL は再実行されません**(初回起動時にしか走りません)。スキーマの変更を含む更新では、追加分の SQL を自分で適用してください。
+
+### 状態と永続化
+
+server・bot・MySQL のコンテナに加えて、**画像の実体を置く名前付きボリュームが要ります**。画像は外部ホストに依存せず自前で保存するため、`media.storage_dir` にはコンテナのファイルシステムではなく Docker の名前付きボリュームを割り当ててください(`docker-compose.yml` の `media-data` が既にそう構成しています)。コンテナのファイルシステムに置くと、イメージを入れ替えた瞬間に全画像が消えます。
 
 このため、**状態を持つ場所は MySQL だけではありません**。DB は画像の登録簿(ハッシュ・寸法・公開可否・参照元の記事)を持ち、画像の実体はボリュームにあります。片方だけでは記事は復元されません。DB だけを復旧すると、記事の行は戻るのに本文が指す画像が 404 になります。ボリュームだけを復旧すると、実体はあるのにそれを参照する記事が存在しません。**バックアップは DB と画像ボリュームを整合した時点で取り、両者を組にして戻してください**。時点がずれた場合、DB が新しければ実体の無い画像を参照し、ボリュームが新しければ誰からも参照されない実体が残ります(後者は無害ですが、前者は記事が壊れます)。
+
+`docker compose down` はコンテナを破棄しますがボリュームは残します。`docker compose down -v` は**記事も画像もすべて消します**。
+
+### 困ったとき
+
+| 症状 | 原因と対処 |
+| --- | --- |
+| bot が特権 intent の不足で停止する | 開発者ポータルで SERVER MEMBERS INTENT と MESSAGE CONTENT INTENT を有効にする。有効にせずに要求すると Discord がゲートウェイを切る。 |
+| ログインが Discord 側で弾かれる | ポータルの Redirects と `server.base_url` から導出される `/auth/callback` が一致していない。 |
+| ログインできるが管理者にならない | bot が guild を取り込む前にログインした。bot の起動を確かめてログインし直す。 |
+| 記事を公開したのに通知が来ない | カテゴリにもタグにも `notify_channel_id` が無い(宛先 0 件の記事はどこにも通知しない)か、bot にそのチャンネルの権限が無い。 |
+| 画面から設定を変えたのに効かない | 別のプロセス(server と bot)への反映まで最大 10 秒かかる。再起動を要する設定は画面がその旨を示す。 |
+| `config.yaml` を書き換えたのに効かない | 初期値の節は初回起動時にしか読まれない。`/admin` か CLI から変更する。 |
+| 管理画面にも設定 API にも入れない | CLI の `set-setting` で `admin.role_ids` を直す(唯一の復旧手段)。 |
 
 ## ドキュメント
 
