@@ -71,8 +71,8 @@ CREATE TABLE sessions (
     last_seen_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at    DATETIME        NOT NULL,
     PRIMARY KEY (token_hash),
+    -- セッションの照合は token_hash(主キー)で引き、expires_at はその行で確かめる。期限切れの掃除は、その利用者が次にログインしたときに user_id で自分の行だけを消す形で行う。したがって expires_at だけを条件に全利用者の行を横断して引く経路は無く、その索引は持たない(全体を掃く処理を設ける時が来たら、そのときに索引も併せて足す)。
     KEY idx_sessions_user_id (user_id),
-    KEY idx_sessions_expires_at (expires_at),
     CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -180,7 +180,7 @@ CREATE TABLE media (
     PRIMARY KEY (id),
     UNIQUE KEY uq_media_content_hash (content_hash),
     KEY idx_media_uploaded_by (uploaded_by),
-    KEY idx_media_source_url (source_url(255)),
+    -- source_url には索引を張らない。重複排除は取り込み元の URL ではなく変換後の content_hash で行うため(同じ画像が別々の URL から来ても実体は 1 つに畳む)、この列を条件に行を引く経路が無い。取り込み元を知りたい場面は、既に引き当てた行の列を読むだけで足りる。VARCHAR(1000) の前方 255 文字は utf8mb4 では 1 項目あたり最大 1020 バイトに及び、読む者の無い索引に画像を取り込むたびその費用を払うことになる。
     CONSTRAINT fk_media_uploader FOREIGN KEY (uploaded_by)  REFERENCES users (id)      ON DELETE RESTRICT,
     CONSTRAINT fk_media_token    FOREIGN KEY (via_token_id) REFERENCES api_tokens (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -314,12 +314,17 @@ CREATE TABLE articles (
     updated_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_articles_slug (slug),
-    KEY idx_articles_author_id (author_id),
-    KEY idx_articles_publisher_id (publisher_id),
+    -- 著者・報道社で絞る一覧は、いずれも status='published' を伴い published_at の降順に並ぶ。status と published_at まで含めると、絞り込みと並び替えの両方が索引だけで済む(status で等値、published_at で整列)。先頭が author_id / publisher_id であることは変わらないため、外部キーが要求する索引も兼ねる。
+    KEY idx_articles_author_status_published_at (author_id, status, published_at),
+    KEY idx_articles_publisher_status_published_at (publisher_id, status, published_at),
+    -- 連載の一覧は series_position の NULL を末尾へ送ってから並べるため、索引の並び(NULL が先頭)と一致しない。series_position を足しても整列には使えないので、外部キーのための索引に留める。
     KEY idx_articles_series_id (series_id),
+    -- 新着一覧の主経路。末尾には主キー(id)が暗黙に付くため、この索引を逆向きに走査すると published_at の降順・同時刻なら id の降順が得られ、一覧の ORDER BY published_at DESC, id DESC と厳密に一致する。降順索引にすると id が昇順のままになり、同時刻の並びが崩れるため昇順で持つ。
     KEY idx_articles_status_published_at (status, published_at),
+    -- ナビゲーションが欄ごとの記事数を数える経路(category_id と status の等値)。?category= の一覧では published_at の整列も担う。
     KEY idx_articles_category_status_published_at (category_id, status, published_at),
-    KEY idx_articles_scheduled_at (scheduled_at),
+    -- 公開予約の取り込みは status='scheduled' かつ scheduled_at が現在以前の行を、scheduled_at の順に拾う。scheduled_at だけの索引では、公開後も scheduled_at が残る(公開時に消さない)以上、範囲に過去の予約が全て入って絞り込めず、実際に選ばれるのは status を先頭に持つ別の索引の方であり、この索引は使われないまま書き込みを重くするだけになる。status を先頭に置くと範囲と整列が索引だけで完結し、id しか読まないこの問い合わせは行本体に触れずに済む。
+    KEY idx_articles_status_scheduled_at (status, scheduled_at),
     FULLTEXT KEY ftx_articles_title_body (title, body_md) WITH PARSER ngram,  -- 日本語を含む全文検索用。
     CONSTRAINT fk_articles_author    FOREIGN KEY (author_id)    REFERENCES users (id)      ON DELETE RESTRICT,
     CONSTRAINT fk_articles_publisher FOREIGN KEY (publisher_id) REFERENCES publishers (id) ON DELETE RESTRICT,
@@ -368,7 +373,8 @@ CREATE TABLE article_revisions (
     PRIMARY KEY (id),
     UNIQUE KEY uq_article_revisions_article_number (article_id, revision_number),
     KEY idx_article_revisions_editor_id (editor_id),
-    KEY idx_article_revisions_via_token_id (via_token_id),
+    -- API キーごとの投稿数の制限は、そのキーが直近 1 時間に作った改版を数え、最も古いものの時刻を求める。created_at まで含めると、期間の絞り込みも数え上げも索引だけで完結し、行本体を読まずに済む。先頭が via_token_id であることは変わらないため、外部キーが要求する索引も兼ねる。
+    KEY idx_article_revisions_via_token_id_created_at (via_token_id, created_at),
     CONSTRAINT fk_article_revisions_article FOREIGN KEY (article_id)   REFERENCES articles (id)   ON DELETE CASCADE,
     CONSTRAINT fk_article_revisions_editor  FOREIGN KEY (editor_id)    REFERENCES users (id)      ON DELETE RESTRICT,
     CONSTRAINT fk_article_revisions_token   FOREIGN KEY (via_token_id) REFERENCES api_tokens (id) ON DELETE SET NULL
@@ -437,7 +443,8 @@ CREATE TABLE article_discord_posts (
     -- 2 つの通知のコメント欄を兼ねることがないため(NULL は複数許されるので未作成の行と両立する)。
     UNIQUE KEY uq_adp_thread_id (thread_id),
     KEY idx_adp_posted_at (posted_at),
-    KEY idx_adp_reactions_seeded_at (reactions_seeded_at),      -- 絵文字を付け損ねた行を拾い直す待ち行列として引く。
+    -- 絵文字を付け損ねた行を拾い直す待ち行列として引く。bot は reactions_seeded_at が NULL の行を、posted_at が一定期間内のものに限り posted_at の順で拾うため、posted_at まで含めて絞り込みと整列を索引だけで済ませる。
+    KEY idx_adp_reactions_seeded_at_posted_at (reactions_seeded_at, posted_at),
     CONSTRAINT fk_adp_article FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -469,8 +476,9 @@ CREATE TABLE article_comments (
     last_synced_at         DATETIME        NULL,                -- 投票を最後に数え直した時刻。
     PRIMARY KEY (id),
     UNIQUE KEY uq_ac_message_id (message_id),                   -- 同じ投稿を二重に写さない。リアクションのイベントはこの列で行を引くため、索引が無いと guild 中の無関係なリアクション 1 件ごとに全表走査になる。
-    KEY idx_ac_article_id_posted_at (article_id, posted_at),    -- 記事のコメントを時系列で引く(一覧の主経路)。
-    KEY idx_ac_post_id (post_id),
+    KEY idx_ac_article_id_posted_at (article_id, posted_at),    -- 記事のコメントを時系列で引く(一覧の主経路)。末尾に主キー(id)が暗黙に付くため、posted_at が同時刻のコメントも id の昇順に定まる。
+    -- bot はスレッドの履歴を読み直す際、この post_id の行のうち今回見つからなかったものを message_id の範囲で絞って消す。message_id まで含めると、その範囲が索引だけで決まる。先頭が post_id であることは変わらないため、外部キーが要求する索引も兼ねる。
+    KEY idx_ac_post_id_message_id (post_id, message_id),
     CONSTRAINT fk_ac_post    FOREIGN KEY (post_id)    REFERENCES article_discord_posts (id) ON DELETE CASCADE,
     CONSTRAINT fk_ac_article FOREIGN KEY (article_id) REFERENCES articles (id)              ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

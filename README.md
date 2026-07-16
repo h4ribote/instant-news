@@ -261,7 +261,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-compose は YAML の設定ファイルを読めないため、DB の資格情報と公開ポートだけが `config.yaml` と二重に現れます。`.env` の各値は `config.yaml` の対応する値と一致させてください。`db` は `.env` の値で MySQL の利用者とデータベースを作り、`server` と `bot` は `config.yaml` の値で繋ぎにいくため、食い違うと `server` は起動した MySQL へ繋げません。
+compose は YAML の設定ファイルを読めないため、DB の資格情報と公開ポートだけが `config.yaml` と二重に現れます。二重に現れる値は `config.yaml` の対応する値と一致させてください。`db` は `.env` の値で MySQL の利用者とデータベースを作り、`server` と `bot` は `config.yaml` の値で繋ぎにいくため、食い違うと `server` は起動した MySQL へ繋げません。残る `MYSQL_ROOT_PASSWORD` と `MYSQL_INNODB_BUFFER_POOL_SIZE` は MySQL の運用にのみ関わる値で、`config.yaml` に対応するものはありません。
 
 | キー | 内容 |
 | --- | --- |
@@ -270,6 +270,7 @@ compose は YAML の設定ファイルを読めないため、DB の資格情報
 | `MYSQL_PASSWORD` | 上記の利用者のパスワード。`config.yaml` の `database.password` と一致させる。 |
 | `MYSQL_ROOT_PASSWORD` | MySQL の root のパスワード。アプリケーションは root を使わず、保守用に設けるもので、`MYSQL_USER` とは別である。`config.yaml` に対応する値は無い。 |
 | `INSTANT_NEWS_PORT` | `server` を公開するポート。`config.yaml` の `server.port` と一致させる。コンテナの内と外で同じ番号を使うため、変える場合は両方を合わせる。 |
+| `MYSQL_INNODB_BUFFER_POOL_SIZE` | MySQL がデータと索引を載せるメモリ(InnoDB バッファプール)。既定は 1G。`config.yaml` に対応する値は無い。`db`・`server`・`bot` は同じホストに同居するため、ホストの搭載メモリを全て与えてはならない。目安は、データベースの総量を賄えて、かつホストの搭載メモリの半分を超えない値。 |
 
 `MYSQL_PASSWORD` と `MYSQL_ROOT_PASSWORD` に既定値はなく、`.env.example` でも空です。未設定・空のままなら compose が起動を拒みます。ひな形に既定の資格情報を書くと、変更されないまま本番へ出るためです。`.env` は `config.yaml` と同じく Git 追跡対象外です(ひな形の `.env.example` は追跡対象のため、実際の資格情報を書かないでください)。
 

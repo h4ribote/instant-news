@@ -21,6 +21,12 @@ services:
       - --collation-server=utf8mb4_0900_ai_ci
       # articles の全文検索は ngram パーサを使う(日本語は空白で語を区切らないため、既定の空白区切りでは索引が成立しない)。ngram_token_size は起動時にしか設定できず、この値で索引が構築されるため、後から変える場合は FULLTEXT 索引の作り直しが要る。2 は 2 文字の語から拾える既定値。
       - --ngram-token-size=2
+      # ngram パーサに対してストップワードを無効にする。既定のストップワード一覧は英語向けで、1 文字の "a" と "i" を含む。ngram パーサは語ではなくトークンを構成する「文字」を一覧と照合し、1 文字でも該当するとそのトークンごと索引から捨てるため、既定のままでは 2 文字トークンが全て a か i を含む語(Japan → ja/ap/pa/an、data → da/at/ta、Asia・AI・API・capital など)は索引に 1 つも残らず、検索しても常に 0 件になる。ch が残る China や a も i も含まない Tokyo が引けるため、不具合は語ごとにまだらに現れる。日本語の語は影響を受けない。ngram_token_size と同じくこの値は索引の構築時に読まれるので(検索時の値は結果を左右しない)、後から変える場合は FULLTEXT 索引の作り直しが要る。
+      - --innodb-ft-enable-stopword=OFF
+      # InnoDB がデータと索引を載せるメモリ。MySQL の既定は 128 MiB であり、記事本文(LONGTEXT)と ngram の全文索引を抱えるには小さい。ここから溢れた分は読むたびにディスクへ行く。値は実行環境の空きメモリで決まるため .env で与える。db コンテナにメモリ上限を設けていない以上、MySQL に自動計算させる(innodb_dedicated_server)とホスト全体の RAM を基準に約 75% を確保しようとし、同居する server と bot を圧迫するため、明示した値を渡す。
+      - --innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-1G}
+      # バイナリログの保持期間(7 日)。MySQL 8.4 の既定は 30 日だが、この構成にレプリカは無く、バックアップもボリュームを揃えて取る方式(下記 volumes の説明)であって binlog を退避しない。したがって 30 日分を db-data に溜め続けても、それを使う手順がどこにも無いまま容量だけを消費する。それでも残すのは、取り違えた更新を掛けた直後に mysqlbinlog で内容を読み、何が起きたかを追える猶予としてである。
+      - --binlog-expire-logs-seconds=604800
     environment:
       # config.yaml の database 節と一致させること。パスワードには既定値を持たせない。リポジトリに既定の資格情報を置くと、変更されないまま本番へ出る。
       MYSQL_DATABASE: ${MYSQL_DATABASE:-instant_news}
