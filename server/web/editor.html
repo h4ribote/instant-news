@@ -26,16 +26,16 @@
       <input type="text" name="q" placeholder="記事・タグ・報道社を検索" aria-label="記事を検索">
       <button type="submit" aria-label="検索">🔍</button>
     </form>
-    <div class="actions">
-      <span id="account"></span>
+    <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
       <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
     </div>
   </div>
 </header>
 
+<!-- カテゴリ(記事の主分類)は js/chrome.js が GET /api/categories から position 順に spacer の手前へ足す。カテゴリ集合はデプロイごとに異なるため、この HTML には 1 つも書かない。 -->
 <nav class="globalnav">
-  <div class="container" id="globalnav">
+  <div class="container" data-globalnav>
     <a href="/">トップ</a>
     <span class="spacer"></span>
     <a href="/editor" class="write active">✍ 記事を書く</a>
@@ -233,48 +233,16 @@
 </footer>
 
 <script type="module">
-import { ApiError, get, post, patch, upload, me, escapeHtml, formatDateTime, articleUrl, qs } from '/static/js/api.js';
+import { get, post, patch, upload, me, escapeHtml, formatDateTime, articleUrl, qs } from '/static/js/api.js';
+import { mountChrome, listOf, displayName, cssUrlRaw, errorMessage } from '/static/js/chrome.js';
 
 /* ============================================================
    表示の小物
    ============================================================ */
 
-const AVATAR_COLORS = ['a1', 'a2', 'a3', 'a4', 'a5'];
 const STATUS_LABELS = { draft: '下書き', in_review: 'レビュー中', scheduled: '予約公開', published: '公開済み', archived: 'アーカイブ' };
 // Discord の CDN。ここに置かれた画像の URL はおよそ 24 時間で失効するため、取り込みの予告を出す対象になる。
 const DISCORD_CDN = /(?:^|\/\/)(?:cdn\.discordapp\.com|media\.discordapp\.net)\//i;
-
-/** 一覧の応答が配列でもページ(items 入り)でも同じように扱えるようにする。 */
-function asItems(data) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.items)) return data.items;
-  return [];
-}
-
-function displayName(user) {
-  if (!user) return '不明';
-  return user.global_name || user.username || '不明';
-}
-
-function pickClass(key, classes) {
-  const s = String(key === null || key === undefined ? '' : key);
-  let sum = 0;
-  for (let i = 0; i < s.length; i += 1) sum = (sum * 31 + s.charCodeAt(i)) % 9973;
-  return classes[sum % classes.length];
-}
-
-/** CSS の文字列を閉じる " と \ を退避した url(...) を作る。URL に何が入っていても CSS の文脈から抜け出せない。 */
-function cssUrl(url) {
-  return 'url("' + String(url).replace(/[\\"]/g, '\\$&') + '")';
-}
-
-function avatarHtml(user) {
-  if (user && user.avatar_hash && user.discord_user_id) {
-    const url = `https://cdn.discordapp.com/avatars/${encodeURIComponent(user.discord_user_id)}/${encodeURIComponent(user.avatar_hash)}.png?size=64`;
-    return `<span class="avatar ph" style="background-image:${escapeHtml(cssUrl(url))}"></span>`;
-  }
-  return `<span class="avatar ${pickClass(user && user.id, AVATAR_COLORS)}">${escapeHtml(displayName(user).slice(0, 1).toUpperCase())}</span>`;
-}
 
 /**
  * 要素の表示を切り替える。
@@ -287,14 +255,6 @@ function show(el, visible) {
 /** 注意書きを描く。icon は行頭の記号、html は組み立て済みの断片。 */
 function noticeHtml(icon, html, info) {
   return `<div class="notice${info ? ' info' : ''}"><span class="ic">${escapeHtml(icon)}</span><div>${html}</div></div>`;
-}
-
-/** 例外を利用者に見せる文言にする。サーバーが返した説明を握りつぶさず、そのまま出す。 */
-function errorText(e) {
-  if (e instanceof ApiError && e.body && typeof e.body === 'object' && Array.isArray(e.body.detail)) {
-    return e.body.detail.map((d) => (d && d.msg ? `${(d.loc || []).join('.')}: ${d.msg}` : JSON.stringify(d))).join(' / ');
-  }
-  return e && e.message ? e.message : String(e);
 }
 
 /**
@@ -337,27 +297,6 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
-
-/* ============================================================
-   共通の外枠
-   ============================================================ */
-
-/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
-function mountAdminNav(viewer) {
-  if (!viewer || !viewer.is_admin) return;
-  const write = document.querySelector('.globalnav a.write');
-  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
-}
-
-async function renderChrome() {
-  try {
-    const categories = asItems(await get('/api/categories')).slice().sort((a, b) => a.position - b.position);
-    const links = categories.map((c) => `<a href="/categories/${encodeURIComponent(c.slug)}">${escapeHtml(c.name)}</a>`).join('');
-    el('globalnav').innerHTML = `<a href="/">トップ</a>${links}<span class="spacer"></span><a href="/editor" class="write active">✍ 記事を書く</a>`;
-  } catch (e) {
-    // カテゴリを引けなくても編集は続けられる。
-  }
-}
 
 /* ============================================================
    入力の組み立てと反映
@@ -406,7 +345,8 @@ function updateNotifyHint() {
 /** 署名の見本。どの社の名で、誰として出るのかを選ぶ前に見せる。 */
 function updateBylinePreview() {
   const pub = state.publishers.find((p) => p.id === el('publisher').value);
-  const name = displayName(state.user && state.user.user);
+  // 共通の displayName は名前が無ければ空文字を返す。署名の見本で名前が消えると「報道社のみ」の署名と見分けが付かなくなるため、必ず何かを出す。
+  const name = displayName(state.user && state.user.user) || '不明';
   el('byline-preview').textContent = ` — ${pub ? pub.name : '(報道社なし)'} / ${name}`;
 }
 
@@ -438,7 +378,7 @@ function ensureOption(select, value, label) {
 
 function updateCoverPreview() {
   const preview = el('cover-preview');
-  preview.style.backgroundImage = state.coverUrl ? cssUrl(state.coverUrl) : '';
+  preview.style.backgroundImage = state.coverUrl ? cssUrlRaw(state.coverUrl) : '';
   show(el('cover-actions'), Boolean(state.coverUrl));
 }
 
@@ -495,7 +435,7 @@ async function uploadBodyImages(files) {
       insertAtCursor(el('body'), `\n![${file.name.replace(/[[\]]/g, '')}](${media.url})\n`);
       box.innerHTML = noticeHtml('✔', `<b>${escapeHtml(file.name)}</b> を取り込み、カーソル位置に Markdown を挿入しました。`, true);
     } catch (e) {
-      box.innerHTML = noticeHtml('⚠', `<b>${escapeHtml(file.name)}</b> をアップロードできませんでした。${escapeHtml(errorText(e))}`);
+      box.innerHTML = noticeHtml('⚠', `<b>${escapeHtml(file.name)}</b> をアップロードできませんでした。${escapeHtml(errorMessage(e))}`);
     }
   }
 }
@@ -510,7 +450,7 @@ async function uploadCover(file) {
     updateCoverPreview();
     box.innerHTML = '';
   } catch (e) {
-    box.innerHTML = noticeHtml('⚠', `<b>${escapeHtml(file.name)}</b> をアップロードできませんでした。${escapeHtml(errorText(e))}`);
+    box.innerHTML = noticeHtml('⚠', `<b>${escapeHtml(file.name)}</b> をアップロードできませんでした。${escapeHtml(errorMessage(e))}`);
   }
 }
 
@@ -668,7 +608,7 @@ async function save(overrides) {
       : '';
     return article;
   } catch (e) {
-    setSaveNotices(noticeHtml('⚠', `<b>保存できませんでした。</b> ${escapeHtml(errorText(e))}`));
+    setSaveNotices(noticeHtml('⚠', `<b>保存できませんでした。</b> ${escapeHtml(errorMessage(e))}`));
     return null;
   } finally {
     busy(false);
@@ -697,7 +637,7 @@ async function publish() {
     updateStatusBadge();
     setSaveNotices(noticeHtml('✔', `<b>公開しました。</b> <a href="${articleUrl(article.slug)}">記事を開く</a>`, true));
   } catch (e) {
-    setSaveNotices(noticeHtml('⚠', `<b>公開できませんでした。</b> ${escapeHtml(errorText(e))}`));
+    setSaveNotices(noticeHtml('⚠', `<b>公開できませんでした。</b> ${escapeHtml(errorMessage(e))}`));
   } finally {
     busy(false);
   }
@@ -715,30 +655,27 @@ function renderGate(html) {
 }
 
 async function main() {
-  await renderChrome();
-
   const user = await me();
-  // ナビは renderChrome が組み直すため、導線を足すのはその後でなければ消える。
-  mountAdminNav(user);
-  const account = el('account');
+  // カテゴリはナビと「カテゴリ(必須)」の選択肢の双方が要る。要求を 1 本にして外枠と分け合う。
+  const categoriesP = get('/api/categories');
+  await mountChrome(user, { categories: categoriesP });
+
   if (!user || !user.user) {
     const back = location.pathname + location.search;
-    account.innerHTML = `<a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`;
     renderGate(`<p>記事を書くには Discord でログインしてください。</p><a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`);
     return;
   }
   state.user = user;
   state.publishers = user.publishers || [];
   state.roles = user.roles || [];
-  account.innerHTML = `<span class="publisher">${avatarHtml(user.user)}${escapeHtml(displayName(user.user))}</span>`;
 
   try {
-    const [categories, tags, series] = await Promise.all([get('/api/categories'), get('/api/tags'), get('/api/series')]);
-    state.categories = asItems(categories).slice().sort((a, b) => a.position - b.position);
-    state.tags = asItems(tags);
-    state.series = asItems(series);
+    const [categories, tags, series] = await Promise.all([categoriesP, get('/api/tags'), get('/api/series')]);
+    state.categories = listOf(categories).slice().sort((a, b) => a.position - b.position);
+    state.tags = listOf(tags);
+    state.series = listOf(series);
   } catch (e) {
-    renderGate(`<p>編集に必要な分類を読み込めませんでした。${escapeHtml(errorText(e))}</p>`);
+    renderGate(`<p>編集に必要な分類を読み込めませんでした。${escapeHtml(errorMessage(e))}</p>`);
     return;
   }
   if (!state.categories.length) {
@@ -775,7 +712,7 @@ async function main() {
     try {
       fillArticle(await get(`/api/articles/${encodeURIComponent(ref)}`));
     } catch (e) {
-      setSaveNotices(noticeHtml('⚠', `<b>編集する記事を読み込めませんでした。</b> ${escapeHtml(errorText(e))} このまま保存すると新しい記事になります。`));
+      setSaveNotices(noticeHtml('⚠', `<b>編集する記事を読み込めませんでした。</b> ${escapeHtml(errorMessage(e))} このまま保存すると新しい記事になります。`));
       state.articleId = null;
       state.slug = null;
       updateStatusBadge();

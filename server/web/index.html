@@ -29,8 +29,8 @@
       <input type="text" name="q" id="search-input" placeholder="記事を検索" aria-label="記事を検索">
       <button type="submit" aria-label="検索">🔍</button>
     </form>
-    <div class="actions" id="actions">
-      <a class="btn-discord" id="account-login" data-login href="/auth/login">🎮 Discord でログイン</a>
+    <!-- アカウント欄(ログイン導線、またはログイン済みの利用者名とログアウト)は js/chrome.js がこの先頭へ差し込む。 -->
+    <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
       <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
     </div>
@@ -38,14 +38,15 @@
 </header>
 
 <!--
-  グローバルナビ。主役はカテゴリ(記事の主分類、単一必須)で、GET /api/categories から position 順に組み立てる。
+  グローバルナビ。主役はカテゴリ(記事の主分類、単一必須)で、js/chrome.js が GET /api/categories から position 順に spacer の手前へ足す。
   カテゴリ集合はデプロイごとに異なるため、この HTML には 1 つも書かない。
   機能系の導線は spacer の右へ寄せて、別種であることを示す。
+  トップは既定で現在地とし、欄のページ(/categories/{slug})では chrome.js がこの印を降ろして当の欄へ移す。
 -->
 <nav class="globalnav">
-  <div class="container">
-    <a href="/" id="nav-top" class="active">トップ</a>
-    <span class="spacer" id="nav-spacer"></span>
+  <div class="container" data-globalnav>
+    <a href="/" class="active">トップ</a>
+    <span class="spacer"></span>
     <a href="#tags" class="util">タグ</a>
     <a href="#series" class="util">連載</a>
     <a href="/editor" class="write">✍ 記事を書く</a>
@@ -184,7 +185,8 @@
 </footer>
 
 <script type="module">
-import { get, post, me, qs, escapeHtml, formatDateTime, articleUrl, renderAdSlot } from '/static/js/api.js';
+import { get, qs, escapeHtml, formatDateTime, articleUrl, renderAdSlot } from '/static/js/api.js';
+import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, cssUrlRaw } from '/static/js/chrome.js';
 
 /* 1 度に取得する記事の件数。記事一覧に加えて、速報帯・トピックス・サイドバーの 2 つのランキングも同じ取得結果から組み立てる。 */
 const PER_PAGE = 20;
@@ -215,13 +217,6 @@ function share(promise) {
   return promise;
 }
 
-/** 一覧の応答から項目の配列を取り出す。ページングを伴う一覧は {items, page, total, has_next} で返り、分類のように全件を返す一覧は配列そのもので返るため、両方を受ける。 */
-function itemsOf(data) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.items)) return data.items;
-  return [];
-}
-
 /** 例外から読者に見せる短い理由を取り出す。 */
 function reasonOf(e) {
   return e && e.message ? e.message : String(e);
@@ -236,15 +231,10 @@ function noticeHtml(text, kind = 'info') {
   return `<div class="${cls}"><span class="ic">${ic}</span><div>${escapeHtml(text)}</div></div>`;
 }
 
-/** CSS の url() の値を組み立てる。URL は記事・利用者に由来するため、引用符とバックスラッシュを CSS 文字列として退避する。 */
-function cssUrl(url) {
-  return 'url("' + String(url).replace(/[\\"]/g, '\\$&') + '")';
-}
-
-/** data-bg へ退避しておいた画像 URL を背景として適用する。HTML を組み立てる段では属性値としてエスケープしておき、CSS としての解釈をこの 1 箇所へ集約する(style 属性へ文字列連結で差し込むと、URL の中身が CSS として解釈されうる)。 */
+/** data-bg へ退避しておいた画像 URL を背景として適用する。HTML を組み立てる段では属性値としてエスケープしておき、CSS としての解釈をこの 1 箇所へ集約する(style 属性へ文字列連結で差し込むと、URL の中身が CSS として解釈されうる)。style プロパティへの代入は HTML を経由しないため、HTML エスケープを掛けない cssUrlRaw を使う。 */
 function applyBackgrounds(root) {
   for (const el of root.querySelectorAll('[data-bg]')) {
-    el.style.backgroundImage = cssUrl(el.dataset.bg);
+    el.style.backgroundImage = cssUrlRaw(el.dataset.bg);
     el.removeAttribute('data-bg');
   }
 }
@@ -259,42 +249,6 @@ function setHtml(el, html) {
 function showNotice(el, text, kind) {
   el.innerHTML = noticeHtml(text, kind);
   el.hidden = false;
-}
-
-/** 画像を持たない箱に出す頭文字。 */
-function initial(text) {
-  const chars = [...String(text ?? '').trim()];
-  return chars.length ? chars[0].toUpperCase() : '';
-}
-
-/** 画像を持たない箱の色。ID から決めるため、同じ報道社・同じ利用者には常に同じ色が付く。ID は文字列のまま扱う(数値化するとスノーフレークの下位桁が壊れる)。 */
-function paletteClass(prefix, id, count) {
-  const s = String(id ?? '');
-  let n = 0;
-  for (let i = 0; i < s.length; i++) n = (n * 31 + s.charCodeAt(i)) % count;
-  return `${prefix}${n + 1}`;
-}
-
-/** 利用者の表示名。Discord の表示名を優先し、未設定ならユーザー名。 */
-function userName(user) {
-  return (user && (user.global_name || user.username)) || '';
-}
-
-/** Discord のアバター画像。既定アバターの利用者は avatar_hash を持たないため null を返し、頭文字で代替する。 */
-function avatarUrl(user) {
-  if (!user || !user.avatar_hash) return null;
-  return `https://cdn.discordapp.com/avatars/${encodeURIComponent(user.discord_user_id)}/${encodeURIComponent(user.avatar_hash)}.png?size=64`;
-}
-
-function avatarHtml(user) {
-  const url = avatarUrl(user);
-  if (url) return `<span class="avatar ph" data-bg="${escapeHtml(url)}"></span>`;
-  return `<span class="avatar ${paletteClass('a', user && user.id, 5)}">${escapeHtml(initial(userName(user)))}</span>`;
-}
-
-function pubLogoHtml(publisher) {
-  if (publisher.logo_url) return `<span class="pub-logo ph" data-bg="${escapeHtml(publisher.logo_url)}"></span>`;
-  return `<span class="pub-logo ${paletteClass('p', publisher.id, 4)}">${escapeHtml(initial(publisher.name))}</span>`;
 }
 
 /** サムネイル。カバー画像を持たない記事は灰色の枠のままにする(別の画像で埋めない)。 */
@@ -336,7 +290,7 @@ function metaHtml(article) {
   for (const tag of (article.tags || []).slice(0, TAGS_PER_ROW)) parts.push(`<span class="tag-chip">#${escapeHtml(tag.name)}</span>`);
   if (article.is_sponsored) parts.push(sponsorHtml(article));
   // byline_mode が publisher の記事は報道社名だけで署名する(著者は監査のために保持されるが表には出さない)。
-  if (article.byline_mode !== 'publisher' && article.author) parts.push(`<span class="author">${avatarHtml(article.author)}${escapeHtml(userName(article.author))}</span>`);
+  if (article.byline_mode !== 'publisher' && article.author) parts.push(`<span class="author">${avatarHtml(article.author)}${escapeHtml(displayName(article.author))}</span>`);
   if (article.comment_count) parts.push(`<span class="thread">${article.comment_count}</span>`);
   // 0 は「まだ誰も投票していない」ことを表すため出さないが、負の点数は出す(隠すと賛否が割れた記事が無風に見える)。
   if (article.score) parts.push(`<span class="react">${article.score > 0 ? '▲' : '▼'}${Math.abs(article.score)}</span>`);
@@ -428,70 +382,25 @@ function emptyTextFor(view) {
 
 /* ---------------------------------------------------------------- 各領域の描画 */
 
-/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
-function mountAdminNav(viewer) {
-  if (!viewer || !viewer.is_admin) return;
-  const write = document.querySelector('.globalnav a.write');
-  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
-}
-
-/** ヘッダとサイドバーのログイン導線。 */
-async function mountAccount(view) {
-  const back = location.pathname + location.search;
-  for (const a of document.querySelectorAll('[data-login]')) a.href = '/auth/login' + qs({ redirect_to: back });
-
-  let user = null;
-  try {
-    const data = await me();
-    user = data && data.user ? data.user : null;
-    mountAdminNav(data);
-  } catch (e) {
-    // 取得できないときはログイン導線のまま出す。ログイン済みだと誤って見せるより、もう一度ログインを促す方が害が無い。
-    console.error('ログイン状態を取得できませんでした', e);
-    return;
-  }
-  if (!user) return;
+/**
+ * ヘッダのアカウント欄・管理導線・ナビのカテゴリは js/chrome.js が組み立てる。ここが足すのは、このページにしか無いサイドバーのログイン誘いの扱いだけである。
+ * ログイン済みならその誘いは意味を失うため取り除き、未ログインなら戻り先を今のページにしたログイン URL を入れる。
+ * カテゴリは記事一覧の側でも使うため、同じ約束を渡して要求を重ねない。欄のページでは、その欄を現在地として示す。
+ */
+async function mountAccountAndNav(view, categoriesP) {
+  const viewer = await mountChrome(undefined, {
+    activeCategory: view.kind === 'category' ? view.slug : null,
+    categories: categoriesP,
+  });
 
   const card = document.getElementById('login-card');
-  if (card) card.remove();
-
-  const login = document.getElementById('account-login');
-  if (!login) return;
-  const actions = document.getElementById('actions');
-  login.insertAdjacentHTML('beforebegin', `<a class="btn" href="/settings">${avatarHtml(user)}${escapeHtml(userName(user))}</a><button class="btn" type="button" id="logout">ログアウト</button>`);
-  login.remove();
-  applyBackgrounds(actions);
-
-  document.getElementById('logout').addEventListener('click', async () => {
-    try {
-      await post('/auth/logout');
-    } catch (e) {
-      // 失敗しても読み込み直す。状態はサーバーから取り直すため、破棄できていなければログイン済みのまま表示され、利用者に伝わる。
-      console.error('ログアウトに失敗しました', e);
-    }
-    location.reload();
-  });
-}
-
-/** グローバルナビのカテゴリ。position 順に並べる。 */
-async function mountNav(view, categoriesP) {
-  let categories;
-  try {
-    categories = itemsOf(await categoriesP);
-  } catch (e) {
-    // カテゴリを引けない場合もトップ・タグ・連載・記事を書くの導線は残す。記事一覧の側でも同じ不調が文言として出る。
-    console.error('カテゴリを取得できませんでした', e);
+  if (!card) return;
+  // GET /api/me は未ログインなら null を返す(401 を api.js が畳む)。返ってきた時点でログイン済みであり、user は必ず入っている。
+  if (viewer) {
+    card.remove();
     return;
   }
-
-  const ordered = [...categories].sort((a, b) => a.position - b.position || String(a.name).localeCompare(String(b.name), 'ja'));
-  const html = ordered.map((c) => {
-    const active = view.kind === 'category' && c.slug === view.slug ? ' class="active"' : '';
-    return `<a href="/categories/${encodeURIComponent(c.slug)}"${active}>${escapeHtml(c.name)}</a>`;
-  }).join('');
-
-  if (view.kind === 'category') document.getElementById('nav-top').classList.remove('active');
-  document.getElementById('nav-spacer').insertAdjacentHTML('beforebegin', html);
+  for (const a of card.querySelectorAll('[data-login]')) a.href = '/auth/login' + qs({ redirect_to: location.pathname + location.search });
 }
 
 /** 記事一覧。 */
@@ -509,11 +418,11 @@ async function mountArticles(view, listP, categoriesP) {
     showNotice(statusEl, `記事一覧を読み込めませんでした(${reasonOf(e)})`, 'error');
     return;
   }
-  const items = itemsOf(data);
+  const items = listOf(data);
 
   let categories = [];
   try {
-    categories = itemsOf(await categoriesP);
+    categories = listOf(await categoriesP);
   } catch (e) {
     // 欄の名前を解決できないだけであり、一覧そのものは出せる。見出しは slug のまま出る。
     console.error('カテゴリを取得できませんでした', e);
@@ -597,7 +506,7 @@ async function mountFromLatest(latestP) {
   let items = [];
   let failure = null;
   try {
-    items = itemsOf(await latestP);
+    items = listOf(await latestP);
   } catch (e) {
     failure = e;
   }
@@ -611,7 +520,7 @@ async function mountFromLatest(latestP) {
     limit: 5,
     compare: (a, b) => b.view_count - a.view_count,
     meta: (a) => {
-      const by = a.publisher ? a.publisher.name : userName(a.author);
+      const by = a.publisher ? a.publisher.name : displayName(a.author);
       return by ? `${by} ・ ${a.view_count} 表示` : `${a.view_count} 表示`;
     },
     empty: '記事はまだありません。',
@@ -623,12 +532,6 @@ async function mountFromLatest(latestP) {
     meta: (a) => `${a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')}${Math.abs(a.score)} ・ 💬 ${a.comment_count}`,
     empty: '記事はまだありません。',
   });
-}
-
-/** タグのアイコン。持たないタグには何も出さない(意味の無い記号で埋めない)。 */
-function tagIconHtml(tag) {
-  if (!tag.icon_url) return '';
-  return `<span class="tag-icon ph" data-bg="${escapeHtml(tag.icon_url)}"></span>`;
 }
 
 /** 記事数。応答に含まれない場合は出さない(件数を装った値を作らない)。 */
@@ -643,7 +546,7 @@ async function mountTags() {
 
   let tags;
   try {
-    tags = itemsOf(await get('/api/tags'));
+    tags = listOf(await get('/api/tags'));
   } catch (e) {
     const text = `タグを読み込めませんでした(${reasonOf(e)})`;
     trendEl.innerHTML = noticeHtml(text, 'error');
@@ -681,7 +584,7 @@ async function mountSeries() {
   const el = document.getElementById('series-body');
   let series;
   try {
-    series = itemsOf(await get('/api/series'));
+    series = listOf(await get('/api/series'));
   } catch (e) {
     el.innerHTML = `<div class="body">${noticeHtml(`連載を読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
     return;
@@ -693,7 +596,7 @@ async function mountSeries() {
   setHtml(el, `<ul class="series">${series.slice(0, 5).map((s) => {
     const cover = s.cover_image_url ? `<div class="cover ph" data-bg="${escapeHtml(s.cover_image_url)}"></div>` : '<div class="cover"></div>';
     const href = '/' + qs({ series: s.slug });
-    return `<li>${cover}<div><a class="s-title" href="${escapeHtml(href)}">${escapeHtml(s.title)}</a><div class="s-count">${escapeHtml(userName(s.owner))}</div></div></li>`;
+    return `<li>${cover}<div><a class="s-title" href="${escapeHtml(href)}">${escapeHtml(s.title)}</a><div class="s-count">${escapeHtml(displayName(s.owner))}</div></div></li>`;
   }).join('')}</ul>`);
 }
 
@@ -702,7 +605,7 @@ async function mountPublisherRanking() {
   const el = document.getElementById('publisher-ranking-body');
   let rows;
   try {
-    rows = itemsOf(await get('/api/rankings/publishers' + qs({ days: 7, limit: 5 })));
+    rows = listOf(await get('/api/rankings/publishers' + qs({ days: 7, limit: 5 })));
   } catch (e) {
     el.innerHTML = `<div class="body">${noticeHtml(`報道社ランキングを読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
     return;
@@ -729,8 +632,7 @@ const latestP = share(get(LATEST_URL));
 const listP = listUrl(view) === LATEST_URL ? latestP : share(get(listUrl(view)));
 
 // 各領域は独立して描画する。1 つの取得が失敗しても、他の領域はその領域なりの文言を出して残る。
-mountAccount(view);
-mountNav(view, categoriesP);
+mountAccountAndNav(view, categoriesP);
 mountArticles(view, listP, categoriesP);
 mountFromLatest(latestP);
 mountTags();

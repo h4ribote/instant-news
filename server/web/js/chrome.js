@@ -3,10 +3,11 @@
  * こちらは DOM の層を担う。ヘッダのアカウント欄・グローバルナビ・利用者やタグの見た目の断片など、
  * 複数のページが同じ見た目で描くものを 1 箇所に集める。
  *
- * ここに集約する前は、これらの関数が admin / settings / tag / publisher の各ページへ写し取られていた。
- * 写し取られたものは食い違う。実際、利用者のアバターを組み立てる avatarHtml は、存在しない user.avatar_url を
- * 参照していたために全ページで一度も実画像を出せておらず、頭文字へ黙って落ちていた。正しい実装(avatar_hash と
- * discord_user_id から Discord の CDN の URL を組み立てる)を 1 つ持てば、この種のずれは構造的に起こらない。
+ * ここに集約する前は、これらの関数が全ページへ写し取られていた。写し取られたものは食い違う。実際、利用者の
+ * アバターを組み立てる avatarHtml は、admin / settings / tag / publisher では存在しない user.avatar_url を参照
+ * していたために一度も実画像を出せず頭文字へ黙って落ちており、index / article / editor では avatar_hash から
+ * URL を組み立てる正しい実装が、三者三様の書き方で並んでいた。同じものを 1 つ持てば、この種のずれは構造的に
+ * 起こらない。
  *
  * api.js と同じく、ID は必ず文字列として扱う。数値化するとスノーフレークの下位桁が黙って壊れる。
  */
@@ -21,11 +22,19 @@ export function loginUrl() {
 }
 
 /**
- * CSS の url() の値を組み立てる。URL は記事・利用者・タグに由来するため、CSS 文字列としての引用符とバックスラッシュを退避する。
- * JSON.stringify が CSS 文字列としての引用符とバックスラッシュを潰し、escapeHtml が属性値としての引用符を潰す。二段で囲わないと、引用符を含む URL から style 属性の外へ抜け出せてしまう。返り値は style 属性へそのまま差し込んでよい。
+ * CSS の url() の値そのもの。URL は記事・利用者・タグに由来するため、JSON.stringify で CSS 文字列としての引用符とバックスラッシュを潰す。
+ * **要素の style プロパティへ直接代入する場合(el.style.backgroundImage = ...)はこちらを使う。**HTML を経由しない代入に cssUrl を使うと、エスケープした &quot; がそのまま CSS の文字列へ入り、値ごと無効になって画像が出ない。
+ */
+export function cssUrlRaw(url) {
+  return `url(${JSON.stringify(String(url))})`;
+}
+
+/**
+ * style 属性へ HTML として差し込む url()。**innerHTML で組み立てる断片にはこちらを使う。**
+ * JSON.stringify が CSS 文字列としての引用符とバックスラッシュを潰し、escapeHtml が属性値としての引用符を潰す。二段で囲わないと、引用符を含む URL から style 属性の外へ抜け出せてしまう。
  */
 export function cssUrl(url) {
-  return `url(${escapeHtml(JSON.stringify(String(url)))})`;
+  return escapeHtml(cssUrlRaw(url));
 }
 
 /**
@@ -102,6 +111,12 @@ export function errorMessage(e) {
   const body = e && e.body;
   const err = body && body.error;
   if (err && typeof err.message === 'string' && err.message !== '') return err.message;
+  // 入力の検証に落ちた要求は FastAPI が {"detail": [{loc, msg}, ...]} の形で返す。ApiError.message は detail が文字列のときしか拾わないため、配列はここで畳む。どの項目がなぜ弾かれたのかは、この配列にしか書かれていない。
+  const detail = body && body.detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((d) => (d && d.msg ? `${(d.loc || []).join('.')}: ${d.msg}` : JSON.stringify(d))).filter(Boolean);
+    if (parts.length > 0) return parts.join(' / ');
+  }
   return e && e.message ? e.message : 'エラーが発生しました。';
 }
 
@@ -152,15 +167,27 @@ function mountAccount(actions, viewer) {
   }
 }
 
-/** グローバルナビへカテゴリ(記事の主分類)を position 順に足す。引けなくてもページ本体は読めるため、ナビだけを諦める。 */
-async function mountCategories() {
+/**
+ * グローバルナビへカテゴリ(記事の主分類)を position 順に足す。引けなくてもページ本体は読めるため、ナビだけを諦める。
+ *
+ * activeCategory にカテゴリの slug を渡すと、その欄を現在地として示し、併せてトップの現在地表示を降ろす(トップと欄の双方が現在地に見える状態を作らない)。渡された slug がどの欄にも当たらなければ何も動かさない。存在しない欄の URL を開いたときに、現在地がどこにも無いナビを出さないためである。
+ * source には取得済みのカテゴリを渡せる(配列でも、まだ解決していない Promise でもよい)。記事一覧のために同じ一覧を既に引いているページが、二度目の要求を出さずに済むようにある。省けば自分で引く。
+ */
+async function mountCategories(activeCategory, source) {
   const spacer = document.querySelector('[data-globalnav] .spacer');
   if (!spacer) return;
   try {
-    const cats = listOf(await get('/api/categories'), 'categories');
+    const cats = listOf(await (source === undefined ? get('/api/categories') : source), 'categories');
     const ordered = [...cats].sort((a, b) => (a.position - b.position) || String(a.name).localeCompare(String(b.name), 'ja'));
-    const html = ordered.map((c) => `<a href="/categories/${encodeURIComponent(c.slug)}">${escapeHtml(c.name)}</a>`).join('');
+    const html = ordered.map((c) => {
+      const active = c.slug === activeCategory ? ' class="active"' : '';
+      return `<a href="/categories/${encodeURIComponent(c.slug)}"${active}>${escapeHtml(c.name)}</a>`;
+    }).join('');
     spacer.insertAdjacentHTML('beforebegin', html);
+    if (ordered.some((c) => c.slug === activeCategory)) {
+      const top = document.querySelector('[data-globalnav] a[href="/"]');
+      if (top) top.classList.remove('active');
+    }
   } catch (e) {
     console.error('カテゴリを取得できませんでした', e);
   }
@@ -171,9 +198,10 @@ async function mountCategories() {
  * `data-actions`(ヘッダの操作群)と `data-globalnav`(青帯のナビ、中に `.spacer` を持つ)を備えたページで使う。
  *
  * viewer は呼び出し側が取得済みなら渡す(GET /api/me を二度引かないため)。渡されなければ自分で取得する。取得できないときはログインの導線を出す(ログイン済みだと誤って見せるより、もう一度ログインを促す方が害が無い)。
+ * options.activeCategory は現在地として示す欄の slug、options.categories は取得済みのカテゴリ(配列または Promise)。どちらも mountCategories がそのまま受ける。
  * 戻り値は解決した viewer(未ログインなら null)。呼び出し側は続けて自分の画面を描くのにこれを使える。
  */
-export async function mountChrome(viewer) {
+export async function mountChrome(viewer, { activeCategory = null, categories } = {}) {
   let resolved = viewer;
   if (resolved === undefined) {
     try {
@@ -184,6 +212,6 @@ export async function mountChrome(viewer) {
   }
   mountAccount(document.querySelector('[data-actions]'), resolved);
   mountAdminNav(resolved);
-  await mountCategories();
+  await mountCategories(activeCategory, categories);
   return resolved;
 }

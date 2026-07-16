@@ -31,16 +31,16 @@
       <input type="text" name="q" placeholder="記事・タグ・報道社を検索" aria-label="記事を検索">
       <button type="submit" aria-label="検索">🔍</button>
     </form>
-    <div class="actions">
-      <span id="account"></span>
+    <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
       <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
     </div>
   </div>
 </header>
 
+<!-- カテゴリ(記事の主分類)は js/chrome.js が GET /api/categories から position 順に spacer の手前へ足す。カテゴリ集合はデプロイごとに異なるため、この HTML には 1 つも書かない。 -->
 <nav class="globalnav">
-  <div class="container" id="globalnav">
+  <div class="container" data-globalnav>
     <a href="/">トップ</a>
     <span class="spacer"></span>
     <a href="/editor" class="write">✍ 記事を書く</a>
@@ -72,113 +72,30 @@
 </footer>
 
 <script type="module">
-import { ApiError, get, me, escapeHtml, formatDateTime, articleUrl, qs, renderAdSlot } from '/static/js/api.js';
+import { ApiError, get, escapeHtml, formatDateTime, articleUrl, qs, renderAdSlot } from '/static/js/api.js';
+import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, cssUrlRaw, errorMessage } from '/static/js/chrome.js';
 
 /* ============================================================
    表示の小物
    ============================================================ */
 
-// 画像を持たない利用者・報道社に割り当てる代替色。style.css が定義するダミー色をそのまま使う。
-const AVATAR_COLORS = ['a1', 'a2', 'a3', 'a4', 'a5'];
-const PUB_COLORS = ['p1', 'p2', 'p3', 'p4'];
-
 const STATUS_LABELS = { draft: '下書き', in_review: 'レビュー中', scheduled: '予約公開', published: '公開済み', archived: 'アーカイブ' };
 const VISIBILITY_LABELS = { public: '全体公開', members: 'メンバー限定', restricted: 'ロール限定' };
 const STANCE_LABELS = { independent: '独立系', state: '国営' };
 
-/** 一覧・詳細の応答が配列でもページ(items 入り)でも同じように扱えるようにする。 */
-function asItems(data) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.items)) return data.items;
-  return [];
-}
-
-/** 利用者の表示名。Discord の表示名(global_name)が未設定ならユーザー名を使う。 */
-function displayName(user) {
-  if (!user) return '不明';
-  return user.global_name || user.username || '不明';
-}
-
-/** ID から代替色を 1 つ選ぶ。同じ相手には常に同じ色が付き、読者が色で見分けられるようにする。 */
-function pickClass(key, classes) {
-  const s = String(key === null || key === undefined ? '' : key);
-  let sum = 0;
-  for (let i = 0; i < s.length; i += 1) sum = (sum * 31 + s.charCodeAt(i)) % 9973;
-  return classes[sum % classes.length];
-}
-
 /**
- * 背景画像を指定する style 属性を組み立てる。
- * CSS の文字列を閉じる " と \ を退避してから HTML エスケープするため、URL に何が入っていても属性の文脈からも CSS の文脈からも抜け出せない。
+ * 名前を出す場所で使う利用者の表示名。共通の displayName は名前が無ければ空文字を返すが、記事の署名・改版の編集者・執筆者の欄では
+ * 空文字は「名前の無い誰か」ではなく「欄ごと消えた」ように見える。users に居ない相手(guild を抜けた利用者・他の bot・webhook)は
+ * username も global_name も null で返るため、ここでは必ず何かを出す。
  */
-function bgStyle(url) {
-  const css = 'url("' + String(url).replace(/[\\"]/g, '\\$&') + '")';
-  return `style="background-image:${escapeHtml(css)}"`;
-}
-
-/** 利用者のアバター。Discord の CDN にある画像を users.avatar_hash から組み立て、未設定なら頭文字と代替色で描く。 */
-function avatarHtml(user) {
-  if (user && user.avatar_hash && user.discord_user_id) {
-    const url = `https://cdn.discordapp.com/avatars/${encodeURIComponent(user.discord_user_id)}/${encodeURIComponent(user.avatar_hash)}.png?size=64`;
-    return `<span class="avatar ph" ${bgStyle(url)}></span>`;
-  }
-  return `<span class="avatar ${pickClass(user && user.id, AVATAR_COLORS)}">${escapeHtml(displayName(user).slice(0, 1).toUpperCase())}</span>`;
-}
-
-/** 報道社のロゴ。未設定なら社名の頭文字と代替色で描く。 */
-function pubLogoHtml(pub) {
-  if (pub.logo_url) return `<span class="pub-logo ph" ${bgStyle(pub.logo_url)}></span>`;
-  return `<span class="pub-logo ${pickClass(pub.id, PUB_COLORS)}">${escapeHtml(String(pub.name || '?').slice(0, 1))}</span>`;
+function userLabel(user) {
+  return displayName(user) || '不明';
 }
 
 /** 閲覧範囲のバッジ。輪郭のみで描かれ、塗りの開示(広告)・速報と扱いを分ける。 */
 function visibilityBadgeHtml(visibility) {
   const label = VISIBILITY_LABELS[visibility] || visibility;
   return `<span class="badge vis-${escapeHtml(visibility)}">${escapeHtml(label)}</span>`;
-}
-
-/** 例外を利用者に見せる文言にする。サーバーが返した説明を捨てず、そのまま出す。 */
-function errorText(e) {
-  if (e instanceof ApiError && e.body && typeof e.body === 'object' && Array.isArray(e.body.detail)) {
-    return e.body.detail.map((d) => (d && d.msg ? `${(d.loc || []).join('.')}: ${d.msg}` : JSON.stringify(d))).join(' / ');
-  }
-  return e && e.message ? e.message : String(e);
-}
-
-/* ============================================================
-   共通の外枠(ナビゲーション・アカウント・検索)
-   ============================================================ */
-
-/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
-function mountAdminNav(viewer) {
-  if (!viewer || !viewer.is_admin) return;
-  const write = document.querySelector('.globalnav a.write');
-  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
-}
-
-async function renderChrome(activeCategorySlug) {
-  const nav = document.getElementById('globalnav');
-  try {
-    const categories = asItems(await get('/api/categories')).slice().sort((a, b) => a.position - b.position);
-    const links = categories.map((c) => {
-      const active = c.slug === activeCategorySlug ? ' class="active"' : '';
-      return `<a href="/categories/${encodeURIComponent(c.slug)}"${active}>${escapeHtml(c.name)}</a>`;
-    }).join('');
-    nav.innerHTML = `<a href="/">トップ</a>${links}<span class="spacer"></span><a href="/editor" class="write">✍ 記事を書く</a>`;
-  } catch (e) {
-    // カテゴリを引けなくてもトップと執筆への導線は残す(ナビが消えると記事から出られなくなる)。
-  }
-
-  const account = document.getElementById('account');
-  const user = await me();
-  // ナビはこの関数の冒頭で組み直されるため、導線を足すのはその後でなければ消える。
-  mountAdminNav(user);
-  if (user && user.user) {
-    account.innerHTML = `<span class="publisher">${avatarHtml(user.user)}${escapeHtml(displayName(user.user))}</span>`;
-  } else {
-    const back = location.pathname + location.search;
-    account.innerHTML = `<a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`;
-  }
 }
 
 /* ============================================================
@@ -264,7 +181,7 @@ function articleHtml(a, revisions) {
   // 署名。byline_mode が publisher の記事は記者名を出さない(相場表のような記事に個人名が出るのは不自然なため)。author_id は保持されており、監査では追える。
   const byline = [];
   if (a.byline_mode !== 'publisher') {
-    byline.push(`<span class="author">${avatarHtml(a.author)}${escapeHtml(displayName(a.author))}</span>`);
+    byline.push(`<span class="author">${avatarHtml(a.author)}${escapeHtml(userLabel(a.author))}</span>`);
   }
   byline.push(visibilityBadgeHtml(a.visibility));
   if (a.is_breaking) byline.push('<span class="badge breaking">速報</span>');
@@ -311,7 +228,7 @@ function articleHtml(a, revisions) {
   const tags = a.tags || [];
   if (tags.length) {
     const chips = tags.map((t) => {
-      const icon = t.icon_url ? `<span class="tag-icon ph" ${bgStyle(t.icon_url)}></span>` : '';
+      const icon = tagIconHtml(t);
       return `<a href="/tags/${encodeURIComponent(t.slug)}">${icon}# ${escapeHtml(t.name)}</a>`;
     }).join('');
     parts.push(`<div class="tags">${chips}</div>`);
@@ -342,7 +259,7 @@ function articleHtml(a, revisions) {
 /** 改版履歴の一覧。誰の名前で書かれたか(editor)と、いつ何を直したか(note / is_correction)を並べる。 */
 function revisionListHtml(revisions) {
   const items = revisions.slice().reverse().map((r) => {
-    const bits = [`改版 ${escapeHtml(r.revision_number)}`, escapeHtml(formatDateTime(r.created_at)), escapeHtml(displayName(r.editor))];
+    const bits = [`改版 ${escapeHtml(r.revision_number)}`, escapeHtml(formatDateTime(r.created_at)), escapeHtml(userLabel(r.editor))];
     if (r.is_correction) bits.push('訂正');
     if (r.note) bits.push(escapeHtml(r.note));
     if (r.revision_number > 1) bits.push(`<a href="#revisions" data-diff="${escapeHtml(r.revision_number)}">差分</a>`);
@@ -365,7 +282,7 @@ async function showDiff(revisionNumber) {
     const body = (d.diff || []).join('\n');
     box.innerHTML = `<div class="revision">${head}</div><div class="prose"><pre><code>${escapeHtml(body)}</code></pre></div>`;
   } catch (e) {
-    box.innerHTML = `<div class="revision">差分を取得できませんでした: ${escapeHtml(errorText(e))}</div>`;
+    box.innerHTML = `<div class="revision">差分を取得できませんでした: ${escapeHtml(errorMessage(e))}</div>`;
   }
   // 訂正の帯から開いた場合、差分は記事の末尾に出るため、そこまで運ぶ。開いたのに何も変わらないように見えてはならない。
   box.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -395,7 +312,7 @@ async function renderSide(a) {
   // 執筆者。署名が報道社のみの記事では出さない(表示から記者を外した記事で、脇から記者名が出てしまう)。
   if (a.byline_mode !== 'publisher') {
     const sub = a.publisher ? escapeHtml(a.publisher.name) : '';
-    cards.push(`<section class="card"><div class="section-head"><h2>執筆者</h2></div><div style="display:flex; gap:12px; align-items:center; padding:14px 16px;">${avatarHtml(a.author)}<div><div class="s-title">${escapeHtml(displayName(a.author))}</div><div class="s-count">${sub}</div></div></div></section>`);
+    cards.push(`<section class="card"><div class="section-head"><h2>執筆者</h2></div><div style="display:flex; gap:12px; align-items:center; padding:14px 16px;">${avatarHtml(a.author)}<div><div class="s-title">${escapeHtml(userLabel(a.author))}</div><div class="s-count">${sub}</div></div></div></section>`);
   }
 
   // 同じ連載の記事。連載の専用ページが無いため、連載内の移動はここが担う。
@@ -404,13 +321,13 @@ async function renderSide(a) {
     try {
       const series = await get(`/api/series/${encodeURIComponent(a.series.slug)}`);
       const cover = document.getElementById('series-cover');
-      if (cover && series && series.cover_image_url) cover.style.backgroundImage = `url("${String(series.cover_image_url).replace(/[\\"]/g, '\\$&')}")`;
+      if (cover && series && series.cover_image_url) cover.style.backgroundImage = cssUrlRaw(series.cover_image_url);
     } catch (e) {
       // カバーが引けなくても、バナーは灰色の枠のまま成立する。
     }
     let siblings = [];
     try {
-      siblings = asItems(await get('/api/articles' + qs({ series: a.series.slug, per_page: 20 })));
+      siblings = listOf(await get('/api/articles' + qs({ series: a.series.slug, per_page: 20 })));
     } catch (e) {
       siblings = [];
     }
@@ -429,12 +346,12 @@ async function renderSide(a) {
 
   // 人気のタグ。件数はタグの一覧が article_count を返すときにだけ出し、返さないときは順序も件数も主張しない。
   try {
-    const tags = asItems(await get('/api/tags'));
+    const tags = listOf(await get('/api/tags'));
     if (tags.length) {
       const hasCount = tags.some((t) => typeof t.article_count === 'number');
       const sorted = hasCount ? tags.slice().sort((x, y) => (y.article_count || 0) - (x.article_count || 0)) : tags;
       const chips = sorted.slice(0, 12).map((t) => {
-        const icon = t.icon_url ? `<span class="tag-icon ph" ${bgStyle(t.icon_url)}></span>` : '';
+        const icon = tagIconHtml(t);
         const count = typeof t.article_count === 'number' ? ` <b>${escapeHtml(t.article_count)}</b>` : '';
         return `<a href="/tags/${encodeURIComponent(t.slug)}">${icon}#${escapeHtml(t.name)}${count}</a>`;
       }).join('');
@@ -446,7 +363,7 @@ async function renderSide(a) {
 
   // 報道社ランキング。投票もコメントも Discord へ委譲しているため、その写しの集計だけで出せる。
   try {
-    const ranking = asItems(await get('/api/rankings/publishers' + qs({ days: 7, limit: 5 })));
+    const ranking = listOf(await get('/api/rankings/publishers' + qs({ days: 7, limit: 5 })));
     if (ranking.length) {
       const items = ranking.map((r, i) => {
         const p = r.publisher;
@@ -473,7 +390,7 @@ function renderError(e) {
   // 閲覧できない記事は 404 になる(存在を教えないため)。読者にはその可能性も併せて示すが、この記事があるともないとも言わない。
   const hint = missing
     ? `<p class="lede">URL が誤っているか、この記事が閲覧できる範囲にない可能性があります。</p><a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`
-    : `<p class="lede">${escapeHtml(errorText(e))}</p>`;
+    : `<p class="lede">${escapeHtml(errorMessage(e))}</p>`;
   document.getElementById('article').innerHTML = `<h1>記事を表示できません</h1>${hint}`;
 }
 
@@ -483,7 +400,8 @@ async function main() {
     article = await get(`/api/articles/${encodeURIComponent(slug)}`);
   } catch (e) {
     renderError(e);
-    await renderChrome(null);
+    // 記事を出せなくても外枠は出す。ナビが無いと、読者はこのページから出る導線を失う。
+    await mountChrome(undefined);
     return;
   }
 
@@ -492,7 +410,7 @@ async function main() {
   // 改版履歴は、改版の数と最終更新の表示、および訂正の差分に使う。引けない場合でも記事本体は出す。
   let revisions = [];
   try {
-    revisions = asItems(await get(`/api/articles/${encodeURIComponent(slug)}/revisions`));
+    revisions = listOf(await get(`/api/articles/${encodeURIComponent(slug)}/revisions`));
   } catch (e) {
     revisions = [];
   }
@@ -530,7 +448,8 @@ async function main() {
   loadComments(slug, 1, false);
 
   await Promise.all([
-    renderChrome(article.category.slug),
+    // この記事の欄を現在地として示す。
+    mountChrome(undefined, { activeCategory: article.category.slug }),
     renderSide(article),
     renderAdSlot(document.getElementById('ad-inline'), 'article_inline'),
   ]);
