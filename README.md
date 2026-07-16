@@ -128,7 +128,11 @@ flowchart TD
     web --> web_pages["index.html / article.html / tag.html / publisher.html / editor.html"]
     web --> web_settings["settings.html — 自分のアカウントと API キー"]
     web --> web_admin["admin.html — プラットフォームの設定(管理者向け)"]
-    web --> web_assets["css/style.css, js/api.js, js/theme.js"]
+    web --> web_css["css/style.css — 全ページのスタイルと幅の 3 層"]
+    web --> web_api["js/api.js — HTTP の層(取得・JSON・ID の文字列化・画像 URL)"]
+    web --> web_chrome["js/chrome.js — DOM の共通部品(ヘッダ・ナビ・ドロワー)"]
+    web --> web_adminjs["js/admin.js — 管理画面の描画と結線"]
+    web --> web_theme["js/theme.js — ライト/ダークの手動トグル"]
 
     root --> bot["bot/ — Discord bot"]
     bot --> bot_main["main.py — bot のエントリポイント"]
@@ -151,6 +155,7 @@ flowchart TD
     docs --> docs_api["api.md — HTTP API とキーの資格・スコープ"]
     docs --> docs_settings["settings.md — 設定の全キーと config.yaml / settings 表の役割分担"]
     docs --> docs_media["media.md — 画像の取り込み・変換・配信"]
+    docs --> docs_frontend["frontend.md — 画面の構成と幅への対応"]
 
     root --> conf["config.example.yaml — 設定ファイルのひな形"]
     root --> compose["docker-compose.yml — server / bot / MySQL の構成"]
@@ -378,3 +383,4 @@ server・bot・MySQL のコンテナに加えて、**画像の実体を置く名
 | [docs/api.md](docs/api.md) | HTTP API のエンドポイント一覧と表現の規約。API キーの発行資格とスコープ、署名の凍結と権限の都度判定、監査証跡、レート制限。 |
 | [docs/settings.md](docs/settings.md) | 設定の全キー(型・変更可否・再起動の要否)。`config.yaml` と `settings` 表の役割分担、初期値の投入が初回だけである理由、秘密を API から返さない理由、CLI による復旧手段。 |
 | [docs/media.md](docs/media.md) | 画像の取り込み・変換・配信。SSRF 対策、WebP への再エンコード、内容アドレスでの保存、配信時の閲覧範囲の判定。 |
+| [docs/frontend.md](docs/frontend.md) | 画面の構成と幅への対応。ビルドを持たない理由、3 つの層(HTTP / DOM の共通部品 / ページ固有)、幅の 3 層とスマホでのナビ・検索・エディタの組み替え、一覧が引く画像の変種、指の的の寸法。 |

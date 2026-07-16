@@ -598,8 +598,9 @@ function renderEntityPanel(name, rows) {
   const panel = document.querySelector(`[data-panel="${name}"]`);
   const list = rows.length === 0
     ? '<div class="body">まだありません。上のフォームから作成してください。</div>'
-    : `<table class="keys"><thead><tr><th>${escapeHtml(spec.label)}</th><th>設定</th><th></th></tr></thead>` +
-      `<tbody data-list>${rows.map((r) => entityRowHtml(name, r)).join('')}</tbody></table>`;
+    : '<div class="table-scroll">' +
+      `<table class="keys"><thead><tr><th>${escapeHtml(spec.label)}</th><th>設定</th><th></th></tr></thead>` +
+      `<tbody data-list>${rows.map((r) => entityRowHtml(name, r)).join('')}</tbody></table></div>`;
 
   panel.innerHTML =
     `<section class="card"><div class="section-head"><h2>${escapeHtml(spec.label)}を追加</h2></div>` +

@@ -1,17 +1,21 @@
 /*
- * instant-news — デザインサンプル用スタイルシート
+ * instant-news のスタイルシート。全 7 ページ(index / article / tag / publisher / editor / settings / admin)をこの 1 枚が受け持つ。ビルド不要の素の HTML/CSS で構成する。
  *
- * Yahoo!ニュース(news.yahoo.co.jp)のトップページのレイアウト・配色・情報配置を参照し、
- * instant-news のドメイン(Discord 認証・報道社・カテゴリ・タグ・閲覧範囲・
- * Discord リアクション/スレッド・広告)へ置き換えたデザイン検討用のサンプル。
- * ビルド不要の素の HTML/CSS で構成する。
+ * Yahoo!ニュース(news.yahoo.co.jp)のトップページのレイアウト・配色・情報配置を参照し、instant-news のドメイン(Discord 認証・報道社・カテゴリ・タグ・閲覧範囲・Discord リアクション/スレッド・広告)へ置き換えている。
  *
- * グローバルナビの主役はカテゴリ(記事の主分類、単一必須)。機能系の導線(タグ/連載/記事を書く)は
- * 右側に寄せる。タグは数が可変でナビに列挙できないため、トピック別に辿る入口は
- * サイドバーの「人気のタグ」・トップの「トレンドタグ」・記事メタ行のタグが担う。
+ * グローバルナビの主役はカテゴリ(記事の主分類、単一必須)。機能系の導線(タグ/連載/記事を書く)は右側に寄せる。タグは数が可変でナビに列挙できないため、トピック別に辿る入口はサイドバーの「人気のタグ」・トップの「トレンドタグ」・記事メタ行のタグが担う。
  *
- * 配色はライト/ダークの両対応。OS の設定(prefers-color-scheme)に従い、
- * data-theme 属性による手動トグルがそれを上書きする。
+ * 配色はライト/ダークの両対応。OS の設定(prefers-color-scheme)に従い、data-theme 属性による手動トグルがそれを上書きする。
+ *
+ * ■ 幅の 3 層
+ *
+ * デスクトップの規則を土台に、狭い方へ 2 段階で上書きする。
+ *
+ * - 901px 以上 … 本来の 2 段組(メイン + サイドバー 300px)。
+ * - 900px 以下 … サイドバーをメイン列の下へ畳む。タブレットの縦(768〜834px)がここに入る。この層でも検索欄は白帯に残す。
+ * - 600px 以下 … スマホの縦。端末の実幅は iPhone・Android とも 360〜430px に収まり、横向き(640px 以上)はこの層に入らない。白帯を ロゴ + 🔍 🌙 ☰ へ、青帯をカテゴリ専用へ削り、降ろした導線はドロワー(js/chrome.js が組み立てる)が引き取る。
+ *
+ * メディアクエリは末尾へまとめず、上書きする規則の直後に置く。まとめると、デスクトップ側の値を変えた者の目に狭幅側の値が入らず、両者が食い違ったまま気付かれない。実際、年表(.timeline)のレールの位置は、狭幅の桁を足した際に一方だけが動いてドットの中心から外れていた。
  */
 
 :root {
@@ -70,6 +74,12 @@
 
   --content-w: 990px;
   --radius: 4px;
+
+  /*
+   * 指で押す対象の最小寸法。34px は指の腹より小さく、隣の項目を巻き込んで押してしまう。
+   * 操作(ボタン・チップ・ページャ)にだけ効かせ、行全体がリンクになっている箇所(.article-row など)は行の高さで既に足りているため広げない。全てに効かせると密な一覧が間延びし、一画面に入る記事が減る。
+   */
+  --tap: 44px;
 }
 
 /*
@@ -192,10 +202,17 @@ img { max-width: 100%; display: block; }
 .topbar .promo { color: var(--ink); }
 .topbar nav a { color: var(--muted); margin-left: 16px; }
 
+/* 宣伝文はスマホでは畳む。読者が既にサイトに居る以上これは説明であって案内ではなく、狭幅では 2〜3 行を占めて記事を押し下げるだけになる。 */
+@media (max-width: 600px) {
+  .topbar { display: none; }
+}
+
 .masthead { background: var(--surface); }
 .masthead .container {
   display: flex;
   align-items: center;
+  /* 折り返しを許す。禁じると、縮められないロゴ(.logo は white-space: nowrap)が内容幅を使い切った時点でアカウント欄が枠の外へ出る。スマホでは検索欄がこの折り返しで独立した行を取る。 */
+  flex-wrap: wrap;
   gap: 20px;
   padding-top: 14px;
   padding-bottom: 14px;
@@ -205,6 +222,9 @@ img { max-width: 100%; display: block; }
   align-items: baseline;
   gap: 8px;
   white-space: nowrap;
+  /* ロゴは縮まない代わりに、余白の取り合いから降りる。伸びると .actions を右端へ押し出せる。 */
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .logo .mark {
   font-size: 26px;
@@ -216,6 +236,12 @@ img { max-width: 100%; display: block; }
 .logo .tag {
   font-size: 11px;
   color: var(--muted);
+}
+
+/* 副題はスマホでは降ろす。ロゴは白帯の中で唯一縮められない要素であり、副題まで含めた最小幅(約 320px)はスマホの内容幅(360px 端末で 330px)をほぼ使い切ってアカウント欄の居場所を奪う。社名だけなら約 150px で収まる。 */
+@media (max-width: 600px) {
+  .logo .tag { display: none; }
+  .logo .mark { font-size: 21px; }
 }
 
 .search {
@@ -245,17 +271,35 @@ img { max-width: 100%; display: block; }
   cursor: pointer;
 }
 
+/*
+ * スマホでは検索欄を 🔍 の押下まで畳む。ロゴとアカウント欄で白帯が埋まるため常設できない。
+ * 開いた検索欄は flex-basis:100% で折り返し、ロゴの下に自分の行を取る(.masthead .container の flex-wrap がこれを可能にしている)。
+ * 601px 以上では常設のままにする。以前はここも 900px 以下で一律に display:none としていたが、768px 端末はロゴ(約 320px)とアカウント欄(約 78px)を引いてなお 340px が残る。入る幅があるのに畳むと、/?q= の結果を開いた読者が、検索語を見ることも直すこともできないまま「『◯◯』の検索結果」だけを見せられる。
+ */
+@media (max-width: 600px) {
+  .search { display: none; }
+  .search input { font-size: 16px; }
+  [data-search-open] .search {
+    display: flex;
+    flex-basis: 100%;
+    max-width: none;
+    order: 3;
+  }
+}
+
 .masthead .actions {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-left: auto;
+  flex: none;
 }
 .btn-discord {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 34px;
+  /* 高さは min-height で持つ。height で固定すると、押し縮められた際に日本語のラベルが 2 行に割れて枠の外へ溢れる(CJK は語の途中でも改行できるため、英語のラベルより早く割れる)。 */
+  min-height: 34px;
   padding: 0 14px;
   background: var(--discord);
   color: #fff;
@@ -266,6 +310,7 @@ img { max-width: 100%; display: block; }
 .btn-discord:hover { text-decoration: none; background: var(--discord-hover); }
 .icon-btn {
   width: 34px; height: 34px;
+  flex: none;
   display: grid; place-items: center;
   color: var(--muted);
   background: var(--surface);
@@ -277,6 +322,21 @@ img { max-width: 100%; display: block; }
 }
 .icon-btn:hover { text-decoration: none; background: var(--chip-bg); }
 
+/* 検索とドロワーの開閉は js/chrome.js が担い、その導線はスマホでのみ現れる。既定で隠し、狭幅で出す(逆にすると、JavaScript が無効な環境の広い画面に押せない ☰ が残る)。 */
+[data-search-toggle], [data-drawer-toggle] { display: none; }
+
+@media (max-width: 600px) {
+  .masthead .container { gap: 10px; }
+  /* アカウント欄(利用者名・ログアウト・ログイン・設定)はドロワーへ移す。白帯に残すのは 🔍 🌙 ☰ の 3 つだけ。 */
+  .masthead .actions .acct { display: none; }
+  [data-search-toggle], [data-drawer-toggle] {
+    display: grid;
+    width: var(--tap);
+    height: var(--tap);
+  }
+  .masthead .actions .icon-btn { width: var(--tap); height: var(--tap); }
+}
+
 /* グローバルナビ(青帯 1 本)。主役はカテゴリ(記事の主分類)。機能系の導線は右へ寄せる。
    現在地は背景の濃青と下線の二重で示す。 */
 .globalnav { background: var(--nav-bg); }
@@ -285,6 +345,19 @@ img { max-width: 100%; display: block; }
   gap: 2px;
   padding: 0 15px;
   overflow-x: auto;
+  /* カテゴリはデプロイごとに数が異なり、狭幅では必ず溢れる。溢れた分は横スクロールで辿らせるが、スクロールバーそのものは出さない(帯の高さを食い、指で操作する環境では掴めもしない)。続きがあることは端のフェード(下記 .fade-start / .fade-end)で示す。 */
+  scrollbar-width: none;
+}
+.globalnav .container::-webkit-scrollbar { display: none; }
+/*
+ * 端のフェード。js/chrome.js がスクロール位置を見て付け外しする。
+ * 背景の青は .globalnav が持つため、隠すのは .container の中身(リンク)だけであり、帯は途切れない。リンクが青へ溶けて消えることで、その先に続きがあることが分かる。
+ * 幅が足りていてスクロールできないときは、chrome.js がどちらの class も付けない。常時フェードさせると、続きが無いのにあるように見える。
+ */
+.globalnav .container.fade-end { mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+.globalnav .container.fade-start { mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent); }
+.globalnav .container.fade-start.fade-end {
+  mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
 }
 .globalnav a {
   color: #fff;
@@ -307,6 +380,112 @@ img { max-width: 100%; display: block; }
   opacity: 0.9;
 }
 .globalnav a.write { font-weight: 700; }
+
+@media (max-width: 900px) {
+  .globalnav a { padding: 10px 14px; }
+}
+
+/*
+ * スマホでは帯をカテゴリ専用にする。機能系の導線(タグ・連載・記事を書く・管理)はドロワーへ移す。
+ * 帯に混在させたままだと、スクロールの末尾に隠れて事実上辿れないうえ、カテゴリを探して振っている指が別種の導線を踏む。
+ * .spacer も畳む。溢れている帯では flex:1 が 0 になって意味を持たないが、残すとカテゴリの間に 1 つだけ隙間が空いたように見える。
+ */
+@media (max-width: 600px) {
+  .globalnav a.util, .globalnav a.write, .globalnav .spacer { display: none; }
+  .globalnav a { padding: 12px 14px; font-size: 14px; }
+}
+
+/* ============================================================
+   ドロワー(スマホの機能系導線とアカウント欄)
+   ============================================================
+   青帯から降ろした機能系の導線と、白帯から降ろしたアカウント欄の行き先。js/chrome.js が組み立てる。
+   601px 以上では存在ごと消す。閉じているだけにすると、広い画面で Tab を送った利用者が見えない導線へ潜り込む。 */
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 50;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.18s ease, visibility 0.18s ease;
+}
+.drawer-overlay.open { opacity: 1; visibility: visible; }
+
+.drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  z-index: 51;
+  width: min(82vw, 320px);
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+  /* 端末の下端の丸みやホームバーへ最後の項目が潜り込まないようにする。対応しない環境では 0 に解決される。 */
+  padding-bottom: env(safe-area-inset-bottom);
+  transform: translateX(100%);
+  visibility: hidden;
+  transition: transform 0.18s ease, visibility 0.18s ease;
+}
+.drawer.open { transform: none; visibility: visible; }
+
+/* 動きを抑える設定の利用者には滑り込ませない。開閉そのものは残す(動きは装飾だが、開いたかどうかは情報である)。 */
+@media (prefers-reduced-motion: reduce) {
+  .drawer, .drawer-overlay { transition: none; }
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-strong);
+}
+.drawer-head .icon-btn { width: var(--tap); height: var(--tap); }
+
+/* アカウント欄。誰として見ているのかは、ログアウトを押す前に確かめられる必要がある。 */
+.drawer-acct {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.drawer-acct .avatar { width: 36px; height: 36px; font-size: 15px; }
+.drawer-acct .name {
+  font-weight: 700;
+  color: var(--ink-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drawer-acct .btn-discord { width: 100%; justify-content: center; min-height: var(--tap); }
+
+.drawer-nav { display: flex; flex-direction: column; padding: 6px 0; }
+.drawer-nav a, .drawer-nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--tap);
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  background: none;
+  border: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.drawer-nav a:hover, .drawer-nav button:hover { text-decoration: none; background: var(--chip-bg); }
+.drawer-nav .sep { border-top: 1px solid var(--line); margin: 6px 0; }
+.drawer-nav .logout { color: var(--breaking); font-weight: 400; }
+
+@media (min-width: 601px) {
+  .drawer, .drawer-overlay { display: none; }
+}
 
 /* ============================================================
    広告枠
@@ -357,6 +536,17 @@ img { max-width: 100%; display: block; }
   padding: 20px 0 48px;
   align-items: start;
 }
+/*
+ * 段の最小幅を 0 にする。grid の項目は既定で min-width: auto を持ち、これは「中身の min-content より狭くならない」を意味する。
+ * 縮められない中身(API キーの一覧の 1 語のスコープ、19 桁のロール ID、本文中の表)が段にあると、段はその幅まで広がり、外側の .container の max-width: 100% を突き抜けてページ全体を横に流す。内側の枠(.table-scroll)へ overflow-x を与えても、枠自身が広がってしまうため何も起きない。
+ * つまりこれは、この設計で横スクロールを段の内側に閉じ込めるための前提であって、細かな調整ではない。
+ */
+.layout > .main, .layout > .side { min-width: 0; }
+
+/* サイドバーを畳んでメイン列の下へ送る。ここから下はサイドバーの 300px が無くなり、メイン列が内容幅の全てを使う。 */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+}
 
 .card {
   background: var(--surface);
@@ -365,6 +555,23 @@ img { max-width: 100%; display: block; }
   margin-bottom: 20px;
 }
 .card > .body { padding: 8px 16px 16px; }
+
+/*
+ * スマホではカードを画面いっぱいに広げ、左右の罫線と角丸を落とす。
+ * .container の 15px と .card の 1px を差し引くと内容は 328px しか残らない。カードの内と外を隔てる 1px のために内容を削るより、面が画面の端に着いている方が読める。上下の罫線は残す(カードの切れ目は依然として情報である)。
+ */
+@media (max-width: 600px) {
+  .container { padding: 0 12px; }
+  /* 左右の余白をここでも書く。.layout は .container と同じ要素に付いており(main class="container layout")、padding を丸ごと上書きするため、.container 側の指定は届かない。省くと余白が 0 になり、下のカードの負のマージンが相殺する相手を失って画面の外へ 12px はみ出す。 */
+  .layout { padding: 12px 12px 32px; gap: 16px; }
+  .layout > .main > .card, .layout > .side > .card {
+    margin-left: -12px;
+    margin-right: -12px;
+    border-left: none;
+    border-right: none;
+    border-radius: 0;
+  }
+}
 
 .section-head {
   display: flex;
@@ -379,6 +586,15 @@ img { max-width: 100%; display: block; }
   color: var(--ink-strong);
 }
 .section-head .more { font-size: 13px; }
+/* 「もっと読む」等は 13px の裸のリンクで、指の的として小さすぎる。押せる高さを与える。 */
+@media (max-width: 600px) {
+  .section-head .more {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--tap);
+    padding-left: 8px;
+  }
+}
 
 /* ============================================================
    速報帯
@@ -414,10 +630,30 @@ img { max-width: 100%; display: block; }
 .breaking-band .headline:hover { color: var(--link); }
 .breaking-band time { margin-left: auto; font-size: 12px; color: var(--muted); flex: none; }
 
+@media (max-width: 900px) {
+  .breaking-band { flex-wrap: wrap; }
+  .breaking-band time { margin-left: 0; }
+}
+@media (max-width: 600px) {
+  .breaking-band {
+    margin-left: -12px;
+    margin-right: -12px;
+    border-left-width: 5px;
+    border-radius: 0;
+    padding: 10px 12px;
+    gap: 8px 10px;
+  }
+  /* 見出しは幅によって 1 行にも 2 行にもなる。2 行なら高さは足りるが、1 行に収まると 21px しかない。折り返しの有無で的の大きさが変わらないよう、余白で底上げする。 */
+  .breaking-band .headline { font-size: 15px; padding: 4px 0; }
+}
+
 /* ============================================================
    トピックス(見出しリスト + 注目記事)
    ============================================================ */
 .topics { display: grid; grid-template-columns: 1fr 300px; gap: 20px; }
+@media (max-width: 900px) {
+  .topics { grid-template-columns: 1fr; }
+}
 .topics .headlines { list-style: none; margin: 0; padding: 0; }
 .topics .headlines li {
   border-bottom: 1px dotted var(--line-strong);
@@ -451,6 +687,10 @@ img { max-width: 100%; display: block; }
   padding-top: 12px;
   border-top: 1px solid var(--line);
   font-size: 14px;
+}
+@media (max-width: 600px) {
+  .topics .headlines a { min-height: var(--tap); }
+  .topics-footer a { display: inline-flex; align-items: center; min-height: var(--tap); }
 }
 
 /* ============================================================
@@ -535,6 +775,16 @@ img { max-width: 100%; display: block; }
 .trend .kw { color: var(--link); font-size: 15px; font-weight: 700; }
 .trend .count { color: var(--muted); font-size: 11px; margin-left: auto; }
 
+/* 3 列は 300px 幅では 1 語も入らない。サイドバーが畳まれる時点で 1 列へ落とす。 */
+@media (max-width: 900px) {
+  .trend ol { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .trend li { padding: 0; }
+  /* 行そのものをリンクにする。従来は .kw(15px の文字列)だけが押せ、行の余白を叩いても何も起こらなかった。 */
+  .trend .kw { flex: 1; display: flex; align-items: center; min-height: var(--tap); }
+}
+
 /* ============================================================
    記事リスト(サムネ + 見出し + メタ)
    ============================================================ */
@@ -582,6 +832,24 @@ img { max-width: 100%; display: block; }
   flex: none;
 }
 .meta .thread::before { content: "💬 "; }
+
+/*
+ * スマホでの一覧の行。サムネを 96px へ落とし(縦横比 128:82 は保つ)、見出しへ回す幅を約 178px から約 210px へ広げる。
+ * 併せてタグのチップを降ろす。メタ行には 報道社・カテゴリ・タグ 3 つ・記者・コメント数・点数・閲覧範囲・日時が並び、狭幅では見出しより背が高くなる。
+ * 降ろす対象にタグを選んだのは、タグが他の入口(記事ページのタグ行・タグの一覧・トレンド)から辿れるのに対し、報道社と閲覧範囲はここにしか出ないため。開示(.badge.sponsored)と速報は残す。広告が見出しと見分けられない状態は、記事の信頼性を直接損なう。
+ */
+@media (max-width: 600px) {
+  .article-row {
+    grid-template-columns: 96px 1fr;
+    gap: 10px;
+    padding: 12px 0;
+  }
+  .article-row .thumb { height: 62px; }
+  .article-row .title { font-size: 15px; margin-bottom: 6px; }
+  .article-row .meta { gap: 4px 8px; }
+  .article-row .meta .tag-chip { display: none; }
+}
+
 .cat-chip {
   color: var(--nav-bg);
   border: 1px solid var(--nav-bg);
@@ -628,6 +896,16 @@ img { max-width: 100%; display: block; }
 :root[data-theme="dark"] .tagcloud a { color: var(--link); }
 .tagcloud a:hover { text-decoration: none; background: var(--chip-bg-hover); }
 .tagcloud a b { color: var(--muted); font-weight: 400; margin-left: 3px; }
+
+/*
+ * チップは 44px まで上げない。タグ雲は 1 つの面に数十個が並ぶため、全てを 44px にすると雲だけで画面が埋まり、探している当のタグが視界から消える。
+ * 押し間違いは的の大きさだけでなく的の間隔でも決まるため、高さは 36px に留めて隙間を広げる。これは WCAG 2.2 の下限(24px)を余裕をもって超える。
+ * 単独で立つ操作(ボタン・ページャ・ドロワーの項目)は --tap を使い、間隔で補えないぶんを大きさで賄う。
+ */
+@media (max-width: 600px) {
+  .tagcloud { gap: 10px; padding: 14px 16px 18px; }
+  .tagcloud a { min-height: 36px; padding: 7px 12px; font-size: 13px; }
+}
 .tag-icon {
   width: 14px; height: 10px;
   border-radius: 1px;
@@ -664,6 +942,17 @@ img { max-width: 100%; display: block; }
 .ranking .r-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .ranking .r-thumb { width: 52px; height: 52px; border-radius: var(--radius); }
 
+/*
+ * 順位・連載の一覧の見出しを指で押せる高さにする。
+ * 押されるのは <a> であって行ではないため、行(li)の余白を広げても的は大きくならない。余白を叩いた指はどこへも行かず、「押したのに反応しない」だけが起きる。見出しそのものを block にして上下の余白を持たせる。
+ * 文字を大きくしないのは、13px は読めており、大きくすると順位の一覧が縦に伸びて一画面に入る件数が減るため。ここで欲しいのは可読性ではなく的である。
+ */
+@media (max-width: 600px) {
+  .ranking li, .series li { padding: 10px 16px; }
+  .pub-ranking li { padding: 9px 16px; }
+  .ranking .r-title, .pub-ranking .p-name, .s-title { display: block; padding: 5px 0; }
+}
+
 /* 報道社ランキング。
    投票もコメントも Discord へ委譲しているため、その写しの集計で出せる。
    社どうしの競争そのものがエンゲージメント源になる。 */
@@ -696,9 +985,13 @@ img { max-width: 100%; display: block; }
 }
 .series li:last-child { border-bottom: none; }
 .series .cover { width: 64px; height: 44px; border-radius: var(--radius); }
-.series .s-title { font-size: 13px; color: var(--ink); font-weight: 700; line-height: 1.4; }
-.series .s-title:hover { color: var(--link); }
-.series .s-count { font-size: 11px; color: var(--muted); margin-top: 2px; }
+/*
+ * 見出しと、その下に添える小さな数え・日時。
+ * .series の中だけに閉じ込めてはならない。この 2 つは連載の一覧のほかに、設定の API キーの一覧・タグ購読、記事ページのサイドバーの報道社と執筆者、管理画面の分類の一覧でも同じ意味で使われており、閉じ込めていた間それらは指定の届かないまま親の 14px で描かれていた。使う側が増えるたびに書き足すのではなく、名前の意味どおりどこでも効かせる。
+ */
+.s-title { font-size: 13px; color: var(--ink); font-weight: 700; line-height: 1.4; }
+.s-title:hover { color: var(--link); }
+.s-count { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
 /* ============================================================
    記事詳細(article.html)
@@ -717,6 +1010,13 @@ img { max-width: 100%; display: block; }
   line-height: 1.4;
   color: var(--ink-strong);
   margin: 6px 0 12px;
+}
+
+/* 左右 28px は 360px 端末で本文に 272px しか残さない。padding を 16px へ詰めて本文へ 24px 返す。見出しも 26px では 3〜4 行に割れるため落とす。 */
+@media (max-width: 600px) {
+  .article { padding: 16px 16px 24px; }
+  .article h1 { font-size: 21px; margin: 4px 0 10px; }
+  .lede { font-size: 14px; }
 }
 /* リード文(excerpt)。見出しとメタ情報の間に置く。 */
 .lede {
@@ -742,7 +1042,14 @@ img { max-width: 100%; display: block; }
 .pub-head .label { font-size: 11px; color: var(--muted); }
 .pub-head .name { font-size: 16px; font-weight: 800; color: var(--ink-strong); line-height: 1.3; }
 .pub-head .name:hover { color: var(--link); }
-.pub-head .follow { margin-left: auto; }
+/* flex: none がないと、この帯が縮められた際にボタンだけが潰れて「この社の記事」が 2 行に割れ、枠から溢れる。縮ませずに折り返させる(下記 flex-wrap)。 */
+.pub-head .follow { margin-left: auto; flex: none; }
+
+/* ロゴ + 社名 + ボタンの最小幅は約 286px で、360px 端末の本文幅(約 296px)にかろうじて収まるが、社名が長い社では溢れる。折り返しを許し、溢れる場合はボタンが次の行へ落ちる。 */
+@media (max-width: 600px) {
+  .pub-head { flex-wrap: wrap; gap: 10px; }
+  .pub-head .follow { margin-left: 0; width: 100%; justify-content: center; }
+}
 
 .byline {
   display: flex;
@@ -856,6 +1163,23 @@ img { max-width: 100%; display: block; }
 .prose th, .prose td { border: 1px solid var(--line-strong); padding: 8px 12px; text-align: left; }
 .prose th { background: var(--th-bg); }
 
+/*
+ * 本文の表だけは桁数をこちらで決められない。執筆者が 4 列の表を書けば、狭幅では何をしても入らない。
+ * 表を block にして表自身を横スクロールさせ、ページ全体が横に流れるのを防ぐ。コードブロック(.prose pre)は既に overflow-x: auto を持っており、表だけがこの穴だった。
+ * ラッパ要素は使えない。本文の HTML は markdown.py が nh3 で許可要素だけへ削り込んでおり(div も class 属性も許可一覧に無い)、表を包むために許可を広げると、見た目のために注入の面を広げることになる。
+ * デスクトップは対象にしない。display: block にすると表が内容幅へ縮み、桁の少ない表が段の幅いっぱいに広がらなくなる。サイドバーを畳んだ時点から先だけで足りる。
+ */
+@media (max-width: 900px) {
+  .prose table { display: block; overflow-x: auto; }
+}
+@media (max-width: 600px) {
+  .prose { font-size: 15px; line-height: 1.8; }
+  .prose img.figure { height: auto; aspect-ratio: 16 / 9; }
+  .prose pre { padding: 12px; }
+  .prose h2 { font-size: 18px; }
+  .prose h3 { font-size: 16px; }
+}
+
 .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0; }
 .tags a {
   display: inline-flex;
@@ -869,6 +1193,12 @@ img { max-width: 100%; display: block; }
 }
 :root[data-theme="dark"] .tags a { color: var(--link); }
 .tags a:hover { text-decoration: none; background: var(--chip-bg-hover); }
+
+/* 記事末尾のタグは、そのタグの記事へ辿る主な入口(一覧のメタ行からはスマホでは降ろしている)。タグ雲と同じ 36px を与える。 */
+@media (max-width: 600px) {
+  .tags { gap: 10px; }
+  .tags a { min-height: 36px; padding: 7px 14px; }
+}
 
 /* Discord 反応・スレッド */
 .discord-box {
@@ -894,10 +1224,17 @@ img { max-width: 100%; display: block; }
   align-items: center;
   background: var(--surface);
 }
-.discord-box .stat { text-align: center; }
+.discord-box .stat { text-align: center; flex: none; }
 .discord-box .stat b { display: block; font-size: 22px; color: var(--ink-strong); }
 .discord-box .stat span { font-size: 11px; color: var(--muted); }
-.discord-box .cta { margin-left: auto; }
+.discord-box .cta { margin-left: auto; flex: none; }
+
+/* 賛否・コメント数の 2 組とスレッドへの導線で最小約 352px。360px 端末の本文幅(約 264px)には入らないため折り返す。導線は幅いっぱいに置いて、数字の並びと見分ける。 */
+@media (max-width: 600px) {
+  .discord-box .stats { flex-wrap: wrap; gap: 16px 24px; }
+  .discord-box .cta { margin-left: 0; width: 100%; }
+  .discord-box .cta .btn-discord { width: 100%; justify-content: center; min-height: var(--tap); }
+}
 /* 複数チャンネルへ通知された記事は、通知ごとに独立したスレッドとリアクションを持つ。
    記事としての反応数はその合計。 */
 .discord-box .channels {
@@ -965,6 +1302,15 @@ img { max-width: 100%; display: block; }
 }
 .revision a { color: var(--link); }
 
+/* コメントの続きを読む導線、改版の差分へ辿る導線、パンくず。いずれも小さな文字の裸のリンクで、押せることが分かる大きさが要る。パンくずは文章の中のリンクではなく階層を辿る操作であるため、行の中に埋めたままにしない。 */
+@media (max-width: 600px) {
+  #comment-more button { min-height: var(--tap); padding: 8px 18px; }
+  .revision a { display: inline-flex; align-items: center; min-height: 32px; }
+  .breadcrumb { padding: 4px 0 10px; }
+  .breadcrumb a { display: inline-block; padding: 4px 0; }
+  .pub-head .name { display: inline-block; padding: 3px 0; }
+}
+
 /* ============================================================
    報道社ページ(publisher.html)
    ============================================================ */
@@ -999,6 +1345,21 @@ img { max-width: 100%; display: block; }
 .pub-stats b { display: block; font-size: 20px; color: var(--ink-strong); }
 .pub-stats span { font-size: 11px; color: var(--muted); }
 
+/* 4 列は 300px 幅では数字が桁で折れる。2 × 2 へ組み替え、1 段目の右端の縦罫を落とす(2 列になると 2 番目が右端になるため)。 */
+@media (max-width: 900px) {
+  .pub-stats { grid-template-columns: repeat(2, 1fr); }
+  .pub-stats div:nth-child(2) { border-right: none; }
+  /* 2 × 2 では 1 段目と 2 段目の間に境目が要る。4 列のときは 1 段しかないため引いていなかった。 */
+  .pub-stats div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+}
+
+/* ロゴ 72px と 18px の間隔を引くと、社名・説明・ロール注記へ 182px しか残らない。ロゴを 56px へ落として横に並べたまま保つ。縦に積むと、社の一覧から来た読者がどの社を見ているのか一目で掴めなくなる。 */
+@media (max-width: 600px) {
+  .pub-hero { padding: 16px; gap: 12px; align-items: flex-start; }
+  .pub-hero .pub-logo { width: 56px; height: 56px; font-size: 20px; }
+  .pub-hero h1 { font-size: 19px; }
+}
+
 .member-list { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 16px 16px; }
 .member-list .m {
   display: inline-flex;
@@ -1030,20 +1391,53 @@ img { max-width: 100%; display: block; }
 .tag-hero .desc { font-size: 13px; color: var(--muted); margin: 0; }
 .tag-hero .subscribe { margin-left: auto; flex: none; }
 
+/*
+ * 購読の導線は flex: none で縮まないため、旗 72px と合わせた最小幅(約 302px)が本文幅(約 272px)を必ず超える。
+ * 縮ませて解決してはならない。「🔔 新着を DM で受け取る」が 2 行に割れてボタンから溢れるだけで、収まりはしない。折り返して自分の行を取らせる。
+ */
+@media (max-width: 600px) {
+  .tag-hero { flex-wrap: wrap; padding: 16px; gap: 12px; }
+  .tag-hero .flag { width: 56px; height: 38px; }
+  .tag-hero h1 { font-size: 19px; }
+  .tag-hero .subscribe {
+    margin-left: 0;
+    width: 100%;
+    justify-content: center;
+    min-height: var(--tap);
+  }
+}
+
 /* タグの年表。タグで絞った記事を時系列に並べる。Marv では国史になる。
    VOLTNEWS は時系列で辿る手段を持たない。 */
-.timeline { list-style: none; margin: 0; padding: 16px 16px 20px 16px; position: relative; }
+.timeline {
+  list-style: none;
+  margin: 0;
+  position: relative;
+
+  /*
+   * 桁の取り分を 1 箇所で決める。レールの位置は日付の桁・間隔・ドットの桁から導かれるため、幅を変えるときに触るのはこの 3 つだけで済む。
+   * 以前はレールの left と桁の指定が別々の数値で書かれており、狭幅の指定(日付 68px → 52px)を足した際に一方だけが動いて、レールがドットの中心から外れていた。導出できる値を writing down しない。
+   */
+  --tl-pad: 16px;
+  --tl-date-w: 68px;
+  --tl-gap: 8px;
+  --tl-dot-w: 24px;
+
+  padding: var(--tl-pad) var(--tl-pad) 20px;
+}
 .timeline::before {
   content: "";
   position: absolute;
-  left: 84px; top: 16px; bottom: 20px;
+  /* ドット列の中心。ドットは周囲を面の色で縁取ってあり(.t-dot::before の border)、レールがその真下を通ることで、輪の内側でレールが途切れて見える。 */
+  left: calc(var(--tl-pad) + var(--tl-date-w) + var(--tl-gap) + var(--tl-dot-w) / 2 - 1px);
+  top: var(--tl-pad); bottom: 20px;
   width: 2px;
   background: var(--line-strong);
 }
 .timeline li {
   display: grid;
-  grid-template-columns: 68px 24px 1fr;
-  gap: 0 8px;
+  grid-template-columns: var(--tl-date-w) var(--tl-dot-w) 1fr;
+  gap: 0 var(--tl-gap);
   align-items: baseline;
   padding: 8px 0;
 }
@@ -1062,6 +1456,21 @@ img { max-width: 100%; display: block; }
 .timeline li.major .t-dot::before { background: var(--breaking); width: 12px; height: 12px; }
 .timeline .t-title { font-size: 14px; color: var(--link); line-height: 1.45; }
 .timeline .t-meta { font-size: 11px; color: var(--muted); }
+
+/*
+ * 日付の桁は「12月31日」が 11px で約 66px を要する。52px まで詰めると固定の桁の中で折り返し、年をまたぐ行は 3 行になる。
+ * 年表は日付の並びそのものが読み物であるため、日付を折らずに済む最小の桁(60px)を確保し、詰める分は間隔とドットの桁から取る。
+ */
+@media (max-width: 600px) {
+  .timeline {
+    --tl-pad: 12px;
+    --tl-date-w: 60px;
+    --tl-gap: 6px;
+    --tl-dot-w: 18px;
+  }
+  /* 見出しを block にして上下の余白を持たせる。min-height ではインラインの要素に効かず、1 行の見出しは 21px のままになる。 */
+  .timeline .t-title { display: block; padding: 4px 0; }
+}
 
 /* ============================================================
    フォーム(エディタ・設定)
@@ -1098,12 +1507,28 @@ textarea.md {
   font-size: 13px;
 }
 
+/*
+ * 入力欄の文字を 16px へ上げる。iOS の Safari は 16px 未満の入力欄へ焦点が移った瞬間にページを拡大し、拡大は戻らない。
+ * 拡大された状態では横スクロールが生まれ、以降どの画面も横に流れる。狭幅で「なぜか画面がずれる」と感じられる原因の多くはこれであり、レイアウトの問題ではない。
+ * 本文の入力(textarea.md)も同じ理由で上げる。等幅で 13px は、そもそも指で書くには小さい。
+ */
+@media (max-width: 600px) {
+  input[type="text"], input[type="datetime-local"], select, textarea { font-size: 16px; }
+  textarea.md { font-size: 14px; min-height: 240px; }
+  .form-row { padding: 12px; }
+  .form-row .cols { gap: 10px; }
+  /* min-width: 160px は 296px の中で 2 つ並べられず、いずれにせよ 1 つずつ積まれる。積むことを明示して、中途半端な隙間を作らない。 */
+  .form-row .cols > * { flex-basis: 100%; min-width: 0; }
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  height: 34px;
-  padding: 0 16px;
+  /* 高さは min-height で持つ。height で固定すると、押し縮められた際に日本語のラベルが枠の中で 2 行に割れ、下半分が枠の外へ出る。 */
+  min-height: 34px;
+  padding: 4px 16px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface);
@@ -1118,6 +1543,10 @@ textarea.md {
 .btn.primary:hover { background: var(--nav-bg-hover); }
 .btn.danger { color: var(--breaking); border-color: var(--breaking); }
 .btn.danger:hover { background: var(--warn-bg); }
+
+@media (max-width: 600px) {
+  .btn { min-height: var(--tap); }
+}
 
 .radio-set { display: flex; flex-direction: column; gap: 8px; }
 .radio-set label {
@@ -1139,6 +1568,30 @@ textarea.md {
   border-radius: 0 0 var(--radius) var(--radius);
 }
 .form-actions .spacer { flex: 1; }
+
+/* ============================================================
+   エディタの並び(狭幅)
+   ============================================================
+   デスクトップは 本文 | 公開設定 の 2 段組であり、設定は本文の右にあって常に見えている。狭幅で段組を畳むと、この右列がまるごと本文の下へ落ちる。本文の入力欄は最低でも 240px あり、その下に 5 枚のカードが続くため、カテゴリ(必須)にも「公開」にも、書き終えて長く送った先でしか出会わない。
+
+   そこで 見出し → 公開設定 → 本文 → 公開 の順へ組み替える。書く前に必須項目が目に入り、書き終えた先に公開がある。
+   .main と .side を display: contents にしてカードを直接の項目へ引き上げ、order で並べる。2 段組を保ったまま順序だけを変える方法は他に無い(order は同じ親の中でしか効かず、カードは .main と .side に分かれている)。
+   order は 10 刻みにする。カードを 1 枚挟むたびに全ての番号を振り直さずに済む。 */
+@media (max-width: 600px) {
+  .editor-layout { display: flex; flex-direction: column; }
+  .editor-layout > .main, .editor-layout > .side { display: contents; }
+  .editor-layout .ed-head { order: 10; }
+  .editor-layout .ed-publishing { order: 20; }
+  .editor-layout .ed-visibility { order: 30; }
+  .editor-layout .ed-cover { order: 40; }
+  .editor-layout .ed-promo { order: 50; }
+  .editor-layout .ed-body { order: 60; }
+  .editor-layout .ed-publish { order: 70; }
+  /* 公開の操作は横一列に収まらない(「下書き保存」「レビューへ」「公開」で最小約 282px)。押し縮めるとラベルが割れるため、折り返して 3 つとも幅を持たせる。 */
+  .editor-layout .form-actions { flex-wrap: wrap; }
+  .editor-layout .form-actions .btn { flex: 1 1 auto; }
+  .editor-layout .form-actions .spacer { display: none; }
+}
 
 /* 画像の取り込み・アップロード */
 .dropzone {
@@ -1173,6 +1626,14 @@ textarea.md {
   color: var(--muted);
 }
 
+/*
+ * 桁の多い表を収める枠。
+ * API キーの一覧は 5 桁(名前・キー・スコープ・最終使用・操作)、管理画面の分類の一覧は 3 桁で、いずれも桁を削れない。
+ * スコープ(`articles:write:any`)も Discord のロール ID(19 桁の数字)も途中で折れない 1 語であり、狭幅でも縮まない。枠を与えずに置くと、表の最小幅がそのままページの幅になり、記事も設定も含めた画面全体が横に流れる。
+ * 枠に閉じ込めれば、横へ振れるのは表だけで済む。
+ */
+.table-scroll { overflow-x: auto; }
+
 /* API キーの一覧 */
 .keys { width: 100%; border-collapse: collapse; font-size: 13px; }
 .keys th, .keys td {
@@ -1181,6 +1642,15 @@ textarea.md {
   text-align: left;
 }
 .keys th { font-size: 11px; color: var(--muted); font-weight: 700; }
+
+/*
+ * 枠の中では、表は内容の幅を取る(width: 100% のままだと枠の幅へ縮もうとして、縮めない桁を潰し合う)。
+ * 併せて余白を詰める。5 桁 × 左右 16px は余白だけで 160px を占め、その全てが横スクロールの距離になる。
+ */
+@media (max-width: 900px) {
+  .table-scroll .keys { width: max-content; min-width: 100%; }
+  .table-scroll .keys th, .table-scroll .keys td { padding: 10px 12px; }
+}
 .keys .prefix {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   color: var(--muted);
@@ -1243,6 +1713,10 @@ textarea.md {
 .tabs a:hover { text-decoration: none; color: var(--ink); }
 .tabs a.active { color: var(--nav-bg-active); border-bottom-color: var(--nav-bg-active); }
 
+@media (max-width: 600px) {
+  .tabs a { display: inline-flex; align-items: center; min-height: var(--tap); padding: 0 12px; }
+}
+
 /* 変更された設定の入力欄。保存の対象であることを、保存を押す前に示す。 */
 .field-changed { border-color: var(--nav-bg) !important; background: var(--accent-bg); }
 .form-row.changed > label.lbl::after {
@@ -1298,6 +1772,15 @@ textarea.md {
 .rolepick-empty { font-size: 12px; color: var(--muted); }
 .rolepick-raw { margin-top: 8px; }
 
+/*
+ * ロールの選択は既に内側で縦スクロールする枠であり(max-height: 220px)、狭幅ではページのスクロールと二重になって、指がどちらを動かしているのか分からなくなる。
+ * 高さの制限を緩め、選択肢そのものは指で押せる大きさにする。ロールは数十個並ぶため 1 列に積む(横に流すと、名前の長いロールが読めない)。
+ */
+@media (max-width: 600px) {
+  .rolepick { max-height: 320px; flex-direction: column; flex-wrap: nowrap; gap: 0; }
+  .rolepick label { min-height: var(--tap); padding: 4px; }
+}
+
 /* 分類の一覧の行を開いた編集域。既存の .form-row を縦に積む。 */
 .tax-edit {
   background: var(--surface-2);
@@ -1328,6 +1811,18 @@ textarea.md {
 .site-footer nav a { color: var(--ink); }
 .site-footer .copy { font-size: 12px; color: var(--muted); }
 
+/* 13px の裸のリンクが 7 つ、隙間 8px で並ぶ。指では狙えないため、行を分けて的を作る。 */
+@media (max-width: 600px) {
+  .site-footer nav { gap: 0; flex-direction: column; margin-bottom: 10px; }
+  .site-footer nav a {
+    display: flex;
+    align-items: center;
+    min-height: var(--tap);
+    border-bottom: 1px solid var(--line);
+  }
+  .site-footer .container { padding-top: 12px; padding-bottom: 24px; }
+}
+
 /* サムネイル・アバターのプレースホルダー(画像未接続でも配置を確認できるように) */
 .thumb, .cover, .r-thumb, .figure, .flag { background: var(--ph-bg); }
 .ph { background-size: cover; background-position: center; }
@@ -1355,18 +1850,13 @@ textarea.md {
 .f-yar { background: linear-gradient(135deg, #f59e0b, #7c3aed); }
 
 /* ============================================================
-   レスポンシブ(狭幅ではサイドバーを畳む)
-   ============================================================ */
-@media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
-  .topics { grid-template-columns: 1fr; }
-  .trend ol { grid-template-columns: 1fr; }
-  .search { display: none; }
-  .globalnav a { padding: 10px 14px; }
-  .pub-stats { grid-template-columns: repeat(2, 1fr); }
-  .pub-stats div:nth-child(2) { border-right: none; }
-  .breaking-band { flex-wrap: wrap; }
-  .breaking-band time { margin-left: 0; }
-  .timeline::before { left: 68px; }
-  .timeline li { grid-template-columns: 52px 24px 1fr; }
+   広告枠の寸法(狭幅)
+   ============================================================
+   推奨寸法(ad_slots の recommended_width / recommended_height)はデスクトップの枠を前提にした値であり、狭幅ではそのまま使えない。
+   サイドバーの枠は畳まれた後に横 300px から内容幅いっぱいへ広がるため、250px の高さのままでは間延びする。 */
+@media (max-width: 600px) {
+  .adslot.header { margin-top: 12px; }
+  .adslot.header .creative { height: 60px; }
+  .adslot.article-inline { margin: 20px 0; }
+  .adslot.sidebar .creative { height: 200px; }
 }

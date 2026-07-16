@@ -33,7 +33,7 @@
     </form>
     <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
-      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
     </div>
   </div>
 </header>
@@ -43,7 +43,6 @@
   <div class="container" data-globalnav>
     <a href="/">トップ</a>
     <span class="spacer"></span>
-    <a href="/editor" class="write">✍ 記事を書く</a>
   </div>
 </nav>
 
@@ -72,7 +71,7 @@
 </footer>
 
 <script type="module">
-import { ApiError, get, escapeHtml, formatDateTime, articleUrl, qs, renderAdSlot } from '/static/js/api.js';
+import { ApiError, get, escapeHtml, formatDateTime, articleUrl, qs, renderAdSlot, mediaVariant } from '/static/js/api.js';
 import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, cssUrlRaw, errorMessage } from '/static/js/chrome.js';
 
 /* ============================================================
@@ -321,7 +320,7 @@ async function renderSide(a) {
     try {
       const series = await get(`/api/series/${encodeURIComponent(a.series.slug)}`);
       const cover = document.getElementById('series-cover');
-      if (cover && series && series.cover_image_url) cover.style.backgroundImage = cssUrlRaw(series.cover_image_url);
+      if (cover && series && series.cover_image_url) cover.style.backgroundImage = cssUrlRaw(mediaVariant(series.cover_image_url, '400w'));
     } catch (e) {
       // カバーが引けなくても、バナーは灰色の枠のまま成立する。
     }

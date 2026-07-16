@@ -27,7 +27,7 @@
     </form>
     <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
-      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
     </div>
   </div>
 </header>
@@ -36,7 +36,6 @@
   <div class="container" data-globalnav>
     <a href="/">トップ</a>
     <span class="spacer"></span>
-    <a class="write" href="/editor">✍ 記事を書く</a>
   </div>
 </nav>
 
@@ -104,7 +103,7 @@
 </footer>
 
 <script type="module">
-import { get, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError } from '/static/js/api.js';
+import { get, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError, mediaVariant } from '/static/js/api.js';
 import { mountChrome, cssUrl, listOf, displayName, avatarHtml, pubLogoHtml } from '/static/js/chrome.js';
 
 /* このページの経路は /publishers/{slug} で固定されているため、対象の報道社は URL から取り出す。 */
@@ -162,7 +161,7 @@ function articleRowHtml(a) {
   if (a.published_at) meta.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))}</time>`);
 
   const thumb = a.cover_image_url
-    ? `<div class="thumb ph" style="background-image:${cssUrl(a.cover_image_url)}"></div>`
+    ? `<div class="thumb ph" style="background-image:${cssUrl(mediaVariant(a.cover_image_url, '400w'))}"></div>`
     : '<div class="thumb"></div>';
 
   return `<li><a class="article-row" href="${escapeHtml(articleUrl(a.slug))}">${thumb}<div>` +

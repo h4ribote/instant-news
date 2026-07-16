@@ -32,7 +32,7 @@
     <!-- アカウント欄(ログイン導線、またはログイン済みの利用者名とログアウト)は js/chrome.js がこの先頭へ差し込む。 -->
     <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
-      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
     </div>
   </div>
 </header>
@@ -40,16 +40,13 @@
 <!--
   グローバルナビ。主役はカテゴリ(記事の主分類、単一必須)で、js/chrome.js が GET /api/categories から position 順に spacer の手前へ足す。
   カテゴリ集合はデプロイごとに異なるため、この HTML には 1 つも書かない。
-  機能系の導線は spacer の右へ寄せて、別種であることを示す。
+  機能系の導線(タグ・連載・管理・記事を書く)も chrome.js が spacer の右へ足す。ページごとに書くと食い違うためであり、実際そうなっていた(この帯だけが タグ・連載 を持ち、他の 6 ページは持っていなかった)。スマホではこれらがドロワーへ移る。
   トップは既定で現在地とし、欄のページ(/categories/{slug})では chrome.js がこの印を降ろして当の欄へ移す。
 -->
 <nav class="globalnav">
   <div class="container" data-globalnav>
     <a href="/" class="active">トップ</a>
     <span class="spacer"></span>
-    <a href="#tags" class="util">タグ</a>
-    <a href="#series" class="util">連載</a>
-    <a href="/editor" class="write">✍ 記事を書く</a>
   </div>
 </nav>
 
@@ -185,7 +182,7 @@
 </footer>
 
 <script type="module">
-import { get, qs, escapeHtml, formatDateTime, articleUrl, renderAdSlot } from '/static/js/api.js';
+import { get, qs, escapeHtml, formatDateTime, articleUrl, renderAdSlot, mediaVariant } from '/static/js/api.js';
 import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, cssUrlRaw } from '/static/js/chrome.js';
 
 /* 1 度に取得する記事の件数。記事一覧に加えて、速報帯・トピックス・サイドバーの 2 つのランキングも同じ取得結果から組み立てる。 */
@@ -251,9 +248,13 @@ function showNotice(el, text, kind) {
   el.hidden = false;
 }
 
-/** サムネイル。カバー画像を持たない記事は灰色の枠のままにする(別の画像で埋めない)。 */
+/**
+ * サムネイル。カバー画像を持たない記事は灰色の枠のままにする(別の画像で埋めない)。
+ * この関数が通す 3 つの枠(一覧の 128px・注目記事の 168px・ランキングの 52px)はいずれも 400px 以下であるため、原寸ではなく 400w を引く。カバーは記事面の主役として撮られた原寸の画像であり、一覧のために原寸を落とさせると、読者は見えている絵の数倍のバイト列を毎回受け取ることになる。
+ */
 function thumbHtml(article, cls) {
-  if (article.cover_image_url) return `<div class="${cls} ph" data-bg="${escapeHtml(article.cover_image_url)}"></div>`;
+  const url = mediaVariant(article.cover_image_url, '400w');
+  if (url) return `<div class="${cls} ph" data-bg="${escapeHtml(url)}"></div>`;
   return `<div class="${cls}"></div>`;
 }
 
@@ -594,7 +595,8 @@ async function mountSeries() {
     return;
   }
   setHtml(el, `<ul class="series">${series.slice(0, 5).map((s) => {
-    const cover = s.cover_image_url ? `<div class="cover ph" data-bg="${escapeHtml(s.cover_image_url)}"></div>` : '<div class="cover"></div>';
+    const coverUrl = mediaVariant(s.cover_image_url, '400w');
+    const cover = coverUrl ? `<div class="cover ph" data-bg="${escapeHtml(coverUrl)}"></div>` : '<div class="cover"></div>';
     const href = '/' + qs({ series: s.slug });
     return `<li>${cover}<div><a class="s-title" href="${escapeHtml(href)}">${escapeHtml(s.title)}</a><div class="s-count">${escapeHtml(displayName(s.owner))}</div></div></li>`;
   }).join('')}</ul>`);

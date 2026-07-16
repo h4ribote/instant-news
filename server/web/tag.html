@@ -27,7 +27,7 @@
     </form>
     <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
-      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
     </div>
   </div>
 </header>
@@ -36,7 +36,6 @@
   <div class="container" data-globalnav>
     <a href="/">トップ</a>
     <span class="spacer"></span>
-    <a class="write" href="/editor">✍ 記事を書く</a>
   </div>
 </nav>
 
@@ -110,7 +109,7 @@
 </footer>
 
 <script type="module">
-import { api, get, del, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError } from '/static/js/api.js';
+import { api, get, del, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError, mediaVariant } from '/static/js/api.js';
 import { mountChrome, cssUrl, listOf, pubLogoHtml, tagIconHtml, loginUrl } from '/static/js/chrome.js';
 
 /* このページの経路は /tags/{slug} で固定されているため、対象のタグは URL から取り出す。 */
@@ -171,7 +170,7 @@ function articleRowHtml(a) {
   if (a.published_at) meta.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))}</time>`);
 
   const thumb = a.cover_image_url
-    ? `<div class="thumb ph" style="background-image:${cssUrl(a.cover_image_url)}"></div>`
+    ? `<div class="thumb ph" style="background-image:${cssUrl(mediaVariant(a.cover_image_url, '400w'))}"></div>`
     : '<div class="thumb"></div>';
 
   return `<li><a class="article-row" href="${escapeHtml(articleUrl(a.slug))}">${thumb}<div>` +
@@ -216,7 +215,7 @@ function renderTag(tag, stats) {
   document.querySelector('[data-pubs-title]').textContent = `${label} をよく報じる社`;
 
   const flag = tag.icon_url
-    ? `<span class="flag ph" style="background-image:${cssUrl(tag.icon_url)}"></span>`
+    ? `<span class="flag ph" style="background-image:${cssUrl(mediaVariant(tag.icon_url, '400w'))}"></span>`
     : '<span class="flag"></span>';
   document.querySelector('[data-hero]').innerHTML =
     flag +

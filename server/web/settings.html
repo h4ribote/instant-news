@@ -27,7 +27,7 @@
     </form>
     <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
-      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
     </div>
   </div>
 </header>
@@ -36,7 +36,6 @@
   <div class="container" data-globalnav>
     <a href="/">トップ</a>
     <span class="spacer"></span>
-    <a class="write" href="/editor">✍ 記事を書く</a>
   </div>
 </nav>
 
@@ -72,7 +71,7 @@
       <!-- 発行直後の一度きりの表示。以後は再表示できない。 -->
       <div data-reveal></div>
 
-      <div data-keys></div>
+      <div class="table-scroll" data-keys></div>
 
       <div class="form-row">
         <label class="lbl">新しいキーを発行</label>
@@ -101,7 +100,7 @@
     <!-- タグ購読。チャンネルへの通知とは別に、個人宛ての DM で新着を受け取る仕組み。 -->
     <section class="card" data-subs-card hidden>
       <div class="section-head"><h2>購読中のタグ</h2></div>
-      <div data-subs></div>
+      <div class="table-scroll" data-subs></div>
 
       <!-- 購読の追加。タグページへ行かずとも、この場から未購読のタグを選んで購読できる。 -->
       <div class="form-row">

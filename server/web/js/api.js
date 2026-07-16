@@ -114,6 +114,22 @@ export function mediaUrl(hash, variant = 'orig') {
   return `/media/${encodeURIComponent(hash)}/${encodeURIComponent(variant)}.webp`;
 }
 
+/* 取り込み済みの画像を指す URL の形。service.media_url が組み立てるものと同じ(/media/{64 桁の 16 進}/{変種}.webp)。ハッシュの桁と字種まで見るのは、この形に当たらないものを一切書き換えないためである。 */
+const MEDIA_URL_PATTERN = /^\/media\/([0-9a-f]{64})\/[^/]+\.webp$/;
+
+/**
+ * 取り込み済みの画像の URL を、指定した変種の URL へ読み替える。一覧やカードのように小さく出す場所で使う。
+ *
+ * **この形に当たらない URL はそのまま返す。**カバー・報道社のロゴ・タグのアイコンは自由書式の列であり、取り込みを経ない外部ホストの絶対 URL がそのまま入る(カバーは API から任意の URL を入れられ、ロゴとアイコンは管理画面で手入力する)。外部の URL に /400w.webp を継ぎ足せば、当然そこには何も無い。
+ *
+ * 変種が実在しなくてよい。原寸より広い変種は生成されず、アニメーションは orig しか持たないが、配信側が変種を見つけられなければ orig を返す(server/app/routers/media.py の _read_variant)。したがって「400w を要求する」は「400px 以下で足りる。あるならそれをくれ」を意味し、無い場合に壊れることはない。
+ */
+export function mediaVariant(url, variant) {
+  if (!url) return url;
+  const m = MEDIA_URL_PATTERN.exec(String(url));
+  return m ? mediaUrl(m[1], variant) : url;
+}
+
 /** 記事ページの URL。 */
 export function articleUrl(slug) {
   return `/articles/${encodeURIComponent(slug)}`;

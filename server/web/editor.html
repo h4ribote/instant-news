@@ -28,7 +28,7 @@
     </form>
     <div class="actions" data-actions>
       <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
-      <a class="icon-btn" href="/settings" aria-label="設定">⚙</a>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
     </div>
   </div>
 </header>
@@ -38,14 +38,17 @@
   <div class="container" data-globalnav>
     <a href="/">トップ</a>
     <span class="spacer"></span>
-    <a href="/editor" class="write active">✍ 記事を書く</a>
   </div>
 </nav>
 
-<main class="container layout" id="editor" style="display:none">
+<!--
+  記事の識別(見出し・リード文)と本文を別のカードに分ける。両者の間にはスマホで公開設定が挟まるため、1 枚のカードには収められない(狭幅では 見出し → 設定 → 本文 → 公開 の順に組み替える。style.css の .editor-layout を参照)。
+  並べ替えは各カードの class(ed-head / ed-body / ed-*)で指定する。位置を nth-child で数えると、カードを 1 枚足しただけで順序が黙って崩れる。
+-->
+<main class="container layout editor-layout" id="editor" style="display:none">
   <!-- ===================== 本文の編集 ===================== -->
   <div class="main">
-    <section class="card">
+    <section class="card ed-head">
       <div class="section-head">
         <h2>記事を書く</h2>
         <span class="badge vis-members" id="status-badge">下書き</span>
@@ -61,6 +64,10 @@
         <textarea id="excerpt" rows="2"></textarea>
         <div class="hint">見出しの直下と、一覧・Discord の embed に出ます。</div>
       </div>
+    </section>
+
+    <section class="card ed-body">
+      <div class="section-head"><h2>本文</h2></div>
 
       <div class="form-row">
         <label class="lbl" for="body">本文(GitHub Flavored Markdown)</label>
@@ -90,7 +97,7 @@
   <!-- ===================== 公開設定 ===================== -->
   <aside class="side">
 
-    <section class="card">
+    <section class="card ed-publishing">
       <div class="section-head"><h2>公開設定</h2></div>
 
       <!-- 報道社。所属は Discord のロールで決まる。掛け持ちの場合はここで選ばせ、公開時に記事へ凍結する。 -->
@@ -133,7 +140,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card ed-visibility">
       <div class="section-head"><h2>閲覧範囲</h2></div>
       <div class="form-row">
         <div class="radio-set">
@@ -161,7 +168,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card ed-cover">
       <div class="section-head"><h2>カバー画像</h2></div>
       <div class="form-row">
         <div class="cover ph" id="cover-preview" style="width:100%;height:120px;border-radius:4px;"></div>
@@ -176,7 +183,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card ed-promo">
       <div class="section-head"><h2>速報・広告</h2></div>
 
       <div class="form-row">
@@ -196,7 +203,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card ed-publish">
       <div class="section-head"><h2>公開</h2></div>
       <div class="form-row">
         <label class="lbl" for="sched">予約公開</label>
@@ -233,7 +240,7 @@
 </footer>
 
 <script type="module">
-import { get, post, patch, upload, me, escapeHtml, formatDateTime, articleUrl, qs } from '/static/js/api.js';
+import { get, post, patch, upload, me, escapeHtml, formatDateTime, articleUrl, qs, mediaVariant } from '/static/js/api.js';
 import { mountChrome, listOf, displayName, cssUrlRaw, errorMessage } from '/static/js/chrome.js';
 
 /* ============================================================
@@ -378,7 +385,7 @@ function ensureOption(select, value, label) {
 
 function updateCoverPreview() {
   const preview = el('cover-preview');
-  preview.style.backgroundImage = state.coverUrl ? cssUrlRaw(state.coverUrl) : '';
+  preview.style.backgroundImage = state.coverUrl ? cssUrlRaw(mediaVariant(state.coverUrl, '400w')) : '';
   show(el('cover-actions'), Boolean(state.coverUrl));
 }
 

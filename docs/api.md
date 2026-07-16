@@ -326,7 +326,12 @@ python -m server.cli revoke-token --id <token_id>
 | `/editor` | GET | 不要 | `web/editor.html`。 |
 | `/settings` | GET | 不要 | `web/settings.html`(自分のアカウント・API キー)。 |
 | `/admin` | GET | 不要 | `web/admin.html`(プラットフォームの設定と分類)。設定・カテゴリ・タグ・報道社をタブで扱い、それぞれ `GET /api/admin/settings`・`/api/admin/{categories,tags,publishers}`・`/api/admin/roles` の応答から動的に生成する。**ページ自体の配信は認証を要さない**(中身は各 API 側でスコープと管理者資格により守られる)。 |
-| `/static` | GET | 不要 | 静的資産のマウント。 |
+| `/static/css` | GET | 不要 | `web/css/` のマウント。 |
+| `/static/js` | GET | 不要 | `web/js/` のマウント。 |
+
+静的資産は `/static` の 1 つではなく `/static/css` と `/static/js` の 2 つに分けてマウントする(`server/main.py`)。`web/` をまとめて公開すると、`pages.py` が配信するはずの HTML が `/static/article.html` からも素で取れてしまい、og メタの注入と閲覧範囲の判定を迂回する経路ができる。
+
+これらのページがどう組み立てられ、どの幅で何が変わるのかは [docs/frontend.md](frontend.md) が持つ。
 
 記事ページは `web/article.html` の `<!-- og:meta -->` プレースホルダを生成したメタタグ群で置換する。**`og:image` と本文の抜粋を出すのは `visibility='public'` かつ `status='published'` の記事に限る。**それ以外はタイトルも含めて出さない(未公開・限定記事の内容がクローラへ漏れる)。カバー画像は認証なしで配信されるため `og:image` に使えるが、**本文中の画像は認証を挟むため `og:image` には使えない**。
 
