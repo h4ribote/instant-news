@@ -284,13 +284,16 @@ python -m server.cli revoke-token --id <token_id>
 | `/api/admin/categories`, `/api/admin/categories/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | カテゴリの管理。 |
 | `/api/admin/tags`, `/api/admin/tags/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | タグの管理。 |
 | `/api/admin/publishers`, `/api/admin/publishers/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | 報道社の管理。 |
-| `/api/admin/settings` | GET | `settings:admin` | プラットフォームの設定の一覧。各項目は `key` / `kind` / `label` / `description` / `editable` / `restart_required` / `secret` / `value` / `is_set` / `updated_at` / `updated_by` を持つ。**秘密の設定は生値を返さず、`value` は `null`、設定済みかどうかは `is_set` が示す。** |
+| `/api/admin/roles` | GET | 管理者(スコープではない) | 対象 guild のロールの一覧。各項目は `id` / `name` / `color` / `position` / `is_administrator`。ロールを指す設定の欄と報道社の所属ロールの選択肢に使う。**権限ビットそのものは返さず、Administrator かどうかを `is_administrator` に解決して返す。** |
+| `/api/admin/settings` | GET | `settings:admin` | プラットフォームの設定の一覧。各項目は `key` / `kind` / `label` / `description` / `editable` / `restart_required` / `secret` / `ref` / `minimum` / `exclusive_minimum` / `maximum` / `value` / `is_set` / `updated_at` / `updated_by` を持つ。**秘密の設定は生値を返さず、`value` は `null`、設定済みかどうかは `is_set` が示す。** |
 | `/api/admin/settings` | PATCH | `settings:admin` | 設定の**部分更新**。本体は `{"updates": {"<key>": <value>, ...}}`。応答は変更したキーの一覧と、更新後の一覧(GET と同じ形)。 |
 
 設定の各キーの意味・型・変更可否は [docs/settings.md](settings.md) にある。本書は API の面だけを扱う。API の面で押さえるべき点は次のとおりである。
 
 - **秘密の設定(bot のトークン・OAuth2 のクライアントシークレット)の生値は GET が返さない。**返した時点で、画面を開ける者すべてに bot のトークンが渡ることになる。設定済みかどうか(`is_set`)だけを返し、値そのものは書き込み専用として扱う。
 - **PATCH は部分更新であり、`updates` に現れないキーは変更しない。**これは秘密の設定を「変更しない」と表現する唯一の手段でもある。生値を読めない以上、全項目を送り返す方式では、秘密の欄に何を入れれば「現状のまま」になるのかを画面が表現できない(空文字を送れば秘密を消してしまう)。
+- **入力欄の生成に要る記述は GET が全て返す。**値域(`minimum` / `maximum` / `exclusive_minimum`)と参照先(`ref`)まで含まれる。`ref` は ID がどの実体を指すかを表し、`kind` が `id` / `id_list` の設定にだけ意味を持つ。現在の唯一の値は `role`(Discord のロール。`admin.role_ids` と速報の各ロールが該当し、画面は `/api/admin/roles` の一覧から選ばせる)であり、それ以外の ID(通知先チャンネル等)は `ref` が `null` で、ID を直接入力させる。画面がこれらをサーバー任せにするのは、値域や参照先を画面側に書き写すと登録簿と食い違い、その食い違いが「保存を押して初めて 400 で上限を知る」「キー名で分岐した欄にだけ選択 UI が出る」形で現れるためである。
+- **`/api/admin/roles` はスコープではなく管理者資格で守る(API キーでは通らない)。**ロールの一覧は `settings:admin` の設定欄と `taxonomy:admin` の報道社の双方が要するが、どちらか一方のスコープに紐づけると、そのキーが自分の担当を越えたものを読めるようになる。ロールの名前・色・並びは guild のメンバーが Discord で見られる情報であり、これを必要とするのは Web UI(常にセッションで動く)である。機械のクライアントがロールの一覧を要するようになった時点で、それを名指すスコープを設ける。
 - **変更できない設定(`editable=false`。`discord.guild_id`)への変更要求は 400 になる。**黙って無視して 200 を返さない。要求した変更が起きなかったことは、必ず要求元に伝える。
 - 値の検証は全件まとめて先に行い、1 つでも不正なら何も書かない(一部だけ適用された中途半端な設定を作らないため)。未知のキー・型不正・値域外は 400 で、理由を含む本文を返す。
 - ID とその配列(`discord.guild_id` / `admin.role_ids` など)は、他の API と同じく**文字列で受け渡す**。
@@ -322,7 +325,7 @@ python -m server.cli revoke-token --id <token_id>
 | `/categories/{slug}` | GET | 不要 | `web/index.html`。 |
 | `/editor` | GET | 不要 | `web/editor.html`。 |
 | `/settings` | GET | 不要 | `web/settings.html`(自分のアカウント・API キー)。 |
-| `/admin` | GET | 不要 | `web/admin.html`(プラットフォームの設定)。画面は `GET /api/admin/settings` の応答から動的に生成するため、**ページ自体の配信は認証を要さない**(設定の中身は API 側で `settings:admin` により守られる)。 |
+| `/admin` | GET | 不要 | `web/admin.html`(プラットフォームの設定と分類)。設定・カテゴリ・タグ・報道社をタブで扱い、それぞれ `GET /api/admin/settings`・`/api/admin/{categories,tags,publishers}`・`/api/admin/roles` の応答から動的に生成する。**ページ自体の配信は認証を要さない**(中身は各 API 側でスコープと管理者資格により守られる)。 |
 | `/static` | GET | 不要 | 静的資産のマウント。 |
 
 記事ページは `web/article.html` の `<!-- og:meta -->` プレースホルダを生成したメタタグ群で置換する。**`og:image` と本文の抜粋を出すのは `visibility='public'` かつ `status='published'` の記事に限る。**それ以外はタイトルも含めて出さない(未公開・限定記事の内容がクローラへ漏れる)。カバー画像は認証なしで配信されるため `og:image` に使えるが、**本文中の画像は認証を挟むため `og:image` には使えない**。

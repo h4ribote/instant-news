@@ -31,7 +31,7 @@ from common.settings import MissingSettingsError, SettingsStore
 
 from .app import pages
 from .app.errors import register_exception_handlers
-from .app.routers import admin_ads, admin_settings, admin_taxonomy, ads, articles, auth, me, media, rankings, search, taxonomy
+from .app.routers import admin_ads, admin_roles, admin_settings, admin_taxonomy, ads, articles, auth, me, media, rankings, search, taxonomy
 from .app.scheduler import run_publish_scheduler
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 LOG_FORMAT: Final = '%(asctime)s %(levelname)-8s %(name)s: %(message)s'
 
 # 経路を持つルータ。URL の接頭辞は各ルータが自分で持つ(/api の下に無い経路が /auth /media /ads に跨がるため、ここで一律に前置できない)。
-_API_ROUTERS: Final = (auth, me, articles, taxonomy, search, rankings, media, ads, admin_ads, admin_taxonomy, admin_settings)
+_API_ROUTERS: Final = (auth, me, articles, taxonomy, search, rankings, media, ads, admin_ads, admin_taxonomy, admin_settings, admin_roles)
 
 
 def _configure_logging() -> None:

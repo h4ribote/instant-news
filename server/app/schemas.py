@@ -15,7 +15,7 @@ from typing import Annotated, Any, Final, Generic, Literal, TypeAlias, TypeVar
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, field_validator
 
-from common.settings import SettingKind
+from common.settings import SettingKind, SettingRef
 from common.snowflake import to_snowflake
 
 # --------------------------------------------------------------------------
@@ -162,6 +162,17 @@ class RoleOut(_OutModel):
     name: str
     color: int
     position: int
+
+
+class AdminRoleOut(RoleOut):
+    """管理画面が選択肢として並べる guild のロール。
+
+    is_administrator は discord_roles.permissions の Administrator ビットを解決した結果である。**権限ビットそのものは出さない。**画面がビットを解釈し始めると、管理者の定義が principals.is_admin と画面の 2 箇所に分かれ、必ずどちらかが取り残される(RoleOut が権限ビットを出さないのと同じ理由)。
+
+    画面がこれを要るのは、管理ロール(admin.role_ids)の欄で「このロールは Administrator を持つため、ここへ入れなくても管理者として扱われる」ことを示すためである。それを示さないと、既に管理者であるロールを管理ロールへ足す無意味な操作を誘い、admin.role_ids が「なぜそこに居るのか分からないロール」で埋まる。
+    """
+
+    is_administrator: bool
 
 
 # --------------------------------------------------------------------------
@@ -662,6 +673,12 @@ class SettingOut(_OutModel):
     # 変更してもプロセスが読み直さない設定。反映には再起動が要る。
     restart_required: bool
     secret: bool
+    # ID がどの実体を指すか(kind が id / id_list の設定にだけ意味がある)。画面はこれを見て ID の直接入力の代わりに実体の選択 UI を出す。null なら選択肢を示せる実体が無く、ID を直接入力させる。
+    ref: SettingRef | None = None
+    # 値域(kind が int / number の設定にだけ意味がある)。画面が入力欄の制約として使う。exclusive_minimum が真なら minimum は「より大きい」であり、その値そのものは許されない。
+    minimum: float | None = None
+    exclusive_minimum: bool = False
+    maximum: float | None = None
     # kind に応じた値。secret の設定では常に null。
     value: Any = None
     # 値が入っているか。secret の設定について、生値を返さずに設定済みかどうかだけを伝えるためにある。

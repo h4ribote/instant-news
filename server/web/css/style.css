@@ -1221,6 +1221,95 @@ textarea.md {
 .key-reveal .note { font-size: 11px; color: var(--muted); margin-top: 6px; }
 
 /* ============================================================
+   管理画面(タブ・分類の表・ロール選択)
+   ============================================================ */
+
+/* タブ。設定と分類(カテゴリ/タグ/報道社)を 1 つの画面で切り替える。現在地は下線と濃色で示す。 */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  border-bottom: 1px solid var(--line-strong);
+  margin-bottom: 14px;
+}
+.tabs a {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tabs a:hover { text-decoration: none; color: var(--ink); }
+.tabs a.active { color: var(--nav-bg-active); border-bottom-color: var(--nav-bg-active); }
+
+/* 変更された設定の入力欄。保存の対象であることを、保存を押す前に示す。 */
+.field-changed { border-color: var(--nav-bg) !important; background: var(--accent-bg); }
+.form-row.changed > label.lbl::after {
+  content: "変更あり";
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--nav-bg-active);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-line);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+/* ロール選択。ID の直接入力の代わりに、bot が取り込んだロールを名前と色で選ばせる。 */
+.rolepick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.rolepick.single { max-height: none; }
+.rolepick label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.rolepick label.orphan { color: var(--muted); }
+.rolepick input { width: auto; }
+.role-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  flex: none;
+}
+.role-admin {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--vis-restricted);
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.rolepick-empty { font-size: 12px; color: var(--muted); }
+.rolepick-raw { margin-top: 8px; }
+
+/* 分類の一覧の行を開いた編集域。既存の .form-row を縦に積む。 */
+.tax-edit {
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  margin: 4px 0 10px;
+}
+.tax-edit .form-actions { border-radius: 0 0 var(--radius) var(--radius); }
+.tax-name { display: flex; align-items: center; gap: 8px; }
+.tax-slug { font-size: 11px; color: var(--muted); font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+
+/* ============================================================
    フッター
    ============================================================ */
 .site-footer {

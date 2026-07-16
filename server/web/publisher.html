@@ -105,6 +105,7 @@
 
 <script type="module">
 import { get, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError } from '/static/js/api.js';
+import { mountChrome, cssUrl, listOf, displayName, avatarHtml, pubLogoHtml } from '/static/js/chrome.js';
 
 /* このページの経路は /publishers/{slug} で固定されているため、対象の報道社は URL から取り出す。 */
 const SLUG = decodeURIComponent((location.pathname.match(/\/publishers\/([^/]+)\/?$/) || [])[1] || '');
@@ -124,23 +125,6 @@ const RANKING_DAYS = 7;
 let viewer = null;
 let articlePage = 0;
 
-/** ログインへの導線。認証を終えたら今見ているページへ戻す。 */
-function loginUrl() {
-  return '/auth/login' + qs({ redirect_to: location.pathname + location.search });
-}
-
-/** URL を CSS の url() へ安全に埋める。JSON.stringify が CSS 文字列としての引用符とバックスラッシュを潰し、escapeHtml が属性値としての引用符を潰す。二段で囲わないと、引用符を含む URL から style 属性の外へ抜け出せてしまう。 */
-function cssUrl(url) {
-  return `url(${escapeHtml(JSON.stringify(String(url)))})`;
-}
-
-/** 一覧の応答から配列を取り出す。応答が配列そのものでも、ページ情報を伴うオブジェクトでも受け取れるようにする。 */
-function listOf(data, key) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data[key])) return data[key];
-  return [];
-}
-
 /** まだ次のページがあるか。応答がページ情報を持たない場合は、空になるまで「ある」とみなす。 */
 function hasMore(data, items) {
   if (data && typeof data.has_more === 'boolean') return data.has_more;
@@ -148,36 +132,6 @@ function hasMore(data, items) {
     return data.page * data.per_page < data.total;
   }
   return items.length > 0;
-}
-
-/** 利用者の表示名。Discord の表示名があればそれを、無ければユーザー名を出す。 */
-function displayName(user) {
-  if (!user) return '';
-  return user.global_name || user.username || '';
-}
-
-/** 文字列の ID から配色を決める。同じ相手には常に同じ色が付く。ID は文字列のまま扱う(数値にするとスノーフレークの下位桁が黙って壊れる)。 */
-function paletteClass(prefix, count, key) {
-  const s = String(key == null ? '' : key);
-  let n = 0;
-  for (let i = 0; i < s.length; i++) n = (n * 31 + s.charCodeAt(i)) % count;
-  return prefix + (n + 1);
-}
-
-/** 記者のアバター。画像が無い利用者には頭文字を出す(名前が読めれば一覧では足りる)。 */
-function avatarHtml(user) {
-  const name = displayName(user);
-  if (user && user.avatar_url) return `<span class="avatar ph" style="background-image:${cssUrl(user.avatar_url)}"></span>`;
-  const initial = name ? escapeHtml(Array.from(name)[0].toUpperCase()) : '?';
-  return `<span class="avatar ${paletteClass('a', 5, (user && (user.discord_user_id || user.id)) || name)}">${initial}</span>`;
-}
-
-/** 報道社のロゴ。未設定なら社名の頭文字を出す。 */
-function pubLogoHtml(pub) {
-  if (!pub) return '';
-  if (pub.logo_url) return `<span class="pub-logo ph" style="background-image:${cssUrl(pub.logo_url)}"></span>`;
-  const initial = escapeHtml(Array.from(String(pub.name || '?'))[0]);
-  return `<span class="pub-logo ${paletteClass('p', 4, pub.slug || pub.id || pub.name)}">${initial}</span>`;
 }
 
 /** 記事に添えるバッジ。記事広告の開示と速報は必ず出す(開示は装飾ではなく要件であり、一覧でも落としてはならない)。閲覧範囲は public 以外のときだけ出す(既定を明示しても情報は増えない)。 */
@@ -220,33 +174,6 @@ function articleRowHtml(a) {
 /** 数の表示。値を持たない項目に 0 を出すと「0 件である」と読めてしまうため、分からないものは — にする。 */
 function statValue(v) {
   return v == null ? '—' : escapeHtml(v);
-}
-
-/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
-function mountAdminNav(viewer) {
-  if (!viewer || !viewer.is_admin) return;
-  const write = document.querySelector('.globalnav a.write');
-  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
-}
-
-/** ヘッダの利用者導線とグローバルナビを結線する。ナビの主役はカテゴリ(記事の主分類)。 */
-async function renderChrome() {
-  mountAdminNav(viewer);
-  const actions = document.querySelector('[data-actions]');
-  if (viewer) {
-    const u = viewer.user || viewer;
-    actions.insertAdjacentHTML('afterbegin', `<a class="publisher" href="/settings">${avatarHtml(u)}${escapeHtml(displayName(u))}</a>`);
-  } else {
-    actions.insertAdjacentHTML('afterbegin', `<a class="btn-discord" href="${escapeHtml(loginUrl())}">🎮 Discord でログイン</a>`);
-  }
-
-  try {
-    const cats = listOf(await get('/api/categories'), 'categories');
-    const html = cats.map((c) => `<a href="/categories/${encodeURIComponent(c.slug)}">${escapeHtml(c.name)}</a>`).join('');
-    document.querySelector('[data-globalnav] .spacer').insertAdjacentHTML('beforebegin', html);
-  } catch (e) {
-    /* カテゴリを引けなくてもページ本体は読める。ナビだけを諦める。 */
-  }
 }
 
 /** 報道社の見出し・紹介・立場を描く。 */
@@ -397,7 +324,7 @@ async function main() {
     viewer = null;
   }
 
-  renderChrome();
+  mountChrome(viewer);
   renderAdSlot(document.querySelector('[data-adslot]'), 'sidebar');
   wireMore('[data-more-articles]', loadArticles);
 

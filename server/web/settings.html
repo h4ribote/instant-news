@@ -102,6 +102,15 @@
     <section class="card" data-subs-card hidden>
       <div class="section-head"><h2>購読中のタグ</h2></div>
       <div data-subs></div>
+
+      <!-- 購読の追加。タグページへ行かずとも、この場から未購読のタグを選んで購読できる。 -->
+      <div class="form-row">
+        <label class="lbl">タグを購読する</label>
+        <select data-sub-tag></select>
+        <div style="margin-top:10px;"><button class="btn primary" type="button" data-subscribe>購読する</button></div>
+        <div class="hint" data-sub-hint></div>
+      </div>
+
       <div class="form-row">
         <div class="hint">購読したタグの記事が公開されると、あなた個人宛てに Discord の DM が届きます。タグに設定されたチャンネルへの通知とは別の仕組みで、購読はあなただけに効きます。購読はタグページからも切り替えられます。</div>
       </div>
@@ -147,7 +156,8 @@
 </footer>
 
 <script type="module">
-import { get, post, del, me, escapeHtml, formatDateTime, renderAdSlot, qs, ApiError } from '/static/js/api.js';
+import { api, get, post, del, me, escapeHtml, formatDateTime, renderAdSlot, qs, ApiError } from '/static/js/api.js';
+import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, loginUrl } from '/static/js/chrome.js';
 
 /*
  * キーに与えるスコープ。1 本のキーには 1 つのスコープだけを与える。
@@ -191,90 +201,6 @@ const SCOPES = [
 
 let viewer = null;
 let isAdmin = false;
-
-/** ログインへの導線。認証を終えたら今見ているページへ戻す。 */
-function loginUrl() {
-  return '/auth/login' + qs({ redirect_to: location.pathname + location.search });
-}
-
-/** URL を CSS の url() へ安全に埋める。JSON.stringify が CSS 文字列としての引用符とバックスラッシュを潰し、escapeHtml が属性値としての引用符を潰す。二段で囲わないと、引用符を含む URL から style 属性の外へ抜け出せてしまう。 */
-function cssUrl(url) {
-  return `url(${escapeHtml(JSON.stringify(String(url)))})`;
-}
-
-/** 一覧の応答から配列を取り出す。応答が配列そのものでも、ページ情報を伴うオブジェクトでも受け取れるようにする。 */
-function listOf(data, key) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data[key])) return data[key];
-  return [];
-}
-
-/** 利用者の表示名。Discord の表示名があればそれを、無ければユーザー名を出す。 */
-function displayName(user) {
-  if (!user) return '';
-  return user.global_name || user.username || '';
-}
-
-/** 文字列の ID から配色を決める。同じ相手には常に同じ色が付く。ID は文字列のまま扱う(数値にするとスノーフレークの下位桁が黙って壊れる)。 */
-function paletteClass(prefix, count, key) {
-  const s = String(key == null ? '' : key);
-  let n = 0;
-  for (let i = 0; i < s.length; i++) n = (n * 31 + s.charCodeAt(i)) % count;
-  return prefix + (n + 1);
-}
-
-/** 利用者のアバター。画像が無ければ頭文字を出す。 */
-function avatarHtml(user, style) {
-  const name = displayName(user);
-  const extra = style ? ` ${style}` : '';
-  if (user && user.avatar_url) {
-    return `<span class="avatar ph" style="background-image:${cssUrl(user.avatar_url)};${extra}"></span>`;
-  }
-  const initial = name ? escapeHtml(Array.from(name)[0].toUpperCase()) : '?';
-  return `<span class="avatar ${paletteClass('a', 5, (user && (user.discord_user_id || user.id)) || name)}" style="${extra}">${initial}</span>`;
-}
-
-/** 報道社のロゴ。未設定なら社名の頭文字を出す。 */
-function pubLogoHtml(pub) {
-  if (!pub) return '';
-  if (pub.logo_url) return `<span class="pub-logo ph" style="background-image:${cssUrl(pub.logo_url)}"></span>`;
-  const initial = escapeHtml(Array.from(String(pub.name || '?'))[0]);
-  return `<span class="pub-logo ${paletteClass('p', 4, pub.slug || pub.id || pub.name)}">${initial}</span>`;
-}
-
-/** タグのアイコン。国のタグでは国旗になる。未設定なら何も出さない。 */
-function tagIconHtml(tag) {
-  if (!tag || !tag.icon_url) return '';
-  return `<span class="tag-icon ph" style="background-image:${cssUrl(tag.icon_url)}"></span>`;
-}
-
-/** 管理者にだけ、プラットフォーム全体の設定(/admin)への導線をナビへ足す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。 */
-function mountAdminNav(viewer) {
-  if (!viewer || !viewer.is_admin) return;
-  const write = document.querySelector('.globalnav a.write');
-  if (write) write.insertAdjacentHTML('beforebegin', '<a class="util" href="/admin">管理</a>');
-}
-
-/** ヘッダの利用者導線とグローバルナビを結線する。ナビの主役はカテゴリ(記事の主分類)。 */
-async function renderChrome() {
-  const actions = document.querySelector('[data-actions]');
-  if (viewer) {
-    const u = viewer.user || viewer;
-    actions.insertAdjacentHTML('afterbegin', `<span class="publisher">${avatarHtml(u)}${escapeHtml(displayName(u))}</span>`);
-  } else {
-    actions.insertAdjacentHTML('afterbegin', `<a class="btn-discord" href="${escapeHtml(loginUrl())}">🎮 Discord でログイン</a>`);
-  }
-  // 「自分の設定」からプラットフォーム全体の設定へ移れるようにする。この 2 つは別の画面であり、管理者が後者を探しに来るのはまずこの画面である。
-  mountAdminNav(viewer);
-
-  try {
-    const cats = listOf(await get('/api/categories'), 'categories');
-    const html = cats.map((c) => `<a href="/categories/${encodeURIComponent(c.slug)}">${escapeHtml(c.name)}</a>`).join('');
-    document.querySelector('[data-globalnav] .spacer').insertAdjacentHTML('beforebegin', html);
-  } catch (e) {
-    /* カテゴリを引けなくてもページ本体は読める。ナビだけを諦める。 */
-  }
-}
 
 /** ログインしていない利用者に、この画面が何のためにあるかを示してログインへ送る。 */
 function renderLoginRequired() {
@@ -474,13 +400,19 @@ async function revokeToken(id, name) {
   await loadTokens();
 }
 
+/* このサーバーの全タグ(購読の追加の選択肢)。一度だけ取得して使い回す。 */
+let allTags = null;
+/* 現在購読しているタグの slug。追加の選択肢から購読済みを除くために保持する。 */
+let subscribedSlugs = new Set();
+
 /** 購読中のタグ。 */
 function renderSubscriptions(subs) {
   const box = document.querySelector('[data-subs]');
   document.querySelector('[data-subs-card]').hidden = false;
+  subscribedSlugs = new Set(subs.map((t) => t.slug));
 
   if (subs.length === 0) {
-    box.innerHTML = '<div class="body">購読しているタグはありません。タグページの購読ボタンから、話題ごとに新着を受け取れます。</div>';
+    box.innerHTML = '<div class="body">購読しているタグはありません。下のタグを選ぶか、タグページの購読ボタンから、話題ごとに新着を受け取れます。</div>';
     return;
   }
 
@@ -497,7 +429,7 @@ function renderSubscriptions(subs) {
     `<tbody>${rows}</tbody></table>`;
 }
 
-/** 購読の一覧を読み直す。 */
+/** 購読の一覧を読み直す。読み直したら追加の選択肢も更新する(購読した/解除したタグが選択肢に現れる・消えるため)。 */
 async function loadSubscriptions() {
   try {
     renderSubscriptions(listOf(await get('/api/me/subscriptions'), 'subscriptions'));
@@ -505,6 +437,68 @@ async function loadSubscriptions() {
     document.querySelector('[data-subs]').innerHTML = '<div class="body">購読の一覧を読み込めませんでした。</div>';
     document.querySelector('[data-subs-card]').hidden = false;
   }
+  await populateSubTagSelect();
+}
+
+/** このサーバーの全タグを一度だけ取得する。 */
+async function ensureAllTags() {
+  if (allTags) return allTags;
+  allTags = listOf(await get('/api/tags'), 'tags');
+  return allTags;
+}
+
+/** 購読の追加の選択肢を、まだ購読していないタグで埋める。全て購読済みか、そもそもタグが無ければ、選択そのものを閉じる。 */
+async function populateSubTagSelect() {
+  const select = document.querySelector('[data-sub-tag]');
+  const btn = document.querySelector('[data-subscribe]');
+  const hint = document.querySelector('[data-sub-hint]');
+  if (!select || !btn) return;
+
+  let tags;
+  try {
+    tags = await ensureAllTags();
+  } catch (e) {
+    select.innerHTML = '<option value="">タグを読み込めませんでした</option>';
+    select.disabled = true;
+    btn.disabled = true;
+    hint.textContent = '';
+    return;
+  }
+
+  const available = tags.filter((t) => !subscribedSlugs.has(t.slug));
+  if (available.length === 0) {
+    select.innerHTML = '<option value="">購読できる新しいタグはありません</option>';
+    select.disabled = true;
+    btn.disabled = true;
+    hint.textContent = tags.length === 0 ? 'このサーバーにはまだタグがありません。' : 'このサーバーの全てのタグを購読済みです。';
+    return;
+  }
+
+  select.disabled = false;
+  btn.disabled = false;
+  select.innerHTML = available.map((t) => `<option value="${escapeHtml(t.slug)}">#${escapeHtml(t.name)}</option>`).join('');
+  hint.textContent = '選んだタグの記事が公開されると、あなた個人宛てに DM が届きます。';
+}
+
+/** タグを購読する。PUT は同じ要求を何度出しても同じ状態になるため、既に購読していても成功する。 */
+async function subscribe(btn) {
+  const select = document.querySelector('[data-sub-tag]');
+  const slug = select && select.value;
+  if (!slug) return;
+  btn.disabled = true;
+  try {
+    await api('/api/me/subscriptions/' + encodeURIComponent(slug), { method: 'PUT' });
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) {
+      location.href = loginUrl();
+      return;
+    }
+    alert(`購読できませんでした。${e.message}`);
+    return;
+  } finally {
+    btn.disabled = false;
+  }
+  await loadSubscriptions();
 }
 
 /** 購読を解除する。 */
@@ -528,6 +522,7 @@ function wireActions() {
     const btn = ev.target.closest('[data-unsub]');
     if (btn) unsubscribe(btn.dataset.unsub, btn.dataset.name);
   });
+  document.querySelector('[data-subscribe]').addEventListener('click', (ev) => subscribe(ev.currentTarget));
   document.querySelector('[data-issue]').addEventListener('click', (ev) => issueToken(ev.currentTarget));
 }
 
@@ -538,7 +533,7 @@ async function main() {
     viewer = null;
   }
 
-  renderChrome();
+  mountChrome(viewer);
   renderAdSlot(document.querySelector('[data-adslot]'), 'sidebar');
 
   if (!viewer) {

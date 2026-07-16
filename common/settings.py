@@ -28,6 +28,10 @@ CACHE_TTL_SECONDS: Final = 10.0
 
 SettingKind = Literal['id', 'id_list', 'int', 'number', 'str', 'secret']
 
+# ID がどの実体を指すかを表す標識。kind は値の形(id か id_list か)しか語らないため、これが無いと「この設定はロールの配列である」ことを画面へ伝える手段が無く、画面はキー名を直に見て分岐するしかない。キー名で分岐させると「画面にキーを直書きしない」という登録簿の設計が崩れ、後から別の実体を指す id_list を足したときに、その欄までロールの選択肢が並ぶ。
+# 参照先の実体を DB に持つものだけを表せる。チャンネル(channel)を足すには、bot が discord_roles と同じようにチャンネルを取り込む必要がある(現在その表は無く、通知先チャンネルは ID の直接入力である)。
+SettingRef = Literal['role']
+
 
 class _Required:
     """既定値を持たない設定であることを表す標識。この設定は初回起動時に config.yaml で与える必要がある。"""
@@ -52,6 +56,8 @@ class SettingDef:
     editable: bool = True
     # 変更してもプロセスが読み直さない設定。画面はその旨を示す。
     restart_required: bool = False
+    # ID がどの実体を指すか。kind が id / id_list の設定にだけ意味がある。画面はこれを見て、ID の直接入力の代わりに実体の選択 UI を出す。
+    ref: SettingRef | None = None
     minimum: float | None = None
     # minimum を「以上」ではなく「より大きい」として扱う。0 に意味が無い設定(タイムアウト等)に使う。
     exclusive_minimum: bool = False
@@ -112,17 +118,17 @@ REGISTRY: Final[tuple[SettingDef, ...]] = (
         description='投票の数とコメントを照合し直す、公開からの日数。照合は対象期間の通知とスレッドを 1 件残らず読み直すため、際限なく遡ると、反応がとうに止んだ記事まで含めて問い合わせが増え続ける。ここを過ぎた通知にもイベントは届き、投票もコメントもそのまま更新される(イベントが読むのは実際に変化した投稿だけであるため、打ち切る必要がない)。この日数は、送信は済んだがスレッドを開けなかった・投票用の絵文字を付けられなかった通知を bot が拾い直す期間も兼ねる。0 にすると、取りこぼしの補正だけでなくそれらの再試行も止まる。',
     ),
     SettingDef(
-        key='admin.role_ids', kind='id_list', default=(),
+        key='admin.role_ids', kind='id_list', ref='role', default=(),
         label='管理ロール',
         description='プラットフォーム管理の資格を与えるロール。空でも、Discord の Administrator 権限を持つロールの保有者と guild オーナーは管理者として扱われる。Administrator はサーバーの全操作を許す極めて強い権限であり、広告の入稿だけを任せたい相手に与えるのは筋が悪いため、Administrator を配らずに委譲する手段としてここを使う。この設定を誤って自分を締め出した場合は CLI から復旧できる。',
     ),
     SettingDef(
-        key='articles.breaking.allowed_role_ids', kind='id_list', default=(),
+        key='articles.breaking.allowed_role_ids', kind='id_list', ref='role', default=(),
         label='速報を立てられるロール',
         description='記事に速報フラグを立てられるロール。空なら誰も立てられない。乱発を防ぐために絞る。',
     ),
     SettingDef(
-        key='articles.breaking.mention_role_ids', kind='id_list', default=(),
+        key='articles.breaking.mention_role_ids', kind='id_list', ref='role', default=(),
         label='速報で mention するロール',
         description='速報の通知時に mention するロール。空なら mention しない。',
     ),
@@ -515,6 +521,8 @@ class SettingsStore:
         """画面を生成するための、定義と現在値の一覧。
 
         秘密の設定は生値を返さず、設定済みかどうかだけを返す。API から返した時点で、画面を開ける者すべてに bot のトークンが渡ることになる。
+
+        **入力欄の生成に要る記述は、値域(minimum / maximum / exclusive_minimum)と参照先(ref)まで含めてここが全て渡す。**渡さない項目は画面が知る術を持たず、画面側に同じ知識を書き写すことになる。書き写した分だけ登録簿と食い違い、値域なら「保存を押して初めて 400 で上限を知る」形で、参照先なら「キー名で分岐した設定にだけ選択 UI が出る」形で現れる。
         """
         values = await self.raw_values()
         rows = await self._db.fetch_all('SELECT setting_key, updated_at, updated_by FROM settings')
@@ -530,6 +538,10 @@ class SettingsStore:
                 'editable': defn.editable,
                 'restart_required': defn.restart_required,
                 'secret': defn.secret,
+                'ref': defn.ref,
+                'minimum': defn.minimum,
+                'exclusive_minimum': defn.exclusive_minimum,
+                'maximum': defn.maximum,
                 'updated_at': row['updated_at'] if row else None,
                 'updated_by': str(row['updated_by']) if row and row['updated_by'] is not None else None,
             }
