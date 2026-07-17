@@ -99,6 +99,9 @@ BylineMode = Literal['author', 'publisher']
 PublisherStance = Literal['independent', 'state']
 Scope = Literal['articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin']
 
+# The base quantity an article ranking orders on. 'views' ranks by view count (アクセスランキング); 'featured' by the reader-facing score plus replies (注目). Both are then weighted by recency in the query; the weighting is not a value set the client chooses. See app.article_query.fetch_ranked_articles.
+ArticleRankingMetric = Literal['views', 'featured']
+
 # A slug appears verbatim as a URL path segment, so it must hold no whitespace and no character that turns into a path or query separator.
 SLUG_PATTERN = r'^[^\s/?#&=%]+$'
 

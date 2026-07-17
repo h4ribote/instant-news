@@ -13,10 +13,10 @@ from fastapi import APIRouter, Depends, Query
 
 from common.db import Database
 
+from ..article_query import DEFAULT_PER_PAGE, fetch_article_page, published_and_visible
 from ..deps import get_db, get_principal_optional
 from ..principals import Principal
 from ..schemas import ArticleListItem, Page
-from .taxonomy import DEFAULT_PER_PAGE, fetch_article_page, published_and_visible
 
 router = APIRouter(tags=['search'])
 

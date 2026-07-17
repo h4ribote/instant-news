@@ -119,7 +119,7 @@
       <div class="creative"></div>
     </div>
 
-    <!-- The view ranking. No API tallies all of time, so the note beside the heading states outright that this is only the fetched latest articles sorted by view count. -->
+    <!-- The view ranking (アクセスランキング). Fetched from /api/rankings/articles?metric=views, which orders the recent latest articles by a recency-weighted view count. The note beside the heading states the scope is the recent latest, not a tally over all of time; the raw view count is deliberately not shown to the reader. -->
     <section class="card">
       <div class="section-head">
         <h2>アクセスランキング</h2>
@@ -136,13 +136,13 @@
       <div id="series-body"></div>
     </section>
 
-    <!-- The reaction ranking. As with the view ranking, the rank is only within the recent latest articles. -->
+    <!-- 注目 (featured). Fetched from /api/rankings/articles?metric=featured: reactions and replies, recency-weighted the same way as the view ranking. As there, the rank is only within the recent latest articles. -->
     <section class="card">
       <div class="section-head">
-        <h2>リアクションランキング</h2>
+        <h2>注目</h2>
         <span class="more">直近の新着</span>
       </div>
-      <div id="reaction-ranking-body"></div>
+      <div id="featured-body"></div>
     </section>
 
   </aside>
@@ -432,50 +432,42 @@ function rankingRowHtml(article, index, metaText) {
   return `<li><span class="rank-badge">${index + 1}</span><div><a class="r-title" href="${escapeHtml(articleUrl(article.slug))}">${escapeHtml(article.title)}</a><div class="r-meta">${escapeHtml(metaText)}</div></div>${thumbHtml(article, 'r-thumb')}</li>`;
 }
 
-/** The rendering shared by the article rankings. The rank is only within the latest articles already fetched, not a tally over all of time. */
-function renderRanking(bodyId, items, failure, { limit, compare, meta, empty }) {
-  const el = document.getElementById(bodyId);
-  if (failure) {
-    el.innerHTML = `<div class="body">${noticeHtml(`ランキングを読み込めませんでした(${reasonOf(failure)})`, 'error')}</div>`;
-    return;
-  }
-  const ranked = [...items].sort(compare).slice(0, limit);
-  if (!ranked.length) {
+/** Render a server-ordered article ranking into its sidebar card. The server returns the articles already ranked; the client only lays them out. */
+function renderRankingRows(el, items, meta, empty) {
+  if (!items.length) {
     el.innerHTML = `<div class="body">${noticeHtml(empty, 'info')}</div>`;
     return;
   }
-  setHtml(el, `<ol class="ranking">${ranked.map((a, i) => rankingRowHtml(a, i, meta(a))).join('')}</ol>`);
+  setHtml(el, `<ol class="ranking">${items.map((a, i) => rankingRowHtml(a, i, meta(a))).join('')}</ol>`);
 }
 
-/** Build the breaking-news band and the sidebar article rankings from a single fetch of the latest articles. */
-async function mountFromLatest(latestP) {
-  let items = [];
-  let failure = null;
+/**
+ * Fetch one of the server-side article rankings (GET /api/rankings/articles) and render it.
+ * The server applies the recency weight and the visibility filter and returns the rows already in order, so each ranking is one request and the browser never re-sorts. limit is carried in the URL the caller builds.
+ */
+async function mountArticleRanking(bodyId, url, meta, empty) {
+  const el = document.getElementById(bodyId);
+  let items;
+  try {
+    items = listOf(await get(url));
+  } catch (e) {
+    el.innerHTML = `<div class="body">${noticeHtml(`ランキングを読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
+    return;
+  }
+  renderRankingRows(el, items, meta, empty);
+}
+
+/** The breaking-news band, from the shared fetch of the latest articles. */
+async function mountBreaking(latestP) {
+  let items;
   try {
     items = listOf(await latestP);
   } catch (e) {
-    failure = e;
+    // renderBreaking removes the band when there is no breaking article; a failed fetch removes it for the same reason (an empty band would falsely signal breaking news).
+    document.getElementById('breaking').remove();
+    return;
   }
-
-  if (!failure) renderBreaking(items);
-  else document.getElementById('breaking').remove();
-
-  renderRanking('view-ranking-body', items, failure, {
-    limit: 5,
-    compare: (a, b) => b.view_count - a.view_count,
-    meta: (a) => {
-      const by = a.publisher ? a.publisher.name : displayName(a.author);
-      return by ? `${by} ・ ${a.view_count} 表示` : `${a.view_count} 表示`;
-    },
-    empty: '記事はまだありません。',
-  });
-
-  renderRanking('reaction-ranking-body', items, failure, {
-    limit: 3,
-    compare: (a, b) => (b.score + b.comment_count) - (a.score + a.comment_count),
-    meta: (a) => `${a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')}${Math.abs(a.score)} ・ 💬 ${a.comment_count}`,
-    empty: '記事はまだありません。',
-  });
+  renderBreaking(items);
 }
 
 /** The article count. Not shown when the response omits it: do not manufacture a value posing as a count. */
@@ -561,13 +553,21 @@ if (view.kind === 'search') document.getElementById('search-input').value = view
 
 const categoriesP = share(get('/api/categories'));
 const latestP = share(get(LATEST_URL));
-// The home page's first page needs no more than the same fetch as the breaking-news band and the rankings, so reuse the same Promise rather than repeating the request.
+// The home page's first page needs no more than the same fetch as the breaking-news band, so reuse the same Promise rather than repeating the request. The sidebar rankings no longer ride on this fetch: each is its own server-ordered request to /api/rankings/articles.
 const listP = listUrl(view) === LATEST_URL ? latestP : share(get(listUrl(view)));
 
 // Each area renders independently. If one fetch fails, the other areas survive and show text of their own.
 mountAccountAndNav(view, categoriesP);
 mountArticles(view, listP, categoriesP);
-mountFromLatest(latestP);
+mountBreaking(latestP);
+// アクセスランキング: ordered on the server by a recency-weighted view count. The count itself is deliberately not shown, so the meta line carries only the publisher or reporter.
+mountArticleRanking('view-ranking-body', '/api/rankings/articles' + qs({ metric: 'views', limit: 5 }),
+  (a) => (a.publisher ? a.publisher.name : displayName(a.author)),
+  '記事はまだありません。');
+// 注目: ordered on the server by a recency-weighted reaction score (up − down + replies).
+mountArticleRanking('featured-body', '/api/rankings/articles' + qs({ metric: 'featured', limit: 3 }),
+  (a) => `${a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')}${Math.abs(a.score)} ・ 💬 ${a.comment_count}`,
+  '記事はまだありません。');
 mountTags();
 mountSeries();
 mountPublisherRanking();

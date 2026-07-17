@@ -118,6 +118,7 @@ flowchart TD
     app --> app_vis["visibility.py — 閲覧範囲の判定"]
     app --> app_md["markdown.py — GFM のレンダリングと画像 URL の抽出・差し替え"]
     app --> app_articles["articles.py — 記事の保存・公開・通知の待ち行列"]
+    app --> app_aq["article_query.py — 記事一覧の射影(一覧・検索・分類が共有)と記事ランキングの集計"]
     app --> app_rank["rankings.py — 報道社ランキングの集計"]
     app --> app_pages["pages.py — 静的 HTML の配信と og メタの注入"]
     app --> app_sched["scheduler.py — 予約公開のバックグラウンドループ"]
