@@ -1,8 +1,8 @@
-"""画像のアップロードと配信。
+"""Image upload and delivery.
 
-配信の判定は 2 つに分かれる。is_public の画像は無条件に配信し、内容アドレスであることを根拠に永久にキャッシュさせる(内容が変われば URL も変わるため、古い内容が返り続けることが起こらない)。そうでない画像は、参照する記事の閲覧可否をそのつど検査する。
+Serving splits in two. An is_public image is served unconditionally and cached forever, justified by it being content-addressed: change the content and the URL changes with it, so old content can never keep being returned. Every other image has the visibility of the article referencing it checked on each request.
 
-閲覧できない画像には 404 を返す。403 は「そこに何かがある」ことを教えてしまい、存在自体が秘密である限定公開の記事では、それだけで漏洩になる。存在しないハッシュ・変種と、権限が無い画像は、応答から区別できてはならない。
+An image the caller cannot view returns 404, not 403. A 403 reveals that something is there, and for a limited-visibility article whose very existence is secret, that alone is a leak. A hash or variant that does not exist and an image the caller has no permission for must be indistinguishable in the response.
 """
 
 from __future__ import annotations
@@ -28,37 +28,37 @@ from ..visibility import can_view_media
 
 router = APIRouter()
 
-# 配信 URL のハッシュは 16 進 64 桁(小文字)。DB の CHAR(64) の照合は大小を区別しないため、ここで表記を絞らないと、大文字のハッシュが行に当たったのにファイル名と一致せず配信できない、という食い違いが起こる。
+# The hash in a delivery URL is 64 hex digits, lowercase. The CHAR(64) column's collation is case-insensitive, so unless the form is pinned here an uppercase hash matches the row yet not the file name, and the image cannot be served.
 _CONTENT_HASH_PATTERN: Final = re.compile(r'\A[0-9a-f]{64}\Z')
 
-# 存在しない場合と権限が無い場合で、状態コードも文言も変えない。
+# Neither the status code nor the wording differs between "does not exist" and "no permission".
 _NOT_FOUND_MESSAGE: Final = '画像が見つかりません。'
 
-# 内容アドレスであるため、この URL の内容は二度と変わらない。
+# Content-addressed, so what this URL returns never changes again.
 _PUBLIC_CACHE_CONTROL: Final = 'public, max-age=31536000, immutable'
-# public を付けてはならない。共有キャッシュ(CDN・企業のプロキシ)に載ると、権限を検査せずに他人へ配られる。
+# Never `public` here. Once it sits in a shared cache (a CDN, a corporate proxy) it is handed to other people with no permission check.
 _PRIVATE_CACHE_CONTROL: Final = 'private, max-age=300'
-# 万一 HTML として解釈されても何も実行させない。nosniff と併せて、画像の配信が XSS の経路になることを塞ぐ。
+# Execute nothing even if the bytes are somehow interpreted as HTML. With nosniff, this closes off image delivery as an XSS path.
 _MEDIA_CSP: Final = "default-src 'none'; sandbox"
 
-# アップロードを許すスコープ。このいずれかで足りる。articles:write は本文中の画像とカバー、ads:admin は広告のクリエイティブのために要る。articles:write:any は articles:write の含意として入るが、管理者スコープであることに変わりはなく、それだけを持つキーは要求の時点で所有者が管理者である場合にしか通らない。
+# Scopes that permit upload; any one of them suffices. articles:write is needed for body images and covers, ads:admin for ad creatives. articles:write:any gets in as an implication of articles:write, but it is an admin scope all the same: a key holding only that passes only when its owner is an admin at the moment of the request.
 _UPLOAD_SCOPES: Final = ('articles:write', 'ads:admin')
 
 _UPLOAD_CHUNK_SIZE: Final = 65536
 
 
 async def _authorize_upload(db: Database, settings: RuntimeSettings, principal: Principal) -> None:
-    """アップロードの資格を検査する。
+    """Check eligibility to upload.
 
-    判定は記事や広告のエンドポイントと同じ ensure_scope に委ねる。「いずれかのスコープで足りる」「管理者スコープでしか成立しないなら現在の管理者資格を問う」「セッション経由ではスコープを検査しない」という規則を、この 1 箇所だけ手書きで持つと、規則が変わったときにここだけが取り残される。実際、articles:write:any は articles:write を含意するため、キーにどのスコープが載っているかを個別に見る書き方では、write:any だけを持つキーが管理者資格の検査を経ずに通ってしまう。
+    The decision is delegated to the same ensure_scope the article and ad endpoints use. Hand-writing its rules here — any one scope suffices; if only admin scopes satisfy the request, ask for current admin eligibility; do not check scopes on the session path — would leave this one place behind the day the rules change. Concretely, articles:write:any implies articles:write, so code that inspects which scopes a key carries one by one lets a key holding only write:any through without the admin eligibility check.
     """
     await ensure_scope(db, settings, principal, *_UPLOAD_SCOPES)
 
 
 async def _read_upload(file: UploadFile, max_bytes: int) -> bytes:
-    """アップロードされた本体を上限付きで読む。
+    """Read the uploaded body under a byte cap.
 
-    申告された大きさを信じず、実際に読んだ量を数えて打ち切る。上限を設けずに読むと、1 回の要求でメモリを使い果たさせられる。
+    The declared size is not trusted; what is actually read is counted and the read is cut off there. Reading with no cap lets a single request exhaust memory.
     """
     buffer = bytearray()
     while chunk := await file.read(_UPLOAD_CHUNK_SIZE):
@@ -71,7 +71,7 @@ async def _read_upload(file: UploadFile, max_bytes: int) -> bytes:
 
 
 def _read_variant(storage_dir: Path, content_hash: str, variant: str) -> bytes | None:
-    """変種の実体を読む。無ければ原寸へ落とす(原寸より広い変種は生成されないため、変種のファイルが無いことは正常に起こる)。"""
+    """Read the variant's blob, falling back to orig when it is absent (no variant wider than the original size is produced, so a missing variant file happens normally)."""
     data = read_blob(storage_dir, content_hash, variant)
     if data is None and variant != 'orig':
         data = read_blob(storage_dir, content_hash, 'orig')
@@ -88,7 +88,7 @@ async def upload_media(
     is_public: Annotated[bool, Query(description='認証なしで配信してよいか。カバー・広告・ロゴ・アイコンは公開、本文中の画像は非公開。')] = False,
     lossless: Annotated[bool, Query(description='可逆で符号化するか。ロゴ・アイコンなどの線画に使う。')] = False,
 ) -> MediaOut:
-    """画像を取り込む。"""
+    """Ingest an image."""
     await _authorize_upload(db, settings, principal)
     data = await _read_upload(file, media.fetch.max_bytes)
     result = await ingest_bytes(
@@ -112,7 +112,7 @@ async def serve_media(
     settings: Annotated[RuntimeSettings, Depends(get_settings)],
     principal: Annotated[Principal | None, Depends(get_principal_optional)],
 ) -> Response:
-    """画像を配信する。実体の置き場所(storage_dir)は実行環境と一体であるため config から直接取る。閲覧範囲の判定に要る管理ロールは settings 表にあるため settings から取る。"""
+    """Serve an image. Where the blobs live (storage_dir) is inseparable from the runtime environment, so it is taken straight from config. The admin roles the visibility check needs live in the settings table, so they are taken from settings."""
     if not _CONTENT_HASH_PATTERN.match(content_hash) or variant not in VARIANTS:
         raise NotFound(_NOT_FOUND_MESSAGE)
     row = await db.fetch_one('SELECT id, is_public FROM media WHERE content_hash = %s', content_hash)
@@ -125,7 +125,7 @@ async def serve_media(
     else:
         if not await can_view_media(db, principal, media_id, False, settings=settings):
             raise NotFound(_NOT_FOUND_MESSAGE)
-        # 応答が要求元によって変わることを、キャッシュへ明示する。これが無いと、同じ閲覧器の別の利用者へ前の利用者の画像が残って見えうる。
+        # Tell caches explicitly that the response varies by caller. Without this, the previous user's image can stay visible to a different user of the same browser.
         headers = {'Cache-Control': _PRIVATE_CACHE_CONTROL, 'Vary': 'Cookie, Authorization'}
 
     data = await asyncio.to_thread(_read_variant, config.storage_dir, content_hash, variant)

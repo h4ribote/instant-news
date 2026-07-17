@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""FastAPI アプリの組み立てとエントリポイント。
+"""Assembly and entry point of the FastAPI application.
 
-起動の経路は 2 つあり、どちらも同じアプリを使う。
+There are two startup paths, both using the same app.
 
-    python -m server.main            … config.yaml の server.host / server.port で uvicorn を起動する。
-    uvicorn server.main:app          … 外側のプロセス管理から起動する。待ち受け先は uvicorn の引数が決める。
+    python -m server.main            … starts uvicorn on config.yaml's server.host / server.port.
+    uvicorn server.main:app          … started from an outer process manager; uvicorn's own arguments decide what it listens on.
 
-設定と DB は app.state.config / app.state.db / app.state.settings に置き、経路の実装は deps.py の依存性を通してそこから取る。モジュールのグローバル変数に持たせると、試験でアプリを差し替えられなくなる。
+Config, DB and settings live on app.state.config / app.state.db / app.state.settings, and the route implementations reach them from there through the deps.py dependencies. Holding them in module globals would make the app unswappable in tests.
 
-設定の真実は 2 箇所に分かれている。config.yaml(app.state.config)が持つのは server・database・画像の保存先だけであり、それ以外は settings 表(app.state.settings)が持つ。config.yaml の残りの値は、起動時に settings 表の未登録のキーだけを埋める初期値として使う。
+The source of truth is split in two: config.yaml (app.state.config) holds only server, database and the image storage location; everything else lives in the settings table (app.state.settings). The remaining config.yaml values are used at startup as seed values that fill only the keys the settings table does not have yet.
 
-**import しただけで設定を読みに行かない。**アプリは `app` 属性が初めて参照された時点で組み立てる(モジュールの __getattr__)。import が設定を要求すると、このモジュールを読み込むあらゆる経路 -- 試験、CLI、開発時の対話的な import -- が config.yaml の存在を強いられ、設定を引数で渡して組み立てる create_app(config=...) すら呼べなくなる。
+**A bare import must not read config.** The app is assembled the moment the `app` attribute is first referenced (the module's __getattr__). If import required config, every path that loads this module -- tests, the CLI, an interactive import while developing -- would be forced to have config.yaml present, and even create_app(config=...), which takes the config as an argument, could not be called.
 """
 
 from __future__ import annotations
@@ -38,24 +38,24 @@ logger = logging.getLogger(__name__)
 
 LOG_FORMAT: Final = '%(asctime)s %(levelname)-8s %(name)s: %(message)s'
 
-# 経路を持つルータ。URL の接頭辞は各ルータが自分で持つ(/api の下に無い経路が /auth /media /ads に跨がるため、ここで一律に前置できない)。
+# Each router owns its URL prefix: routes outside /api span /auth, /media and /ads, so no single prefix can be applied to all of them here.
 _API_ROUTERS: Final = (auth, me, articles, taxonomy, search, rankings, media, ads, admin_ads, admin_taxonomy, admin_settings, admin_roles)
 
 
 def _configure_logging() -> None:
-    """アプリのログを標準出力へ出す。
+    """Send the application's logs to stdout.
 
-    uvicorn は自分のロガーだけを設定し、root には手を触れない。ここで root を設定しないと、アプリ側のログは警告未満が捨てられ、予約公開の巡回や画像の取り込み失敗が何も見えなくなる。既にハンドラがある場合(外側でログを設定している場合)basicConfig は何もしない。
+    uvicorn configures only its own loggers and never touches root. Without configuring root here, anything below WARNING from the application is discarded, leaving the scheduled-publishing poll loop and image ingest failures entirely invisible. basicConfig does nothing when handlers already exist (when logging is configured from outside).
     """
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
 
 async def _bootstrap_settings(store: SettingsStore, config: Config) -> None:
-    """settings 表の未登録のキーを config.yaml の初期値で埋め、設定を読めることを確かめる。
+    """Fill the settings table's absent keys with config.yaml's seed values and confirm the settings can be read.
 
-    投入は未登録のキーだけを対象とする(SettingsStore.bootstrap が INSERT IGNORE で行う)。起動のたびに config.yaml で上書きすると、画面から変更した値が次の再起動で黙って元へ戻る。設定を増やした場合、新しいキーだけがここで埋まる。
+    Seeding targets only keys that are not there yet (SettingsStore.bootstrap does this with INSERT IGNORE). Overwriting from config.yaml on every startup would silently revert values changed from the UI at the next restart. When a setting is added, only the new key gets filled here.
 
-    投入の直後に設定を読み直し、読めなければ起動を中止する。読めないまま起動すると、認証・記事の保存・予約公開といった設定を要する経路がすべて要求の時点で失敗し、起動には成功しているために原因が「動かない」としか見えなくなる。
+    Settings are re-read right after seeding, and startup is aborted if they cannot be read. Starting up anyway would make every route that needs settings -- auth, saving an article, scheduled publishing -- fail at request time, and because startup itself succeeded the cause would look like nothing more than "it doesn't work".
     """
     inserted = await store.bootstrap(config.bootstrap)
     if inserted:
@@ -63,22 +63,22 @@ async def _bootstrap_settings(store: SettingsStore, config: Config) -> None:
     try:
         await store.snapshot(force=True)
     except MissingSettingsError as exc:
-        # 初期値の投入を済ませた直後であり、本来ここへは来ない。来るとすれば、投入と読み直しの間に settings 表の行が消されている(別のプロセスや手作業による削除)。
+        # Seeding has just finished, so this is normally unreachable. Getting here means settings rows were deleted between the seeding and the re-read (by another process, or by hand).
         raise RuntimeError(f'settings 表の設定を読み込めないため起動を中止します。初期値の投入は完了しているため、投入した行が削除された可能性があります: {exc}') from exc
     except ValueError as exc:
-        # 登録簿の検証を通らない値が settings 表に入っている。API と CLI は検証を通すため、直接 SQL で書き換えた場合に起こる。
+        # The settings table holds a value that fails the registry's validation. The API and the CLI both run it, so this only happens when a row was rewritten with raw SQL.
         raise RuntimeError(f'settings 表に不正な値があるため起動を中止します。CLI から修正してください(python -m server.cli set-setting <key> <json-value>): {exc}') from exc
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """接続プールと予約公開のスケジューラの寿命をアプリに合わせる。"""
+    """Tie the lifetime of the connection pool and the scheduled-publishing scheduler to the app."""
     db: Database = app.state.db
     config: Config = app.state.config
     store: SettingsStore = app.state.settings
     await db.connect()
     try:
-        # 設定は DB から読むため、接続の直後・スケジューラの起動より前に済ませる。
+        # Settings are read from the DB, so do this right after connecting and before starting the scheduler.
         await _bootstrap_settings(store, config)
         scheduler = asyncio.create_task(run_publish_scheduler(app), name='publish-scheduler')
         app.state.scheduler_task = scheduler
@@ -86,16 +86,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             yield
         finally:
             scheduler.cancel()
-            # cancel 後に待ち合わせる。待たずに接続プールを閉じると、公開の途中だったコネクションが閉じられ、終了時にだけ出る例外が残る。
+            # Await after the cancel. Closing the connection pool without waiting closes a connection that was mid-publish, leaving an exception that shows up only at shutdown.
             with suppress(asyncio.CancelledError):
                 await scheduler
     finally:
-        # 初期値の投入が失敗した場合も接続プールを閉じる。開いたまま例外を投げると、起動に失敗したプロセスが接続を掴んだまま終わる。
+        # Close the connection pool even when seeding failed. Raising with it still open leaves the failed process exiting while it still holds connections.
         await db.close()
 
 
 def create_app(config: Config | None = None) -> FastAPI:
-    """アプリを組み立てる。config を省略すると config.yaml を読む。"""
+    """Assemble the app. Reads config.yaml when config is omitted."""
     _configure_logging()
     resolved = config if config is not None else load_config()
     app = FastAPI(
@@ -104,28 +104,28 @@ def create_app(config: Config | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.config = resolved
-    # 接続はプロセスが実際に走り出す lifespan で行う。import しただけの状態で DB を掴まない。
+    # Connect in lifespan, where the process actually starts running. A bare import must not grab the DB.
     app.state.db = Database(resolved.database)
-    # 設定の読み書きの窓口。ここでは組み立てるだけで DB へは触れない(初期値の投入と最初の読み取りは lifespan で行う)。
+    # The single access point for reading and writing settings. Only constructed here, with no DB access (seeding and the first read happen in lifespan).
     app.state.settings = SettingsStore(app.state.db)
 
     register_exception_handlers(app)
 
-    # 静的資産。HTML そのものは pages.py が配信するため、ここで公開するのは css と js だけにする。
+    # Static assets. pages.py serves the HTML itself, so only css and js are exposed here.
     app.mount('/static/css', StaticFiles(directory=pages.WEB_DIR / 'css'), name='static-css')
     app.mount('/static/js', StaticFiles(directory=pages.WEB_DIR / 'js'), name='static-js')
 
     for module in _API_ROUTERS:
         app.include_router(module.router)
-    # ページの経路は最後に登録する。Starlette は登録順に照合するため、/articles/{slug} のような可変部分を持つ経路が API・画像・静的資産の経路より先に並ばないようにする。
+    # Register the page routes last. Starlette matches in registration order, so a route with a variable part like /articles/{slug} must not come before the API, image and static-asset routes.
     app.include_router(pages.router)
     return app
 
 
 def __getattr__(name: str) -> Any:
-    """`uvicorn server.main:app` のように、モジュールの属性としてアプリを求められた時点で組み立てる(PEP 562)。
+    """Assemble the app the moment it is asked for as a module attribute, as `uvicorn server.main:app` does (PEP 562).
 
-    ここで組み立てることで、import そのものは設定を要求しない。一度組み立てたアプリはモジュールの属性として残るため、二度目以降の参照はこの関数を通らず、設定を読み直すことも複数のアプリが生まれることもない。
+    Assembling here is what keeps import itself from requiring config. Once assembled the app stays as a module attribute, so the second and later references never pass through this function: config is not re-read and no second app is ever created.
     """
     if name == 'app':
         global app
@@ -135,7 +135,7 @@ def __getattr__(name: str) -> Any:
 
 
 def main() -> None:
-    """python -m server.main で起動したときの入口。待ち受け先は設定ファイルが決める。"""
+    """Entry point when started with `python -m server.main`. The config file decides what it listens on."""
     application = create_app()
     config: Config = application.state.config
     uvicorn.run(application, host=config.server.host, port=config.server.port)

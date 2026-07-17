@@ -21,7 +21,7 @@
       <span class="mark">instant<span>-news</span></span>
       <span class="tag">Discord の報道社連合</span>
     </a>
-    <!-- 検索はトップの一覧が担う(/?q= を読んで /api/search を引く)。素の GET のフォームにしてあるため、JavaScript が動かなくても検索へ行ける。 -->
+    <!-- Search is handled by the home page listing: it reads /?q= and queries /api/search. A plain GET form, so submitting it still navigates to search when JavaScript does not run. -->
     <form class="search" action="/" method="get">
       <input type="text" name="q" placeholder="記事・タグ・報道社を検索" aria-label="記事を検索">
       <button type="submit" aria-label="検索">🔍</button>
@@ -33,7 +33,7 @@
   </div>
 </header>
 
-<!-- カテゴリ(記事の主分類)は js/chrome.js が GET /api/categories から position 順に spacer の手前へ足す。カテゴリ集合はデプロイごとに異なるため、この HTML には 1 つも書かない。 -->
+<!-- js/chrome.js adds the categories (the article's primary classification) from GET /api/categories in position order, ahead of the spacer. The category set differs per deployment, so not one of them is written into this HTML. -->
 <nav class="globalnav">
   <div class="container" data-globalnav>
     <a href="/">トップ</a>
@@ -42,11 +42,11 @@
 </nav>
 
 <!--
-  記事の識別(見出し・リード文)と本文を別のカードに分ける。両者の間にはスマホで公開設定が挟まるため、1 枚のカードには収められない(狭幅では 見出し → 設定 → 本文 → 公開 の順に組み替える。style.css の .editor-layout を参照)。
-  並べ替えは各カードの class(ed-head / ed-body / ed-*)で指定する。位置を nth-child で数えると、カードを 1 枚足しただけで順序が黙って崩れる。
+  The article's identity (headline, lede) and its body are separate cards: on a phone the publishing settings sit between the two, so one card cannot hold both. Narrow widths reorder them to headline -> settings -> body -> publish (see .editor-layout in style.css).
+  Ordering keys off each card's class (ed-head / ed-body / ed-*). Counting position with nth-child would silently break the order the moment one more card is added.
 -->
 <main class="container layout editor-layout" id="editor" style="display:none">
-  <!-- ===================== 本文の編集 ===================== -->
+  <!-- Body editing -->
   <div class="main">
     <section class="card ed-head">
       <div class="section-head">
@@ -77,12 +77,12 @@
           アップロードすると WebP に変換され、カーソル位置に Markdown が挿入されます。本文の画像は記事と同じ閲覧範囲で守られます。
         </div>
         <input type="file" id="body-file" accept="image/*" multiple style="display:none">
-        <!-- 保存時に取り込む画像の予告と、取り込みの結果。どちらも黙って済ませず必ず出す。 -->
+        <!-- Advance notice of the images the save will ingest, and the ingest result. Neither is ever passed over in silence. -->
         <div id="body-notices"></div>
         <div id="media-notices"></div>
       </div>
 
-      <!-- 改版のメモ。既存の記事を編集するときだけ出す。 -->
+      <!-- The revision note. Shown only when editing an existing article. -->
       <div class="form-row" id="revision-row" style="display:none">
         <label class="lbl" for="revision-note">この編集のメモ(改版に残ります)</label>
         <input id="revision-note" type="text" placeholder="例: 発効日を訂正">
@@ -94,20 +94,20 @@
     </section>
   </div>
 
-  <!-- ===================== 公開設定 ===================== -->
+  <!-- Publishing settings -->
   <aside class="side">
 
     <section class="card ed-publishing">
       <div class="section-head"><h2>公開設定</h2></div>
 
-      <!-- 報道社。所属は Discord のロールで決まる。掛け持ちの場合はここで選ばせ、公開時に記事へ凍結する。 -->
+      <!-- Publisher. Affiliation is decided by a Discord role; someone affiliated with more than one picks here, and the choice is frozen onto the article at publish time. -->
       <div class="form-row">
         <label class="lbl" for="publisher">報道社</label>
         <select id="publisher"></select>
         <div class="hint" id="publisher-hint">Discord のロールで所属している社から選べます。公開後は変更できません(署名は公開の時点で凍結されます)。</div>
       </div>
 
-      <!-- 署名の表示。author_id は必ず保持され、表示だけを切り替える。 -->
+      <!-- Byline display. author_id is always retained; only what is shown changes. -->
       <div class="form-row">
         <label class="lbl">署名の表示</label>
         <div class="radio-set">
@@ -117,7 +117,7 @@
         <div class="hint">どちらでも投稿者の記録は残ります(改版履歴に編集者として記録され、監査で追えます)。</div>
       </div>
 
-      <!-- カテゴリは単一必須。主分類が 1 つに定まり、通知先チャンネルもここで決まる。 -->
+      <!-- Exactly one category is mandatory: it fixes the primary classification, and the notify channel follows from it. -->
       <div class="form-row">
         <label class="lbl" for="category">カテゴリ(必須)</label>
         <select id="category"></select>
@@ -155,8 +155,8 @@
         </div>
 
         <!--
-          カバー画像は Discord の embed に出すため認証なしで配信される。閲覧制限はカバーに及ばない。
-          注意は閲覧範囲を選ぶこの場に置く(カバーを選ぶ時点では、その記事が機密かどうかを考えていない)。
+          The cover image is served unauthenticated so that Discord embeds can fetch it, which puts it outside the access restriction.
+          The warning belongs here, on the visibility card, rather than on the cover card: while picking a cover nobody is thinking about whether the article is confidential.
         -->
         <div class="notice">
           <span class="ic">🔓</span>
@@ -191,7 +191,7 @@
         <div class="hint">トップに速報帯で出し、通知時に設定されたロールをメンションします。立てられるロールは限られており、権限が無い場合は保存時にエラーになります。</div>
       </div>
 
-      <!-- 記事広告(タイアップ記事)。コアが開示を担保するため、広告主名は必須。 -->
+      <!-- Sponsored article. The core guarantees the disclosure, so the advertiser name is required. -->
       <div class="form-row">
         <label><input type="checkbox" id="sponsored"> <b>記事広告(タイアップ記事)</b></label>
         <div id="sponsor-wrap" style="display:none">
@@ -243,30 +243,28 @@
 import { get, post, patch, upload, me, escapeHtml, formatDateTime, articleUrl, qs, mediaVariant } from '/static/js/api.js';
 import { mountChrome, listOf, displayName, cssUrlRaw, errorMessage } from '/static/js/chrome.js';
 
-/* ============================================================
-   表示の小物
-   ============================================================ */
+/* Presentation helpers */
 
 const STATUS_LABELS = { draft: '下書き', in_review: 'レビュー中', scheduled: '予約公開', published: '公開済み', archived: 'アーカイブ' };
-// Discord の CDN。ここに置かれた画像の URL はおよそ 24 時間で失効するため、取り込みの予告を出す対象になる。
+// Discord's CDN. Image URLs here expire in roughly 24 hours, which is what earns them an ingest advance notice.
 const DISCORD_CDN = /(?:^|\/\/)(?:cdn\.discordapp\.com|media\.discordapp\.net)\//i;
 
 /**
- * 要素の表示を切り替える。
- * style.css には display を指定するクラス(.btn の inline-flex、.notice や .cols の flex など)があり、hidden 属性の display:none はそれらに負けて効かないため、style で直接切り替える。
+ * Toggle an element's display.
+ * style.css sets display on classes (.btn inline-flex, .notice and .cols flex), which beats the hidden attribute's display:none and leaves it doing nothing, so switch the inline style directly instead.
  */
 function show(el, visible) {
   if (el) el.style.display = visible ? '' : 'none';
 }
 
-/** 注意書きを描く。icon は行頭の記号、html は組み立て済みの断片。 */
+/** Render a notice. icon is the leading glyph; html is an already-built snippet. */
 function noticeHtml(icon, html, info) {
   return `<div class="notice${info ? ' info' : ''}"><span class="ic">${escapeHtml(icon)}</span><div>${html}</div></div>`;
 }
 
 /**
- * datetime-local の値(閲覧者のローカル時刻)を UTC の ISO 8601 にする。
- * サーバーはタイムゾーンを持たない日時を UTC とみなすため、ローカル時刻の文字列をそのまま送ると時差の分だけずれた時刻に公開される。
+ * Convert a datetime-local value (the viewer's local time) to UTC ISO 8601.
+ * The server reads a datetime carrying no timezone as UTC, so sending the local-time string unchanged would publish at a time off by the UTC offset.
  */
 function localToUtcIso(value) {
   if (!value) return null;
@@ -275,7 +273,7 @@ function localToUtcIso(value) {
   return d.toISOString();
 }
 
-/** UTC の ISO 8601 を datetime-local の値(ローカル時刻)にする。 */
+/** Convert UTC ISO 8601 to a datetime-local value (local time). */
 function utcIsoToLocal(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -284,12 +282,10 @@ function utcIsoToLocal(iso) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/* ============================================================
-   状態
-   ============================================================ */
+/* State */
 
 const params = new URLSearchParams(location.search);
-// 編集対象。id は更新の宛先(PATCH /api/articles/{id})、slug は読み込みの鍵(GET /api/articles/{slug})。
+// What is being edited: id is the update destination (PATCH /api/articles/{id}), slug is the load key (GET /api/articles/{slug}).
 const state = {
   articleId: params.get('id'),
   slug: params.get('slug'),
@@ -305,11 +301,9 @@ const state = {
 
 const el = (id) => document.getElementById(id);
 
-/* ============================================================
-   入力の組み立てと反映
-   ============================================================ */
+/* Reading the inputs, and applying state back into them */
 
-/** タグの入力欄を slug の配列にする。先頭の # は付けても付けなくてもよい。 */
+/** Turn the tag field into an array of slugs. The leading # is optional. */
 function parseTags(text) {
   const slugs = String(text || '').split(/[\s,、]+/).map((s) => s.replace(/^#+/, '').trim()).filter(Boolean);
   return Array.from(new Set(slugs));
@@ -330,8 +324,8 @@ function selectedRoleIds() {
 }
 
 /**
- * 通知先の見込みを示す。
- * 宛先は記事のカテゴリとタグの通知先チャンネルを重複排除した集合であり、0 件なら記事はどこにも通知されない(既定のチャンネルへ流れることはない)。選んだ時点でその結果が分かるようにする。
+ * Show where the article is expected to be notified.
+ * The destinations are the deduplicated notify channels of the article's category and its tags; zero of them means the article is notified nowhere, because there is no fallback to a default channel. Say so while the choice is being made rather than after publishing.
  */
 function updateNotifyHint() {
   const category = state.categories.find((c) => c.id === el('category').value);
@@ -349,17 +343,17 @@ function updateNotifyHint() {
   }
 }
 
-/** 署名の見本。どの社の名で、誰として出るのかを選ぶ前に見せる。 */
+/** Byline preview: show which publisher's name the article goes out under, and as whom, before the choice is made. */
 function updateBylinePreview() {
   const pub = state.publishers.find((p) => p.id === el('publisher').value);
-  // 共通の displayName は名前が無ければ空文字を返す。署名の見本で名前が消えると「報道社のみ」の署名と見分けが付かなくなるため、必ず何かを出す。
+  // The shared displayName returns an empty string when there is no name. A name that vanished from the preview would be indistinguishable from a publisher-only byline, so always render something.
   const name = displayName(state.user && state.user.user) || '不明';
   el('byline-preview').textContent = ` — ${pub ? pub.name : '(報道社なし)'} / ${name}`;
 }
 
 function updateStatusBadge() {
   el('status-badge').textContent = STATUS_LABELS[state.status] || state.status;
-  // 公開済みの記事は報道社の署名が凍結されている。以後ロールが変わっても動かさないため、選び直せないようにする。
+  // A published article's publisher byline is frozen, and no later role change may move it, so the select is disabled.
   const published = state.status === 'published';
   el('publisher').disabled = published;
   el('publisher-hint').textContent = published
@@ -371,8 +365,8 @@ function updateStatusBadge() {
 }
 
 /**
- * 選択肢に無い値を選べるようにする。
- * 記事に凍結された報道社のロールを執筆者が既に失っている場合、その社は選択肢に現れない。選択肢が無いまま保存すると、値が空として送られて署名が黙って外れるため、現在の値は必ず残す。
+ * Keep a value selectable even when it is not among the options.
+ * If the writer has since lost the role of the publisher frozen onto the article, that publisher never appears in the options; saving without it sends an empty value and silently strips the byline, so the current value is always kept.
  */
 function ensureOption(select, value, label) {
   if (!value) return;
@@ -390,8 +384,8 @@ function updateCoverPreview() {
 }
 
 /**
- * 本文に含まれる画像 URL を拾う。
- * これは注意書きを出すための近似であり、取り込みの対象を決めるのはサーバー側の Markdown の構文木である(コードブロックの中の記述など、ここでの検出と厳密には一致しない)。
+ * Collect the image URLs in the body.
+ * An approximation, only good enough to drive a notice: what actually gets ingested is decided by the server's Markdown syntax tree, which will not agree exactly with what is matched here (a URL inside a code block, for one).
  */
 function imageUrlsInBody(md) {
   const urls = [];
@@ -404,8 +398,8 @@ function imageUrlsInBody(md) {
 }
 
 /**
- * 保存時の取り込みの予告。
- * Discord の CDN の URL はおよそ 24 時間で失効するため、取り込まなければ翌日には画像が壊れる。取り込みは公開時ではなく保存のたびに行われるので、下書きのまま置いても失効前に写し取られる。
+ * Advance notice of the ingest that saving will perform.
+ * Discord CDN URLs expire in roughly 24 hours, so an image left un-ingested is broken by the next day. The ingest runs on every save rather than at publish time, which is what lets an article left sitting as a draft still be copied before its URLs expire.
  */
 function updateBodyNotices() {
   const discordUrls = imageUrlsInBody(el('body').value).filter((u) => DISCORD_CDN.test(u));
@@ -417,11 +411,9 @@ function updateBodyNotices() {
   box.innerHTML = noticeHtml('⏳', `<b>本文に Discord の画像 URL が ${discordUrls.length} 件あります。</b> 保存時にこのサーバーへ取り込みます。Discord の画像 URL はおよそ 24 時間で失効するため、取り込まないまま放置すると翌日には表示されなくなります。`);
 }
 
-/* ============================================================
-   画像のアップロード
-   ============================================================ */
+/* Image upload */
 
-/** カーソル位置に文字列を差し込む。 */
+/** Insert text at the cursor. */
 function insertAtCursor(textarea, text) {
   const start = textarea.selectionStart;
   const end = textarea.selectionEnd;
@@ -432,7 +424,7 @@ function insertAtCursor(textarea, text) {
   updateBodyNotices();
 }
 
-/** 本文の画像。記事と同じ閲覧範囲の判定を受けさせるため、非公開のまま取り込む。 */
+/** Body images. Ingested non-public, so that they go through the same visibility check as the article. */
 async function uploadBodyImages(files) {
   const box = el('media-notices');
   for (const file of files) {
@@ -447,7 +439,7 @@ async function uploadBodyImages(files) {
   }
 }
 
-/** カバー画像。Discord の embed と og:image に出すため、認証なしで配信される公開の画像として取り込む。 */
+/** Cover image. Ingested as a public image, served unauthenticated, because Discord embeds and og:image fetch it. */
 async function uploadCover(file) {
   const box = el('media-notices');
   box.innerHTML = noticeHtml('⬆', `<b>${escapeHtml(file.name)}</b> をアップロードしています…`, true);
@@ -461,7 +453,7 @@ async function uploadCover(file) {
   }
 }
 
-/** ドロップ領域とファイル選択を結ぶ。 */
+/** Wire the drop zone to the file picker. */
 function wireDropzone(zone, input, handler) {
   zone.addEventListener('click', () => input.click());
   zone.addEventListener('dragover', (ev) => { ev.preventDefault(); });
@@ -477,9 +469,7 @@ function wireDropzone(zone, input, handler) {
   });
 }
 
-/* ============================================================
-   読み込み
-   ============================================================ */
+/* Loading */
 
 function fillArticle(a) {
   state.articleId = a.id;
@@ -506,7 +496,8 @@ function fillArticle(a) {
   if (byline) byline.checked = true;
   const vis = document.querySelector(`input[name="vis"][value="${a.visibility}"]`);
   if (vis) vis.checked = true;
-  // 記事が閲覧を許しているロールのうち、編集者が保有していないものは選択肢に無い。そのまま保存すると閲覧範囲が黙って広がる(そのロールの人が読めなくなるのではなく、制限が外れて他の人に読まれる)ため、名前が引けなくても ID のまま残して選択状態にする。
+  // Of the roles the article grants viewing to, the ones the editor does not hold are absent from the options.
+  // Saving in that state would silently widen the visibility — the holders of that role do not lose access; rather the restriction comes off and other people read it — so the raw ID is kept and left checked even when no name can be resolved for it.
   const roleIds = new Set(a.visibility_role_ids || []);
   const known = new Set(state.roles.map((r) => r.id));
   const extra = Array.from(roleIds).filter((id) => !known.has(id));
@@ -525,11 +516,9 @@ function fillArticle(a) {
   document.title = `${a.title} を編集 | instant-news`;
 }
 
-/* ============================================================
-   保存・公開
-   ============================================================ */
+/* Saving and publishing */
 
-/** 入力を保存の要求本文にする。省略ではなく明示的な未指定として送るため、空の値は null にする。 */
+/** Turn the inputs into the save request body. An empty value becomes null so that it is sent as an explicit unset rather than an omission. */
 function collect() {
   const position = el('series-position').value.trim();
   const visibility = selectedVisibility();
@@ -550,12 +539,12 @@ function collect() {
     is_breaking: el('breaking').checked,
     is_sponsored: sponsored,
     sponsor_name: sponsored ? (el('sponsor-name').value.trim() || null) : null,
-    // 予約の時刻は下書きの段階でも保存する。入力した時刻が保存のたびに消えると、公開の直前に入れ直す運用になり、押し間違えれば即時公開になる。
+    // The scheduled time is saved even while the article is still a draft. Were the entered time cleared on every save, the routine would become re-entering it just before publishing, where one mis-click publishes immediately.
     scheduled_at: localToUtcIso(el('sched').value),
   };
 }
 
-/** 送る前に分かる誤りを拾う。サーバーも同じ規則で弾くが、往復させずにその場で伝える。 */
+/** Catch the mistakes that are knowable before sending. The server rejects by the same rules; this only says so on the spot instead of after a round trip. */
 function validate(payload) {
   const problems = [];
   if (!payload.title) problems.push('見出しを入れてください。');
@@ -579,8 +568,8 @@ function busy(on) {
 }
 
 /**
- * 保存する。
- * 取り込めなかった画像(media_failures)は必ず画面へ出す。取り込めなかった URL は元のまま本文に残り、投稿自体は失敗しないが、黙って残すと朽ちるリンクが気付かれないまま残る。
+ * Save.
+ * Images that failed to ingest (media_failures) are always shown. The URL stays in the body as it was and the save itself still succeeds, so leaving it silent would leave a rotting link that nobody notices.
  */
 async function save(overrides) {
   const payload = Object.assign(collect(), overrides || {});
@@ -623,12 +612,12 @@ async function save(overrides) {
 }
 
 async function publish() {
-  // 時刻の指定がある場合は予約として保存する。実際に公開するのはサーバーの巡回であり、bot が落ちていても公開は進む。
+  // A time given means save as scheduled. The server's poll loop is what actually publishes, so publication proceeds even while the bot is down.
   const scheduled = localToUtcIso(el('sched').value);
   if (scheduled) {
     const article = await save({ status: 'scheduled', scheduled_at: scheduled });
     if (article) {
-      // 予約した時刻は応答の値で示す。送った値ではなく保存された値を出すことで、実際に効いている時刻が読める。
+      // Report the scheduled time from the response. Showing the stored value rather than the one sent is what makes the time actually in effect readable.
       const when = article.scheduled_at ? `${formatDateTime(article.scheduled_at)} に公開を予約しました。` : '公開を予約しました。';
       setSaveNotices(noticeHtml('🕒', `<b>${escapeHtml(when)}</b> 時刻になるとサーバーが公開し、bot が通知します。`, true));
     }
@@ -650,9 +639,7 @@ async function publish() {
   }
 }
 
-/* ============================================================
-   立ち上げ
-   ============================================================ */
+/* Startup */
 
 function renderGate(html) {
   show(el('editor'), false);
@@ -663,7 +650,7 @@ function renderGate(html) {
 
 async function main() {
   const user = await me();
-  // カテゴリはナビと「カテゴリ(必須)」の選択肢の双方が要る。要求を 1 本にして外枠と分け合う。
+  // Categories are needed both by the nav and by the category select, so a single request is shared with the chrome.
   const categoriesP = get('/api/categories');
   await mountChrome(user, { categories: categoriesP });
 
@@ -698,7 +685,7 @@ async function main() {
   el('roles').innerHTML = state.roles.length
     ? state.roles.map((r) => `<label><input type="checkbox" value="${escapeHtml(r.id)}"> <span>${escapeHtml(r.name)}</span></label>`).join('')
     : '<span class="note">保有しているロールがありません。</span>';
-  // クリックで入力欄へ足せるようにする。タグは slug で指定するため、一覧を見せないと書けない。
+  // Click to add a tag to the field. Tags are given by slug, so without a listing to pick from there is no way to write them.
   el('tagcloud').innerHTML = state.tags.map((t) => {
     const bell = t.notify_channel_id ? ' <b>📣</b>' : '';
     return `<a href="#" data-tag="${escapeHtml(t.slug)}">#${escapeHtml(t.name)}${bell}</a>`;
@@ -713,7 +700,7 @@ async function main() {
   updateBylinePreview();
   updateNotifyHint();
 
-  // 既存の記事の読み込み。読み込みは slug で行い、更新の宛先には応答の id を使う。
+  // Load an existing article: read by slug, and use the id from the response as the update destination.
   const ref = state.slug || state.articleId;
   if (ref) {
     try {
@@ -726,7 +713,7 @@ async function main() {
     }
   }
 
-  /* 入力の結線 */
+  /* Wiring the inputs */
   el('category').addEventListener('change', updateNotifyHint);
   el('tags').addEventListener('input', updateNotifyHint);
   el('publisher').addEventListener('change', updateBylinePreview);

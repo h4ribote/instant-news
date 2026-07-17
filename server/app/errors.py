@@ -1,8 +1,8 @@
-"""アプリケーションの例外と、HTTP 応答への変換。
+"""Application exceptions and their translation into HTTP responses.
 
-例外 → HTTP の対応はこのモジュールへ集約し、main.py が register_exception_handlers(app) で登録する。サービス層は HTTP を知らずに AppError の派生を送出し、境界でだけ HTTP へ写す。こうしておくと、同じサービス層を CLI やバックグラウンドのループからも呼べる。
+The exception -> HTTP mapping is concentrated here and registered by main.py through register_exception_handlers(app). The service layer knows nothing of HTTP: it raises AppError subclasses, and only this boundary maps them onto HTTP. That keeps the same service layer callable from the CLI and from background loops.
 
-応答の本文はどの経路でも同じ形にする。{"error": {"code": ..., "message": ..., "details": ...}} の 1 つだけを返す。経路によって形が変わると、クライアントは複数の解釈を持たねばならず、必ずどちらかを取りこぼす。
+The response body has the same shape on every path: exactly one {"error": {"code": ..., "message": ..., "details": ...}}. If the shape varied by path, clients would have to hold two interpretations and would inevitably miss one of them.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class AppError(Exception):
-    """意図して送出する例外の基底。status_code と code がそのまま HTTP 応答へ写る。"""
+    """Base for deliberately raised exceptions. status_code and code map straight onto the HTTP response."""
 
     status_code: ClassVar[int] = 500
     code: ClassVar[str] = 'internal_error'
@@ -34,7 +34,7 @@ class AppError(Exception):
         super().__init__(self.message)
 
     def headers(self) -> dict[str, str]:
-        """応答へ添えるヘッダ。既定では無い。"""
+        """Headers to attach to the response. None by default."""
         return {}
 
     def to_body(self) -> dict[str, Any]:
@@ -42,7 +42,7 @@ class AppError(Exception):
 
 
 class BadRequest(AppError):
-    """要求の内容が不正。"""
+    """The request's content is invalid."""
 
     status_code = 400
     code = 'bad_request'
@@ -50,21 +50,21 @@ class BadRequest(AppError):
 
 
 class ArticleError(BadRequest):
-    """記事の内容が業務上の規則を満たしていない(開示の欠落・不正な指定など)。"""
+    """The article's content does not satisfy a business rule (a missing disclosure, an invalid selection, and so on)."""
 
     code = 'article_error'
     default_message = '記事の内容が不正です。'
 
 
 class MediaError(BadRequest):
-    """画像を受け付けられない(復号できない・大きすぎる・形式が不正など)。"""
+    """The image cannot be accepted (undecodable, too large, malformed, and so on)."""
 
     code = 'media_error'
     default_message = '画像を処理できませんでした。'
 
 
 class Unauthorized(AppError):
-    """認証されていない。誰であるかが分からない状態。"""
+    """Not authenticated: who the caller is remains unknown."""
 
     status_code = 401
     code = 'unauthorized'
@@ -75,7 +75,7 @@ class Unauthorized(AppError):
 
 
 class Forbidden(AppError):
-    """認証はされているが、その操作を行う資格が無い。"""
+    """Authenticated, but not eligible to perform the operation."""
 
     status_code = 403
     code = 'forbidden'
@@ -83,16 +83,16 @@ class Forbidden(AppError):
 
 
 class ArticleForbidden(Forbidden):
-    """記事に対する操作の資格が無い(速報の権限が無い、名乗れない報道社を指定した、など)。"""
+    """Not eligible for the operation on this article (no permission to flag breaking news, named a publisher the principal may not publish under, and so on)."""
 
     code = 'article_forbidden'
     default_message = 'この記事に対する操作を行う権限がありません。'
 
 
 class NotFound(AppError):
-    """対象が存在しない。
+    """The target does not exist.
 
-    閲覧の資格が無い対象にも 403 ではなくこれを返す。403 は「そこに何かがある」ことを教えてしまい、存在自体が秘密である限定公開の記事では、それだけで漏洩になる。
+    Returned instead of 403 for targets the caller is not eligible to view as well. A 403 reveals that something is there, and for a limited-visibility article whose very existence is secret, that alone is a leak.
     """
 
     status_code = 404
@@ -101,7 +101,7 @@ class NotFound(AppError):
 
 
 class Conflict(AppError):
-    """既存の状態と衝突する(slug の重複など)。"""
+    """Conflicts with existing state (a duplicate slug, for instance)."""
 
     status_code = 409
     code = 'conflict'
@@ -109,7 +109,7 @@ class Conflict(AppError):
 
 
 class QuotaExceeded(AppError):
-    """利用量の上限を超えた(1 ユーザーあたりの画像の合計バイト数など)。"""
+    """A usage quota was exceeded (the total image bytes per user, for instance)."""
 
     status_code = 413
     code = 'quota_exceeded'
@@ -117,7 +117,7 @@ class QuotaExceeded(AppError):
 
 
 class UnsupportedMediaType(AppError):
-    """受け付けられない形式。"""
+    """An unacceptable format."""
 
     status_code = 415
     code = 'unsupported_media_type'
@@ -125,7 +125,7 @@ class UnsupportedMediaType(AppError):
 
 
 class RateLimited(AppError):
-    """単位時間あたりの上限を超えた。retry_after を与えると Retry-After ヘッダで再試行までの秒数を伝える。"""
+    """A rate limit was exceeded. Passing retry_after reports the seconds until a retry in a Retry-After header."""
 
     status_code = 429
     code = 'rate_limited'
@@ -141,7 +141,7 @@ class RateLimited(AppError):
         return {'Retry-After': str(self.retry_after)}
 
 
-# HTTPException(FastAPI や Starlette が直接送出するもの)を AppError と同じ本文へ揃えるための対応表。
+# Maps HTTPException (the ones FastAPI and Starlette raise themselves) onto the same body as AppError.
 _HTTP_STATUS_CODES: Final[dict[int, str]] = {
     400: 'bad_request',
     401: 'unauthorized',
@@ -159,7 +159,7 @@ _HTTP_STATUS_CODES: Final[dict[int, str]] = {
 
 _INTERNAL_ERROR_MESSAGE: Final = 'サーバー内部でエラーが発生しました。'
 
-# HTTPException が呼び出し元の選んだ文言を持たない場合に使う既定の文言。
+# Default message used when an HTTPException carries no message chosen by its caller.
 _HTTP_STATUS_MESSAGES: Final[dict[int, str]] = {
     400: '要求の内容が不正です。',
     401: '認証が必要です。',
@@ -192,7 +192,7 @@ async def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
 
 
 def _standard_phrase(status_code: int) -> str | None:
-    """その状態コードの標準の理由句(404 なら 'Not Found')。未知のコードなら None。"""
+    """The standard reason phrase for a status code ('Not Found' for 404). None for an unknown code."""
     try:
         return HTTPStatus(status_code).phrase
     except ValueError:
@@ -200,10 +200,10 @@ def _standard_phrase(status_code: int) -> str | None:
 
 
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-    """FastAPI や Starlette が直接送出する HTTPException(経路が無い・メソッドが違う等)も AppError と同じ本文へ揃える。"""
+    """Give the HTTPExceptions FastAPI and Starlette raise themselves (no such route, wrong method, and the like) the same body as AppError."""
     code = _HTTP_STATUS_CODES.get(exc.status_code, 'http_error')
     details: dict[str, Any] | None = None
-    # detail を省いて送出された HTTPException には、Starlette が標準の理由句(英語)を入れる。これは呼び出し元が選んだ文言ではないため、自前の文言へ差し替える(そうしないと、経路が無いときだけ応答が英語になる)。
+    # Starlette fills in the standard English reason phrase when an HTTPException is raised without a detail. That is not a message the caller chose, so substitute our own; otherwise the response would turn English only when no route matches.
     detail = exc.detail if isinstance(exc.detail, str) and exc.detail else None
     if detail is not None and detail == _standard_phrase(exc.status_code):
         detail = None
@@ -211,7 +211,7 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
         message = detail
     else:
         message = _HTTP_STATUS_MESSAGES.get(exc.status_code, _standard_phrase(exc.status_code) or _INTERNAL_ERROR_MESSAGE)
-        # detail に構造化された値を入れて送出された場合も落とさずに渡す。
+        # A structured detail is passed through rather than dropped.
         details = {'detail': exc.detail} if exc.detail and not isinstance(exc.detail, str) else None
     if exc.status_code >= 500:
         logger.error('%s %s -> %d %s', request.method, request.url.path, exc.status_code, code)
@@ -219,24 +219,24 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
 
 
 async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    """要求の検証に失敗したときの応答。どの項目が不正なのかは details へ入れる。
+    """Response for a failed request validation. Which fields are invalid goes into details.
 
-    pydantic の errors() は例外オブジェクトなど JSON にできない値を ctx に含めることがあるため、そのまま載せない。
+    pydantic's errors() can put values that JSON cannot represent, such as exception objects, into ctx, so it is never embedded raw.
     """
     logger.info('%s %s -> 422 validation_error', request.method, request.url.path)
     return JSONResponse(status_code=422, content=_error_body('validation_error', '要求の形式が不正です。', {'errors': jsonable_encoder(exc.errors())}))
 
 
 async def _unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """想定外の例外。内容はログにだけ残し、応答には出さない(例外の文言にはテーブル名・SQL・ファイルパスなどが混ざる)。"""
+    """An unexpected exception. The details go to the log only and never into the response, because exception text mixes in table names, SQL and file paths."""
     logger.exception('%s %s -> 500 未処理の例外', request.method, request.url.path)
     return JSONResponse(status_code=500, content=_error_body('internal_error', _INTERNAL_ERROR_MESSAGE, None))
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    """例外ハンドラを FastAPI アプリへ登録する。
+    """Register the exception handlers on the FastAPI app.
 
-    Starlette は例外の型の MRO を辿ってハンドラを探すため、AppError を 1 つ登録すれば全ての派生が拾われる。
+    Starlette walks the exception type's MRO to find a handler, so registering AppError alone picks up every subclass.
     """
     app.add_exception_handler(AppError, _app_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)

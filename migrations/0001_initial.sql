@@ -1,34 +1,26 @@
--- instant-news 初期スキーマ。
--- 対象は単一 Discord コミュニティ(1 デプロイ = 1 guild)。settings 表の discord.guild_id(初期値は
--- config.yaml)が示すただ 1 つのサーバーを前提とするため、guild を跨ぐカラムは持たない。
--- 文字コードは絵文字・多言語を扱うため utf8mb4 に統一する。Discord のスノーフレーク ID は
--- 符号なし 64bit に収まるため BIGINT UNSIGNED で保持する。
+-- instant-news initial schema.
+-- One deployment serves one Discord community (1 deployment = 1 guild). Everything assumes the single Discord server named by discord.guild_id in the settings table (seeded from config.yaml), so no column spans guilds.
+-- utf8mb4 throughout, because emoji and multiple languages have to fit. Discord snowflake IDs fit in unsigned 64-bit, so they are held as BIGINT UNSIGNED.
 --
--- Discord のロールのスナップショット(discord_roles / user_roles)は 2 つの用途に使われ、
--- 扱いが正反対である点に注意する。
---   署名(articles.publisher_id) … 公開時に凍結する。記者が移籍しても過去記事の署名は動かさない。
---   権限判定(閲覧範囲・API キーの資格) … 要求のたびに現在のスナップショットを参照する。
---                                        管理者を外れたユーザーのキーはその時点で通らなくなる。
+-- The Discord role snapshot (discord_roles / user_roles) is used for two things that are handled in exactly opposite ways.
+--   Byline (articles.publisher_id): frozen at publication. A reporter transferring never moves the byline of a past article.
+--   Permission checks (visibility, API key eligibility): the current snapshot is consulted on every request. A user who loses admin has their keys stop working from that moment.
 
 SET NAMES utf8mb4;
 
--- --------------------------------------------------------------------------
--- 認証・ユーザー
--- --------------------------------------------------------------------------
+-- Authentication and users
 
--- 執筆者・閲覧者。独自パスワードは持たず、Discord アカウントを一意な識別子とする。
--- guild メンバーシップとロールはログイン時に取得してスナップショットし、閲覧権限の判定に用いる。
--- bot は照合で guild の全メンバーを洗い替えし、以後は参加・離脱・更新のイベントで追随するため、
--- 未ログインのメンバーもここに現れる
--- (articles:write:any で他人を著者に指定する際、その相手が実在する必要があるため)。
+-- Writers and viewers. There is no password of our own: the Discord account is the unique identifier.
+-- Guild membership and roles are fetched at login and snapshotted here, and the visibility check reads them.
+-- The bot's reconcile refreshes every guild member to match the current state and then follows join, leave and update events, so members who have never logged in appear here too (articles:write:any names someone else as the author, and that person has to exist).
 CREATE TABLE users (
     id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    discord_user_id   BIGINT UNSIGNED NOT NULL,                 -- Discord のユーザー スノーフレーク。
-    username          VARCHAR(32)     NOT NULL,                 -- Discord ユーザー名(例 someone)。
-    global_name       VARCHAR(32)     NULL,                     -- Discord の表示名(未設定なら NULL)。
-    avatar_hash       VARCHAR(64)     NULL,                     -- アバター URL の組み立てに用いるハッシュ。
-    is_guild_member   TINYINT(1)      NOT NULL DEFAULT 0,       -- 対象 guild に現在参加しているか。members 公開の判定に使う。bot が参加・離脱のイベントで即時に更新し、照合で補正する。
-    is_guild_owner    TINYINT(1)      NOT NULL DEFAULT 0,       -- guild のオーナーか。オーナーはロールに依らず全権を持つため管理者判定に要る。bot が guild の更新イベント(オーナーの移譲)で写し、照合で洗い替えする。
+    discord_user_id   BIGINT UNSIGNED NOT NULL,                 -- Discord user snowflake.
+    username          VARCHAR(32)     NOT NULL,                 -- Discord username (e.g. someone).
+    global_name       VARCHAR(32)     NULL,                     -- Discord display name (NULL when unset).
+    avatar_hash       VARCHAR(64)     NULL,                     -- Hash used to build the avatar URL.
+    is_guild_member   TINYINT(1)      NOT NULL DEFAULT 0,       -- Whether the user is currently in the target guild. Every non-public visibility check rests on it: members and restricted alike require current membership. The bot updates it immediately on join and leave events, and reconcile corrects the drift.
+    is_guild_owner    TINYINT(1)      NOT NULL DEFAULT 0,       -- Whether the user is the guild owner. An owner holds full authority regardless of roles, so the admin check needs this. The bot mirrors it from guild update events (ownership handover) and reconcile refreshes it to match the current state.
     created_at        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     last_login_at     DATETIME        NULL,
@@ -36,23 +28,20 @@ CREATE TABLE users (
     UNIQUE KEY uq_users_discord_user_id (discord_user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 対象 guild のロール一覧のキャッシュ。閲覧制限のロール選択 UI や表示名の解決に用いる。
--- 真実のソースは Discord 側であり、bot がロールの作成・更新・削除のイベントを受けて即時に写す。
--- イベントを取りこぼした場合に備え、bot は全ロールを定期的に照合して補正する。
--- permissions は Discord の権限ビットフィールド。API キーの発行資格を Administrator 権限で
--- 判定するために要る(これが無いと「このロールは管理者か」を知る手段が無い)。
+-- Cache of the target guild's role listing. Used by the role picker for access restriction and to resolve display names.
+-- The source of truth is Discord: the bot mirrors role create, update and delete events immediately. Against missed events it also reconciles every role periodically and corrects the drift.
+-- permissions is Discord's permission bitfield. It is needed to decide eligibility to issue an API key from the Administrator permission; without it there is no way to know whether a role is an administrator.
 CREATE TABLE discord_roles (
-    id          BIGINT UNSIGNED NOT NULL,                       -- Discord のロール スノーフレーク。
+    id          BIGINT UNSIGNED NOT NULL,                       -- Discord role snowflake.
     name        VARCHAR(100)    NOT NULL,
-    color       INT UNSIGNED    NOT NULL DEFAULT 0,             -- Discord のロールカラー(24bit RGB)。
-    position    INT             NOT NULL DEFAULT 0,             -- Discord 上の並び順。
-    permissions BIGINT UNSIGNED NOT NULL DEFAULT 0,             -- Discord の権限ビットフィールド。Administrator は 1 << 3。
-    synced_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, -- この行をイベントまたは照合で最後に書いた時刻。
+    color       INT UNSIGNED    NOT NULL DEFAULT 0,             -- Discord role color (24-bit RGB).
+    position    INT             NOT NULL DEFAULT 0,             -- Ordering within Discord.
+    permissions BIGINT UNSIGNED NOT NULL DEFAULT 0,             -- Discord permission bitfield. Administrator is 1 << 3.
+    synced_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, -- When an event or a reconcile last wrote this row.
     PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- ユーザーが保有する guild ロールのスナップショット。ログイン時に洗い替えし、以後は bot が
--- メンバーの更新イベントで追随させる。イベントを取りこぼした場合は bot の照合が補正する。
+-- Snapshot of the guild roles a user holds. Refreshed to match the current state at login, after which the bot follows member update events. A missed event is corrected by the bot's reconcile.
 CREATE TABLE user_roles (
     user_id   BIGINT UNSIGNED NOT NULL,
     role_id   BIGINT UNSIGNED NOT NULL,
@@ -62,70 +51,60 @@ CREATE TABLE user_roles (
     CONSTRAINT fk_user_roles_role FOREIGN KEY (role_id) REFERENCES discord_roles (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- サーバー側セッション。Cookie にはランダムな不透明トークンを載せ、DB にはその SHA-256 を保存する
--- (漏洩時にセッションを直接復元できないようにするため生値は保持しない)。
+-- Server-side session. The cookie carries a random opaque token and the DB stores its SHA-256; the raw value is never kept, so a leak of this table cannot reconstruct a session directly.
 CREATE TABLE sessions (
-    token_hash    CHAR(64)        NOT NULL,                     -- セッショントークンの SHA-256(16 進 64 桁)。
+    token_hash    CHAR(64)        NOT NULL,                     -- SHA-256 of the session token (64 hex digits).
     user_id       BIGINT UNSIGNED NOT NULL,
     created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at    DATETIME        NOT NULL,
     PRIMARY KEY (token_hash),
-    -- セッションの照合は token_hash(主キー)で引き、expires_at はその行で確かめる。期限切れの掃除は、その利用者が次にログインしたときに user_id で自分の行だけを消す形で行う。したがって expires_at だけを条件に全利用者の行を横断して引く経路は無く、その索引は持たない(全体を掃く処理を設ける時が来たら、そのときに索引も併せて足す)。
+    -- Session lookup goes by token_hash (the primary key) and expires_at is checked on that row. Expired rows are swept when their user next logs in, deleting only that user's own rows by user_id. So no query path reaches rows across all users on expires_at alone, and there is no index for it; if a sweep over the whole table is ever added, add the index along with it.
     KEY idx_sessions_user_id (user_id),
     CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- OAuth2 認可フロー中の一時状態。CSRF 対策の state と PKCE の code_verifier を短命に保持する。
+-- Transient state during the OAuth2 authorization flow: the anti-CSRF state and the PKCE code_verifier, held briefly.
 CREATE TABLE oauth_states (
-    state          CHAR(64)      NOT NULL,                      -- CSRF 対策のランダム state。
-    code_verifier  VARCHAR(128)  NULL,                          -- PKCE の code_verifier。
-    redirect_to    VARCHAR(512)  NULL,                          -- 認証後に戻す遷移先パス。
+    state          CHAR(64)      NOT NULL,                      -- Random anti-CSRF state.
+    code_verifier  VARCHAR(128)  NULL,                          -- PKCE code_verifier.
+    redirect_to    VARCHAR(512)  NULL,                          -- Redirect target path after login.
     created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at     DATETIME      NOT NULL,
     PRIMARY KEY (state),
     KEY idx_oauth_states_expires_at (expires_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- --------------------------------------------------------------------------
--- プラットフォームの設定
--- --------------------------------------------------------------------------
+-- Platform settings
 
--- 設定値の真実。config.yaml が持つのは、設定を DB から読むために先に要る値(server・database)と、
--- 実行環境と一体でありコンテナの外で決まる値(画像の保存先。名前付きボリュームのマウント先と一致していなければ
--- 意味を成さない)だけであり、それ以外の設定はこの表が持つ。管理者はフロントエンドから変更できる。
+-- The source of truth for setting values. config.yaml holds only the values needed before settings can be read from the DB (server, database) and the values that are part of the runtime environment and decided outside the container (the image storage path, which means nothing unless it matches the named volume's mount point); every other setting lives in this table, and an admin can change it from the frontend.
 --
--- config.yaml の対応する値は初回起動時の初期値としてのみ読まれ、以後は参照されない。起動のたびに設定ファイルで
--- 上書きすると、フロントエンドから変更した値が次の再起動で黙って元へ戻る。どちらが真実かを一方に決める必要がある。
+-- The matching values in config.yaml are read as seed values at first boot only and are never consulted again. Overwriting from the config file on every boot would silently revert a value changed from the frontend at the next restart, so one side has to be authoritative.
 --
--- 値を JSON で持つのは、設定が整数・文字列・ロール ID の配列と一様でないため。型・既定値・検証・
--- 秘密かどうか・変更に再起動を要するかは、コード側の登録簿(common/settings.py)が定義する。表は値だけを持つ。
--- 登録簿に無いキーは読み書きしないため、この表に古い行が残っていても無視される。
+-- Values are JSON because settings are not of one type: integers, strings, arrays of role IDs. Type, default, validation, whether it is secret and whether a change requires a restart are all defined by the code-side registry (common/settings.py); the table holds the value alone.
+-- Keys absent from the registry are never read or written, so stale rows left here are ignored.
 CREATE TABLE settings (
-    setting_key  VARCHAR(64)     NOT NULL,                     -- 設定の識別子(例 discord.bot.token)。
-    value        JSON            NOT NULL,                     -- 値。型は登録簿の定義が決め、書き込み時に検証する。
+    setting_key  VARCHAR(64)     NOT NULL,                     -- Setting identifier (e.g. discord.bot.token).
+    value        JSON            NOT NULL,                     -- The value. The registry definition decides the type, and it is validated on write.
     updated_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    updated_by   BIGINT UNSIGNED NULL,                         -- 最後に変更した利用者(初期値の投入なら NULL)。
+    updated_by   BIGINT UNSIGNED NULL,                         -- The user who last changed it (NULL when a seed value was bootstrapped).
     PRIMARY KEY (setting_key),
     KEY idx_settings_updated_by (updated_by),
     CONSTRAINT fk_settings_updated_by FOREIGN KEY (updated_by) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- --------------------------------------------------------------------------
--- API キー(機械クライアントの認証)
--- --------------------------------------------------------------------------
+-- API keys (authentication for machine clients)
 
--- 記事の自動投稿とプラットフォーム管理を行う機械クライアントの資格情報。
--- キーは発行者ユーザーに紐づく。独自アカウントを増やすのではなく、既存ユーザーの権限を
--- 機械が借りる形にすることで、責任の所在が必ず人間に残る。
--- 生値は保持せず SHA-256 のみを保存する(sessions と同じ設計を踏襲する)。
--- 発行時の資格を凍結してはならない。権限は要求のたびに user_roles / users を参照して判定する。
+-- Credentials for the machine clients that post articles automatically and administer the platform.
+-- A key belongs to the user who issued it. Rather than adding accounts of its own, the machine borrows an existing user's permissions, so responsibility always stays with a human.
+-- The raw value is not kept; only its SHA-256 is stored, following the same design as sessions.
+-- Eligibility at issue time must not be frozen: permissions are decided on every request from user_roles / users.
 CREATE TABLE api_tokens (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    user_id       BIGINT UNSIGNED NOT NULL,                     -- 発行者。権限判定と署名の既定値の両方に使う。
-    token_hash    CHAR(64)        NOT NULL,                     -- キーの SHA-256(16 進 64 桁)。
-    token_prefix  VARCHAR(12)     NOT NULL,                     -- 一覧でキーを識別するための先頭数文字(平文)。
-    name          VARCHAR(100)    NOT NULL,                     -- 用途が分かる名前(例 「相場自動投稿」「広告管理アプリ」)。
+    user_id       BIGINT UNSIGNED NOT NULL,                     -- The issuer. Used both for permission checks and as the default byline.
+    token_hash    CHAR(64)        NOT NULL,                     -- SHA-256 of the key (64 hex digits).
+    token_prefix  VARCHAR(12)     NOT NULL,                     -- The leading characters in the clear, so the key can be identified in the listing.
+    name          VARCHAR(100)    NOT NULL,                     -- A name that says what it is for (for example market-prices auto-post, or ad management app).
     created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_used_at  DATETIME        NULL,
     expires_at    DATETIME        NULL,
@@ -136,16 +115,14 @@ CREATE TABLE api_tokens (
     CONSTRAINT fk_api_tokens_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- キーに与えたスコープ。発行資格(誰が発行できるか)とスコープ(何ができるか)は別の軸として扱う。
---   articles:write      … 記事の作成・更新。著者はキーの所有者に固定。投稿者が自分で発行できる。
---   articles:write:any  … 著者・報道社を自由に指定した記事の作成・更新。管理者のみが発行できる。
---   ads:admin           … 広告の登録・更新・停止・実績取得。管理者のみが発行できる。
---   taxonomy:admin      … カテゴリ・タグ・報道社の管理。管理者のみが発行できる。
---   settings:admin      … プラットフォームの設定(settings 表)の読み取りと変更。管理者のみが発行できる。
--- 管理者が発行できるスコープを 1 つに束ねてはならない。広告管理アプリに与えるのは ads:admin だけであり、
--- 記事の署名を偽造する力(articles:write:any)を混ぜて渡してはならない。
--- settings:admin は admin.role_ids を書き換えられる、すなわち管理者の資格そのものを配れるため、
--- 他のどのスコープよりも強い。実質的に管理者権限の委譲であることを踏まえて渡すこと。
+-- The scopes granted to a key. Eligibility to issue (who may hand out a key) and scope (what the key may do) are separate axes.
+--   articles:write      Create and update articles. The author is fixed to the key's owner. A poster can issue this for themselves.
+--   articles:write:any  Create and update articles naming any author and publisher. Only an admin can issue it.
+--   ads:admin           Register, update and stop ads, and read their performance stats. Only an admin can issue it.
+--   taxonomy:admin      Manage categories, tags and publishers. Only an admin can issue it.
+--   settings:admin      Read and change the platform settings (the settings table). Only an admin can issue it.
+-- The scopes an admin can issue must never be bundled into one. An ad management app is given ads:admin and nothing else; the power to forge an article's byline (articles:write:any) must not be mixed in with it.
+-- settings:admin can rewrite admin.role_ids, that is, hand out admin eligibility itself, which makes it stronger than any other scope. Grant it knowing that it is effectively delegating admin permissions.
 CREATE TABLE api_token_scopes (
     token_id  BIGINT UNSIGNED NOT NULL,
     scope     ENUM('articles:write','articles:write:any','ads:admin','taxonomy:admin','settings:admin') NOT NULL,
@@ -153,56 +130,46 @@ CREATE TABLE api_token_scopes (
     CONSTRAINT fk_api_token_scopes_token FOREIGN KEY (token_id) REFERENCES api_tokens (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- --------------------------------------------------------------------------
--- 画像
--- --------------------------------------------------------------------------
+-- Images
 
--- 取り込んだ画像の登録簿。実体はファイルシステム上に内容アドレスで置く
--- (media/{hash[0:2]}/{hash[2:4]}/{hash}.{variant}.webp)。
--- 受け取ったバイト列をそのまま保存せず、デコードして WebP に再エンコードしたものだけを保存する。
--- これによりポリグロットファイルが破壊され、EXIF が落ち、配信時の Content-Type を自分で決められる。
--- content_hash は変換後 WebP の SHA-256 であり、変換前の原本のハッシュではない(配信するものと一致させる)。
--- 公開・非公開は配信時の判断であり保存は分けない。同じバイト列が公開のカバーにも本文中の画像にも
--- なりうるため、保存を分けると実体が二重化する。
+-- Catalogue of ingested images. The blob itself sits content-addressed on the filesystem (media/{hash[0:2]}/{hash[2:4]}/{hash}.{variant}.webp).
+-- The received bytes are never stored as they arrived: only the result of decoding them and re-encoding to WebP is. That destroys polyglot files, drops EXIF, and lets us decide the Content-Type we serve.
+-- content_hash is the SHA-256 of the converted WebP, not a hash of the original pre-conversion file, so it matches what is actually served.
+-- Public versus non-public is decided when serving and does not split storage: the same bytes can be both a public cover image and an image inside a body, and splitting storage would duplicate the blob.
 CREATE TABLE media (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    content_hash  CHAR(64)        NOT NULL,                     -- 変換後 WebP(原寸版)の SHA-256。保存先と URL の決定に使う。
+    content_hash  CHAR(64)        NOT NULL,                     -- SHA-256 of the converted WebP (the full-size rendition). Decides the storage path and the URL.
     width         INT UNSIGNED    NOT NULL,
     height        INT UNSIGNED    NOT NULL,
-    byte_size     BIGINT UNSIGNED NOT NULL,                     -- 原寸版のバイト数。利用量の集計に使う。
-    is_public     TINYINT(1)      NOT NULL DEFAULT 0,           -- 1 なら認証なしで配信する(カバー・広告・ロゴ・アイコン)。
-    is_animated   TINYINT(1)      NOT NULL DEFAULT 0,           -- アニメーション WebP か。変種を生成しないため配信時に区別する。
-    is_lossless   TINYINT(1)      NOT NULL DEFAULT 0,           -- 可逆で符号化したか(ロゴ・アイコンなどの線画)。
-    source_url    VARCHAR(1000)   NULL,                         -- 取り込み元(保存時に取得した場合)。追跡用。
+    byte_size     BIGINT UNSIGNED NOT NULL,                     -- Byte size of the full-size rendition. Used to tally quota usage.
+    is_public     TINYINT(1)      NOT NULL DEFAULT 0,           -- 1 means served without authentication (cover images, ads, logos, icons).
+    is_animated   TINYINT(1)      NOT NULL DEFAULT 0,           -- Whether this is an animated WebP. No variants are generated for one, so serving has to tell them apart.
+    is_lossless   TINYINT(1)      NOT NULL DEFAULT 0,           -- Whether it was encoded losslessly (line art such as logos and icons).
+    source_url    VARCHAR(1000)   NULL,                         -- Where it was ingested from, when it was fetched at save time. Kept for tracing.
     uploaded_by   BIGINT UNSIGNED NOT NULL,
-    via_token_id  BIGINT UNSIGNED NULL,                         -- API 経由の場合の発行元キー(Web UI からなら NULL)。
+    via_token_id  BIGINT UNSIGNED NULL,                         -- The issuing key when it came in through the API (NULL from the web UI).
     created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_media_content_hash (content_hash),
     KEY idx_media_uploaded_by (uploaded_by),
-    -- source_url には索引を張らない。重複排除は取り込み元の URL ではなく変換後の content_hash で行うため(同じ画像が別々の URL から来ても実体は 1 つに畳む)、この列を条件に行を引く経路が無い。取り込み元を知りたい場面は、既に引き当てた行の列を読むだけで足りる。VARCHAR(1000) の前方 255 文字は utf8mb4 では 1 項目あたり最大 1020 バイトに及び、読む者の無い索引に画像を取り込むたびその費用を払うことになる。
+    -- No index on source_url. Dedupe keys on the post-conversion content_hash rather than the ingest URL (the same image arriving from two URLs collapses to one blob), so no query path reaches a row through this column; when the ingest source is wanted, reading the column off a row already looked up is enough. A 255-character prefix of VARCHAR(1000) runs to 1020 bytes per entry under utf8mb4, and every image ingest would pay that cost for an index no one reads.
     CONSTRAINT fk_media_uploader FOREIGN KEY (uploaded_by)  REFERENCES users (id)      ON DELETE RESTRICT,
     CONSTRAINT fk_media_token    FOREIGN KEY (via_token_id) REFERENCES api_tokens (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- --------------------------------------------------------------------------
--- 分類(報道社・カテゴリ・タグ・連載)
--- --------------------------------------------------------------------------
+-- Taxonomy (publishers, categories, tags, series)
 
--- 記事を発行する報道社。所属は Discord のロールで表すため role_id で参照する。
--- ロールから導けるのは所属者・名前・色・並び順だけであり、ロゴ・slug・紹介文・立場は導けないため
--- テーブルが要る。ロールを主キーにはせず、参照する形にする。
--- role_id を ON DELETE CASCADE にしてはならない。Discord でロールを削除すると bot がロールの削除
--- イベントを受けて discord_roles の行を消し、CASCADE なら報道社が消滅して過去記事の署名が全て失われる。
--- 解散した報道社の過去記事は残るのが正しい。
+-- The publishers that publish articles. Affiliation is expressed by a Discord role, so it is referenced through role_id.
+-- A role yields only its members, name, color and ordering; the logo, slug, description and stance cannot be derived from it, which is why this table exists. The role is referenced rather than made the primary key.
+-- role_id must never be ON DELETE CASCADE. Deleting a role in Discord makes the bot drop the discord_roles row on the role delete event, and under CASCADE the publisher would vanish with it and every past article's byline would be lost. The past articles of a dissolved publisher are meant to survive.
 CREATE TABLE publishers (
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    role_id      BIGINT UNSIGNED NULL,                          -- 所属を表す Discord ロール。解散後も報道社は残すため NULL 許容。
+    role_id      BIGINT UNSIGNED NULL,                          -- The Discord role that expresses affiliation. Nullable because a publisher outlives its dissolution.
     slug         VARCHAR(64)     NOT NULL,
-    name         VARCHAR(100)    NOT NULL,                      -- 表示名。ロール名とは独立に持つ。
+    name         VARCHAR(100)    NOT NULL,                      -- Display name, held independently of the role name.
     description  VARCHAR(1000)   NULL,
     logo_url     VARCHAR(1000)   NULL,
-    stance       ENUM('independent','state') NOT NULL DEFAULT 'independent',  -- 立場。state は国営メディア等、記事面にラベルを添える。
+    stance       ENUM('independent','state') NOT NULL DEFAULT 'independent',  -- Stance. state covers state media and the like; the article page carries a label.
     created_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -211,41 +178,38 @@ CREATE TABLE publishers (
     CONSTRAINT fk_publishers_role FOREIGN KEY (role_id) REFERENCES discord_roles (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 記事の主分類。記事は単一のカテゴリを必ず持つ(articles.category_id は NOT NULL)。
--- 「この記事は何欄の記事か」が一意に定まり、通知先の振り分けが多重化しない。
--- カテゴリ集合はデプロイごとに異なるため、コアは固定せず taxonomy:admin スコープの管理用 API で編集する。
--- 設定ファイルではなく DB に置くのは、articles.category_id が外部キーで参照する実体であり、
--- 設定ファイルに置くと参照整合性を保てないため。
+-- The article's primary classification. An article always has exactly one category (articles.category_id is NOT NULL), so which section an article belongs to has a single answer and notification routing never multiplies.
+-- The set of categories differs from deployment to deployment, so the core does not fix it: it is edited through the admin API under the taxonomy:admin scope.
+-- It lives in the DB rather than the config file because articles.category_id is a foreign key to this entity, and referential integrity cannot be kept against a config file.
 CREATE TABLE categories (
     id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     slug               VARCHAR(64)     NOT NULL,
     name               VARCHAR(64)     NOT NULL,
-    position           INT             NOT NULL DEFAULT 0,      -- ナビゲーションでの並び順。
-    notify_channel_id  BIGINT UNSIGNED NULL,                    -- この欄の記事を流す主チャンネル(未設定なら、この欄は通知しない)。
-    include_in_latest  TINYINT(1)      NOT NULL DEFAULT 1,      -- 0 ならトップの新着一覧に載せない。相場のような定期記事が横断的な流れを埋めるのを防ぐ。
+    position           INT             NOT NULL DEFAULT 0,      -- Ordering in the navigation.
+    notify_channel_id  BIGINT UNSIGNED NULL,                    -- The primary channel this section's articles go to (unset means the section is not notified).
+    include_in_latest  TINYINT(1)      NOT NULL DEFAULT 1,      -- 0 keeps the section out of the home page's latest listing, so recurring articles such as market prices do not fill the site-wide latest feed.
     PRIMARY KEY (id),
     UNIQUE KEY uq_categories_slug (slug),
     KEY idx_categories_position (position)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 主分類以外の分類軸。記事は複数のタグを持てる(article_tags)。
--- notify_channel_id を設定したタグは、カテゴリが決める主チャンネルに加えて追加の宛先になる。
--- 宛先はカテゴリとタグの notify_channel_id を重複排除した集合とし、1 チャンネルにつき 1 通だけ送る。
--- description と icon_url はタグページ(話題の特設ページ)に出す。
+-- A classification axis other than the primary classification. An article can carry several tags (article_tags).
+-- A tag with notify_channel_id set becomes an additional destination channel on top of the primary channel the category decides.
+-- The recipients are the deduplicated set of the category's and the tags' notify_channel_id, and each channel receives exactly one message.
+-- description and icon_url are shown on the tag page, the topic's own hub.
 CREATE TABLE tags (
     id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     slug               VARCHAR(64)     NOT NULL,
     name               VARCHAR(64)     NOT NULL,
-    description        VARCHAR(1000)   NULL,                    -- タグページに出す説明文。
-    icon_url           VARCHAR(1000)   NULL,                    -- タグページ・一覧に出すアイコン。
-    notify_channel_id  BIGINT UNSIGNED NULL,                    -- このタグが付いた記事の新着を送る追加の Discord チャンネル(未設定なら振り分けに関与しない)。
+    description        VARCHAR(1000)   NULL,                    -- Description shown on the tag page.
+    icon_url           VARCHAR(1000)   NULL,                    -- Icon shown on the tag page and in listings.
+    notify_channel_id  BIGINT UNSIGNED NULL,                    -- An additional Discord channel that receives the latest articles carrying this tag (unset means the tag takes no part in routing).
     PRIMARY KEY (id),
     UNIQUE KEY uq_tags_slug (slug)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- タグの購読。チャンネル単位のプッシュ(tags.notify_channel_id)に対し、こちらは個人単位のプッシュ。
--- 購読したタグの記事が公開されると bot が DM を送る。
--- チャンネルを持たない小さなタグに対しても成立するため、両者は排他ではない。
+-- Tag subscriptions. Where tags.notify_channel_id pushes per channel, this pushes per person: the bot DMs the subscriber when an article carrying a subscribed tag is published.
+-- It works for a small tag that has no channel of its own, so the two are not exclusive.
 CREATE TABLE tag_subscriptions (
     user_id     BIGINT UNSIGNED NOT NULL,
     tag_id      BIGINT UNSIGNED NOT NULL,
@@ -256,7 +220,7 @@ CREATE TABLE tag_subscriptions (
     CONSTRAINT fk_tag_subscriptions_tag  FOREIGN KEY (tag_id)  REFERENCES tags (id)  ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 連載(マガジン)。順序を持つ記事のまとまりを表す軸で、カテゴリ・タグとは別に併存する。
+-- Series. An axis for an ordered group of articles, coexisting alongside categories and tags.
 CREATE TABLE series (
     id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     slug             VARCHAR(64)     NOT NULL,
@@ -272,67 +236,61 @@ CREATE TABLE series (
     CONSTRAINT fk_series_owner FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- --------------------------------------------------------------------------
--- 記事
--- --------------------------------------------------------------------------
+-- Articles
 
--- 記事本体。本文は GitHub Flavored Markdown のソースを保持し、表示用 HTML はレンダリング結果の
--- キャッシュとして持つ(再レンダリング可能なため権威は body_md 側)。
--- status は 下書き→レビュー→(予約)→公開→アーカイブ の状態遷移を表す。
--- visibility は Discord ロールに基づく閲覧範囲を表す:
---   public     … 未ログインを含む誰でも閲覧可
---   members    … 対象 guild に参加しているログイン済みユーザーのみ
---   restricted … article_visibility_roles に列挙したロールのいずれかを持つユーザーのみ
--- ただしカバー画像(cover_image_url)は Discord embed に出すため認証なしで配信される。
--- restricted 記事であってもカバーは URL を知る者に見えるため、機密記事のカバーに中身が分かる画像を
--- 選んではならない。本文中の画像は article_media を介して本文と同じ判定を受ける。
--- publisher_id は公開時に凍結する。著者の現在のロールから報道社を引く実装にすると、記者が移籍した
--- 瞬間に過去記事の署名が遡って書き換わる。
+-- The article itself. The body is held as GitHub Flavored Markdown source and the display HTML is a cache of the render; body_md is authoritative because the HTML can always be regenerated from it.
+-- status is the state transition draft -> in review -> (scheduled) -> published -> archived.
+-- visibility is the Discord-role-based visibility:
+--   public      anyone, including logged-out visitors
+--   members     only logged-in users who are in the target guild
+--   restricted  only logged-in users in the target guild who also hold one of the roles listed in article_visibility_roles
+-- The cover image (cover_image_url) is the exception: it goes into the Discord embed, so it is served without authentication. Even on a restricted article the cover is visible to anyone who knows its URL, so never choose a cover that gives away the contents of a confidential article. Images inside the body go through article_media and get the same check as the body.
+-- publisher_id is frozen at publication. Deriving the publisher from the author's current roles would rewrite the bylines of past articles the moment a reporter transfers.
 CREATE TABLE articles (
     id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    slug             VARCHAR(200)    NOT NULL,                  -- パーマリンク用の一意な slug。
-    author_id        BIGINT UNSIGNED NOT NULL,                  -- 責任の所在。機械が投稿した記事でも必ず人間に紐づく。
-    publisher_id     BIGINT UNSIGNED NULL,                      -- 発行した報道社。公開時に凍結する。
-    category_id      BIGINT UNSIGNED NOT NULL,                  -- 主分類。単一必須。
+    slug             VARCHAR(200)    NOT NULL,                  -- Unique slug for the permalink.
+    author_id        BIGINT UNSIGNED NOT NULL,                  -- Where responsibility rests. Even a machine-posted article is always tied to a human.
+    publisher_id     BIGINT UNSIGNED NULL,                      -- The publisher that published it. Frozen at publication.
+    category_id      BIGINT UNSIGNED NOT NULL,                  -- Primary classification. Exactly one, required.
     series_id        BIGINT UNSIGNED NULL,
-    series_position  INT             NULL,                      -- 連載内での並び順。
+    series_position  INT             NULL,                      -- Position within the series.
     title            VARCHAR(300)    NOT NULL,
-    excerpt          VARCHAR(500)    NULL,                      -- 要約。一覧・Discord embed・記事面のリード文に共通で使う。
-    body_md          LONGTEXT        NOT NULL,                  -- GFM ソース(権威)。
-    body_html        LONGTEXT        NULL,                      -- レンダリング済み HTML のキャッシュ。
+    excerpt          VARCHAR(500)    NULL,                      -- Excerpt. Shared by the listing, the Discord embed and the lede on the article page.
+    body_md          LONGTEXT        NOT NULL,                  -- GFM source (authoritative).
+    body_html        LONGTEXT        NULL,                      -- Cache of the rendered HTML.
     cover_image_url  VARCHAR(1000)   NULL,
     status           ENUM('draft','in_review','scheduled','published','archived') NOT NULL DEFAULT 'draft',
     visibility       ENUM('public','members','restricted')     NOT NULL DEFAULT 'public',
-    byline_mode      ENUM('author','publisher') NOT NULL DEFAULT 'author',  -- publisher なら表示は報道社名のみ。author_id は保持され監査では追える。
-    is_breaking      TINYINT(1)      NOT NULL DEFAULT 0,        -- 速報。通知時に設定したロールを mention する。
-    is_sponsored     TINYINT(1)      NOT NULL DEFAULT 0,        -- 記事広告(タイアップ記事)。コアが「広告」表示を描画し消せないようにする。
-    sponsor_name     VARCHAR(100)    NULL,                      -- 誰の広告か。is_sponsored=1 なら必須(「広告」とだけ書いても開示にならない)。
+    byline_mode      ENUM('author','publisher') NOT NULL DEFAULT 'author',  -- publisher displays the publisher name only. author_id is retained and stays traceable in an audit.
+    is_breaking      TINYINT(1)      NOT NULL DEFAULT 0,        -- Breaking news. The notification mentions the configured role.
+    is_sponsored     TINYINT(1)      NOT NULL DEFAULT 0,        -- A sponsored article. The core draws the Sponsored label so that it cannot be removed.
+    sponsor_name     VARCHAR(100)    NULL,                      -- Whose ad it is. Required when is_sponsored=1: the Sponsored label on its own is not a disclosure.
     view_count       BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    scheduled_at     DATETIME        NULL,                      -- status=scheduled のときの公開予定時刻。
-    published_at     DATETIME        NULL,                      -- 最初に公開された時刻。
+    scheduled_at     DATETIME        NULL,                      -- When it is due to publish, for status=scheduled.
+    published_at     DATETIME        NULL,                      -- When it was first published.
     created_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_articles_slug (slug),
-    -- 著者・報道社で絞る一覧は、いずれも status='published' を伴い published_at の降順に並ぶ。status と published_at まで含めると、絞り込みと並び替えの両方が索引だけで済む(status で等値、published_at で整列)。先頭が author_id / publisher_id であることは変わらないため、外部キーが要求する索引も兼ねる。
+    -- Listings filtered by author or by publisher both carry status='published' and sort by published_at descending. Taking status and published_at into the index lets the filter and the sort come from the index alone (equality on status, ordering on published_at). author_id / publisher_id stay leftmost, so these double as the index the foreign key requires.
     KEY idx_articles_author_status_published_at (author_id, status, published_at),
     KEY idx_articles_publisher_status_published_at (publisher_id, status, published_at),
-    -- 連載の一覧は series_position の NULL を末尾へ送ってから並べるため、索引の並び(NULL が先頭)と一致しない。series_position を足しても整列には使えないので、外部キーのための索引に留める。
+    -- A series listing pushes NULL series_position to the end before sorting, which does not match the index order (NULLs first), so adding series_position would not serve the sort; this stays an index for the foreign key only.
     KEY idx_articles_series_id (series_id),
-    -- 新着一覧の主経路。末尾には主キー(id)が暗黙に付くため、この索引を逆向きに走査すると published_at の降順・同時刻なら id の降順が得られ、一覧の ORDER BY published_at DESC, id DESC と厳密に一致する。降順索引にすると id が昇順のままになり、同時刻の並びが崩れるため昇順で持つ。
+    -- The main query path for the latest listing. The primary key (id) is implicitly appended, so scanning this index backwards yields published_at descending and, within the same instant, id descending, exactly matching the listing's ORDER BY published_at DESC, id DESC. A descending index would leave id ascending and break the ordering of ties, so it is held ascending.
     KEY idx_articles_status_published_at (status, published_at),
-    -- ナビゲーションが欄ごとの記事数を数える経路(category_id と status の等値)。?category= の一覧では published_at の整列も担う。
+    -- The query path by which the navigation counts articles per section (equality on category_id and status). For a ?category= listing it also carries the published_at ordering.
     KEY idx_articles_category_status_published_at (category_id, status, published_at),
-    -- 公開予約の取り込みは status='scheduled' かつ scheduled_at が現在以前の行を、scheduled_at の順に拾う。scheduled_at だけの索引では、公開後も scheduled_at が残る(公開時に消さない)以上、範囲に過去の予約が全て入って絞り込めず、実際に選ばれるのは status を先頭に持つ別の索引の方であり、この索引は使われないまま書き込みを重くするだけになる。status を先頭に置くと範囲と整列が索引だけで完結し、id しか読まないこの問い合わせは行本体に触れずに済む。
+    -- Scheduled publishing picks up rows with status='scheduled' whose scheduled_at is at or before now, in scheduled_at order. An index on scheduled_at alone would narrow nothing: scheduled_at is left in place after publication, so the range would sweep in every past schedule, another index leading with status would be chosen instead, and this one would go unused while still making writes heavier. Leading with status keeps both the range and the ordering inside the index, and this query, which reads nothing but id, never touches the row body.
     KEY idx_articles_status_scheduled_at (status, scheduled_at),
-    FULLTEXT KEY ftx_articles_title_body (title, body_md) WITH PARSER ngram,  -- 日本語を含む全文検索用。
+    FULLTEXT KEY ftx_articles_title_body (title, body_md) WITH PARSER ngram,  -- Full-text search, Japanese included.
     CONSTRAINT fk_articles_author    FOREIGN KEY (author_id)    REFERENCES users (id)      ON DELETE RESTRICT,
     CONSTRAINT fk_articles_publisher FOREIGN KEY (publisher_id) REFERENCES publishers (id) ON DELETE RESTRICT,
     CONSTRAINT fk_articles_category  FOREIGN KEY (category_id)  REFERENCES categories (id) ON DELETE RESTRICT,
     CONSTRAINT fk_articles_series    FOREIGN KEY (series_id)    REFERENCES series (id)     ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 記事とタグの多対多。
+-- Many-to-many between articles and tags.
 CREATE TABLE article_tags (
     article_id  BIGINT UNSIGNED NOT NULL,
     tag_id      BIGINT UNSIGNED NOT NULL,
@@ -342,9 +300,8 @@ CREATE TABLE article_tags (
     CONSTRAINT fk_article_tags_tag     FOREIGN KEY (tag_id)     REFERENCES tags (id)     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- visibility=restricted の記事について、閲覧を許可する Discord ロールの集合。
--- ここに列挙したロールのいずれかを持つユーザーだけが閲覧できる。
--- 報道社は Discord ロールであるため、その報道社ロールをここに指定すれば社内限定記事が成立する。
+-- For a visibility=restricted article, the set of Discord roles allowed to read it. Holding one of these roles is necessary but not sufficient: server/app/visibility.py requires current guild membership before the role, because a user who has left the guild can leave a user_roles row behind and would otherwise go on reading.
+-- A publisher is itself a Discord role, so naming that publisher's role here yields an article readable only inside that publisher.
 CREATE TABLE article_visibility_roles (
     article_id  BIGINT UNSIGNED NOT NULL,
     role_id     BIGINT UNSIGNED NOT NULL,
@@ -354,35 +311,33 @@ CREATE TABLE article_visibility_roles (
     CONSTRAINT fk_avr_role    FOREIGN KEY (role_id)    REFERENCES discord_roles (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 記事の改版履歴。編集のたびにタイトル・本文・抜粋のスナップショットを追記し、復元と差分表示を可能にする。
--- via_token_id は「誰が実際に投稿したか」の監査証跡。editor_id は「誰の名前で書かれたか」であって
--- 両者は別物であり、articles:write:any が他人の署名で記事を出せる以上、これが無いと説明責任が崩れる。
--- is_correction は単なる更新と訂正を区別する。訂正された記事は記事面の冒頭で明示する。
+-- Revision history of an article. Every edit appends a snapshot of the title, body and excerpt, which is what makes restore and diff display possible.
+-- via_token_id is the audit trail of who actually posted; editor_id is whose name it was written under. The two are different things, and since articles:write:any can publish an article under someone else's byline, accountability cannot be traced without via_token_id.
+-- is_correction separates a plain update from a correction. A corrected article says so at the top of the article page.
 CREATE TABLE article_revisions (
     id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     article_id       BIGINT UNSIGNED NOT NULL,
-    revision_number  INT             NOT NULL,                  -- 記事内で 1 から連番。
+    revision_number  INT             NOT NULL,                  -- Sequential from 1 within the article.
     editor_id        BIGINT UNSIGNED NOT NULL,
-    via_token_id     BIGINT UNSIGNED NULL,                      -- API 経由の場合の発行元キー(Web UI からの編集なら NULL)。
+    via_token_id     BIGINT UNSIGNED NULL,                      -- The issuing key when it came in through the API (NULL for an edit from the web UI).
     title            VARCHAR(300)    NOT NULL,
     body_md          LONGTEXT        NOT NULL,
     excerpt          VARCHAR(500)    NULL,
-    note             VARCHAR(500)    NULL,                      -- 編集内容のメモ(任意)。訂正の場合は何を訂正したかを書く。
-    is_correction    TINYINT(1)      NOT NULL DEFAULT 0,        -- 訂正か。単なる更新と区別し、記事面の冒頭に出す。
+    note             VARCHAR(500)    NULL,                      -- Optional note on the edit. For a correction, it records what was corrected.
+    is_correction    TINYINT(1)      NOT NULL DEFAULT 0,        -- Whether this is a correction. Distinguished from a plain update and shown at the top of the article page.
     created_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_article_revisions_article_number (article_id, revision_number),
     KEY idx_article_revisions_editor_id (editor_id),
-    -- API キーごとの投稿数の制限は、そのキーが直近 1 時間に作った改版を数え、最も古いものの時刻を求める。created_at まで含めると、期間の絞り込みも数え上げも索引だけで完結し、行本体を読まずに済む。先頭が via_token_id であることは変わらないため、外部キーが要求する索引も兼ねる。
+    -- The per-API-key rate limit counts the revisions that key created in the last hour and takes the timestamp of the oldest. Taking created_at into the index keeps both the time-range filter and the count inside the index, with no need to read the row body. via_token_id stays leftmost, so this doubles as the index the foreign key requires.
     KEY idx_article_revisions_via_token_id_created_at (via_token_id, created_at),
     CONSTRAINT fk_article_revisions_article FOREIGN KEY (article_id)   REFERENCES articles (id)   ON DELETE CASCADE,
     CONSTRAINT fk_article_revisions_editor  FOREIGN KEY (editor_id)    REFERENCES users (id)      ON DELETE RESTRICT,
     CONSTRAINT fk_article_revisions_token   FOREIGN KEY (via_token_id) REFERENCES api_tokens (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 記事が参照する画像。配信時の権限判定に使うため、推測ではなく事実として保持する。
--- 本文の保存時に body_md を走査して積む。行を消してはならない。編集で本文から画像を外しても、
--- 過去の改版はその画像を参照し続けており、削除すると改版履歴を開いた瞬間に画像が 404 になる。
+-- The images an article references. Serving decides permissions from this, so it is recorded as fact rather than inferred.
+-- Rows are written by scanning body_md when the body is saved, and must never be deleted: an edit that drops an image from the body leaves past revisions still referencing it, and deleting the row would 404 the image the moment someone opens the revision history.
 CREATE TABLE article_media (
     article_id  BIGINT UNSIGNED NOT NULL,
     media_id    BIGINT UNSIGNED NOT NULL,
@@ -392,107 +347,88 @@ CREATE TABLE article_media (
     CONSTRAINT fk_article_media_media   FOREIGN KEY (media_id)   REFERENCES media (id)    ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- --------------------------------------------------------------------------
--- Discord 連携(通知・スレッド・リアクション)
--- --------------------------------------------------------------------------
+-- Discord integration (notification posts, threads, reactions)
 
--- 記事公開時の通知の宛先と、bot が送った通知メッセージ・スレッドの対応。
--- コメントは専用テーブルを持たず Discord スレッドに委譲するため、その参照点をここで保持する。
+-- The notification recipients when an article is published, and the mapping to the notification message and thread the bot sent.
+-- Comments get no table of their own and are delegated to Discord threads, so the reference point to them is held here.
 --
--- この表は送信の待ち行列(アウトボックス)を兼ねる。server は公開時に宛先を解決して
--- message_id = NULL の行を積むだけで、実際の送信は bot が行い message_id を埋める。
--- server から bot へ直接イベントを送る方式は、bot が落ちている間のイベントを取りこぼす。
--- DB を待ち行列にすれば、bot は復帰後に未送信の行を拾って送れる。
---   message_id IS NULL … 未送信。bot が拾う対象。
---   message_id IS NOT NULL … 送信済み。
+-- This table doubles as the send queue (an outbox). At publication the server only resolves the recipients and enqueues rows with message_id = NULL; the bot does the sending and fills message_id in.
+-- Pushing events from server to bot directly would miss every event that arrived while the bot was down. With the DB as the queue, the bot picks up the unsent rows once it is back.
+--   message_id IS NULL      unsent; what the bot picks up.
+--   message_id IS NOT NULL  sent.
 --
--- 宛先は記事のカテゴリとタグの notify_channel_id を重複排除した集合であり、1 記事が複数チャンネルへ
--- 通知されうる。その場合この表は記事につき複数行を持ち、通知ごとにスレッドと投票を独立して保持する。
--- 記事としての賛否は、当該記事の全行を合計して求める。
--- 宛先が 0 件の記事はどこにも通知しない(既定チャンネルへのフォールバックは持たない)。
+-- The recipients are the deduplicated set of the notify_channel_id of the article's category and tags, so one article can be notified to several channels. Then this table holds several rows for that article, each keeping its thread and its votes independently, and the article's up/down votes are the sum over all of its rows.
+-- An article with zero recipients is notified nowhere; there is no fallback to a default channel.
 --
--- 投票は通知メッセージに付いた :arrow_up:(賛成)と :arrow_down:(反対)のリアクションであり、
--- それ以外の絵文字は数えない。bot が Discord のイベント(リアクションの増減)を受けて数え直し、
--- その時点の実際の数で上書きする。イベントは差分を運ばないものがあるため加減算はしない。
--- イベントを取りこぼした行は、公開から一定期間内であれば bot の照合が同じ経路で数え直して補正する。
--- bot は投票を促すために自分でも両方の絵文字を最初に付けるが、その 1 件はここには数えない。
+-- A vote is an :arrow_up: (up-vote) or :arrow_down: (down-vote) reaction on the notification message, and no other emoji counts. The bot recounts on Discord's reaction add and remove events and overwrites with the actual count at that moment; it never does delta arithmetic, because some events carry no delta.
+-- A row that missed an event is recounted through the same path and corrected by the bot's reconcile, as long as it is within a fixed window after publication.
+-- The bot adds both emoji itself first to invite voting, but that one reaction of its own is not counted here.
 --
--- up_count と down_count は個数であるため符号なしで持つ。差し引き(賛成 − 反対)は負になりうるため、
--- 列としては持たず、読み出し側が SIGNED へ寄せて求める(符号なし同士の引き算は MySQL では
--- 値が丸まるのではなく文が失敗する)。
+-- up_count and down_count are counts, so they are held unsigned. The subtraction (up-vote minus down-vote) can go negative, so it is not a column: the read side casts to SIGNED (in MySQL, subtracting one unsigned from another fails the statement rather than clamping the value).
 --
--- コメント数はここに持たない。コメントは 1 件ずつ article_comments に写しており、その行数が唯一の真実である。
--- ここに写しの数を別に持つと、画面に並ぶコメントの数と食い違いうる。
+-- The comment count is not held here. Comments are mirrored one at a time into article_comments and that row count is the only source of truth; a second count of the mirror kept here could disagree with the number of comments the UI lists.
 CREATE TABLE article_discord_posts (
     id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     article_id         BIGINT UNSIGNED NOT NULL,
-    channel_id         BIGINT UNSIGNED NOT NULL,                -- 通知の宛先 Discord チャンネル。
-    message_id         BIGINT UNSIGNED NULL,                    -- bot が送った通知メッセージ(未送信なら NULL)。
-    thread_id          BIGINT UNSIGNED NULL,                    -- コメント用に開いたスレッド(未作成なら NULL)。
-    up_count           INT UNSIGNED    NOT NULL DEFAULT 0,      -- 通知メッセージへの :arrow_up: の数(bot 自身の 1 件を除く)。
-    down_count         INT UNSIGNED    NOT NULL DEFAULT 0,      -- 通知メッセージへの :arrow_down: の数(bot 自身の 1 件を除く)。
+    channel_id         BIGINT UNSIGNED NOT NULL,                -- The Discord channel the notification goes to.
+    message_id         BIGINT UNSIGNED NULL,                    -- The notification message the bot sent (NULL while unsent).
+    thread_id          BIGINT UNSIGNED NULL,                    -- The thread opened for comments (NULL until created).
+    up_count           INT UNSIGNED    NOT NULL DEFAULT 0,      -- Count of :arrow_up: on the notification message, excluding the bot's own one.
+    down_count         INT UNSIGNED    NOT NULL DEFAULT 0,      -- Count of :arrow_down: on the notification message, excluding the bot's own one.
     enqueued_at        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    posted_at          DATETIME        NULL,                    -- 送信した時刻(未送信なら NULL)。
-    reactions_seeded_at DATETIME       NULL,                    -- bot が投票用の絵文字を付け終えた時刻(未実施なら NULL)。
-    last_synced_at     DATETIME        NULL,                    -- 投票を最後に数え直した時刻。
+    posted_at          DATETIME        NULL,                    -- When it was sent (NULL while unsent).
+    reactions_seeded_at DATETIME       NULL,                    -- When the bot finished adding the vote emoji (NULL until done).
+    last_synced_at     DATETIME        NULL,                    -- When the votes were last recounted.
     PRIMARY KEY (id),
-    UNIQUE KEY uq_adp_article_channel (article_id, channel_id), -- 二重送信を DB 側でも防ぐ。
-    UNIQUE KEY uq_adp_message_id (message_id),                  -- MySQL は UNIQUE 索引に複数の NULL を許すため、未送信の行と両立する。
-    -- スレッドへの投稿は guild 中のどのスレッドでもイベントとして届き、bot はその都度この列で行を引く。
-    -- 索引が無いと、記事に無関係なスレッドの発言 1 つごとに全表走査になる。UNIQUE なのは、1 つのスレッドが
-    -- 2 つの通知のコメント欄を兼ねることがないため(NULL は複数許されるので未作成の行と両立する)。
+    UNIQUE KEY uq_adp_article_channel (article_id, channel_id), -- Prevents double sending on the DB side as well.
+    UNIQUE KEY uq_adp_message_id (message_id),                  -- MySQL allows several NULLs in a UNIQUE index, so this coexists with unsent rows.
+    -- A post to any thread in the guild arrives as an event and the bot looks a row up by this column every time, so without an index each message in a thread unrelated to any article costs a full table scan. It is UNIQUE because one thread never serves as the comment thread of two notification posts (several NULLs are allowed, so this coexists with rows whose thread is not created yet).
     UNIQUE KEY uq_adp_thread_id (thread_id),
     KEY idx_adp_posted_at (posted_at),
-    -- 絵文字を付け損ねた行を拾い直す待ち行列として引く。bot は reactions_seeded_at が NULL の行を、posted_at が一定期間内のものに限り posted_at の順で拾うため、posted_at まで含めて絞り込みと整列を索引だけで済ませる。
+    -- Read as the queue of rows whose emoji seeding was missed. The bot picks up rows with reactions_seeded_at NULL, limited to those whose posted_at falls within a fixed window, in posted_at order, so taking posted_at into the index keeps both the filter and the ordering inside it.
     KEY idx_adp_reactions_seeded_at_posted_at (reactions_seeded_at, posted_at),
     CONSTRAINT fk_adp_article FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 記事のコメント。実体は Discord スレッドの返信であり、この表はその写しである。
--- コメントの受け口・スパム対策・通報を自前で作らないという方針の帰結として、書き込みは常に Discord 側で行われ、
--- この表が書き込みを受け付けることはない。フロントエンドがコメントを読めるようにするためだけに存在する。
+-- Comments on an article. The real comment is the reply in a Discord thread, and this table is a mirror of it.
+-- Since the design deliberately builds no comment intake, no spam defence and no reporting of its own, writes always happen on the Discord side and this table never accepts one. It exists solely so the frontend can read comments.
 --
--- 真実のソースは Discord であり、bot がスレッドへの投稿・編集・削除のイベントで即時に写す。
--- イベントを取りこぼした場合(bot の停止中など)は、bot の照合がスレッドの履歴を読み直して補正する。
+-- The source of truth is Discord: the bot mirrors thread post, edit and delete events immediately. A missed event, for instance while the bot was stopped, is corrected by the bot's reconcile re-reading the thread history.
 --
--- author_discord_user_id に users への外部キーを張らない。コメントの主は guild のメンバーとは限らず
--- (他の bot・webhook・退会した利用者)、外部キーにすると、写せない投稿が現れた瞬間にコメント欄全体が欠ける。
--- 表示名とアバターは users を LEFT JOIN して解決し、見つからなければ Discord のユーザー ID だけを見せる。
+-- author_discord_user_id has no foreign key to users. The person behind a comment is not necessarily a guild member (another bot, a webhook, a user who left), and with a foreign key the whole comment thread would go missing the moment a post that cannot be mirrored appears. The display name and avatar are resolved by LEFT JOINing users, and if there is no match only the Discord user ID is shown.
 --
--- body は Discord の本文をそのまま持つ。取得には message_content 特権 intent が要る。
--- 記事の閲覧範囲はコメントにも及ぶ(読める記事のコメントだけを返す)。API 側がその判定を行う。
+-- body holds Discord's message content verbatim. Reading it requires the message_content privileged intent.
+-- An article's visibility extends to its comments: only comments on articles the viewer can read are returned, and the API runs that check.
 CREATE TABLE article_comments (
     id                     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    post_id                BIGINT UNSIGNED NOT NULL,            -- どの通知のスレッドに付いたコメントか。
-    article_id             BIGINT UNSIGNED NOT NULL,            -- post_id から辿れるが、記事単位の集計が全ての一覧で要るため写しておく。post も記事も後から繋ぎ替わらないため食い違いようがない。
-    message_id             BIGINT UNSIGNED NOT NULL,            -- スレッド内のメッセージ。
-    author_discord_user_id BIGINT UNSIGNED NOT NULL,            -- 投稿者の Discord ユーザー。users に無いこともある(上記)。
-    body                   TEXT            NOT NULL,            -- 本文(Discord の生の記法のまま)。
-    up_count               INT UNSIGNED    NOT NULL DEFAULT 0,  -- このコメントへの :arrow_up: の数(bot 自身の 1 件を除く)。
-    down_count             INT UNSIGNED    NOT NULL DEFAULT 0,  -- このコメントへの :arrow_down: の数(bot 自身の 1 件を除く)。
-    posted_at              DATETIME        NOT NULL,            -- Discord 上の投稿時刻。
-    edited_at              DATETIME        NULL,                -- 最後に編集された時刻(未編集なら NULL)。
-    reactions_seeded_at    DATETIME        NULL,                -- bot が投票用の絵文字を付け終えた時刻(未実施なら NULL)。
-    last_synced_at         DATETIME        NULL,                -- 投票を最後に数え直した時刻。
+    post_id                BIGINT UNSIGNED NOT NULL,            -- Which notification post's thread the comment was written in.
+    article_id             BIGINT UNSIGNED NOT NULL,            -- Reachable through post_id, but copied here because every listing needs the per-article tally. Neither the post nor the article is ever re-pointed afterwards, so the two cannot disagree.
+    message_id             BIGINT UNSIGNED NOT NULL,            -- The message within the thread.
+    author_discord_user_id BIGINT UNSIGNED NOT NULL,            -- The commenter's Discord user. May be absent from users (see above).
+    body                   TEXT            NOT NULL,            -- The body, in Discord's raw markup as posted.
+    up_count               INT UNSIGNED    NOT NULL DEFAULT 0,  -- Count of :arrow_up: on this comment, excluding the bot's own one.
+    down_count             INT UNSIGNED    NOT NULL DEFAULT 0,  -- Count of :arrow_down: on this comment, excluding the bot's own one.
+    posted_at              DATETIME        NOT NULL,            -- When it was posted on Discord.
+    edited_at              DATETIME        NULL,                -- When it was last edited (NULL if never edited).
+    reactions_seeded_at    DATETIME        NULL,                -- When the bot finished adding the vote emoji (NULL until done).
+    last_synced_at         DATETIME        NULL,                -- When the votes were last recounted.
     PRIMARY KEY (id),
-    UNIQUE KEY uq_ac_message_id (message_id),                   -- 同じ投稿を二重に写さない。リアクションのイベントはこの列で行を引くため、索引が無いと guild 中の無関係なリアクション 1 件ごとに全表走査になる。
-    KEY idx_ac_article_id_posted_at (article_id, posted_at),    -- 記事のコメントを時系列で引く(一覧の主経路)。末尾に主キー(id)が暗黙に付くため、posted_at が同時刻のコメントも id の昇順に定まる。
-    -- bot はスレッドの履歴を読み直す際、この post_id の行のうち今回見つからなかったものを message_id の範囲で絞って消す。message_id まで含めると、その範囲が索引だけで決まる。先頭が post_id であることは変わらないため、外部キーが要求する索引も兼ねる。
+    UNIQUE KEY uq_ac_message_id (message_id),                   -- Keeps the same post from being mirrored twice. Reaction events look a row up by this column, so without an index every unrelated reaction anywhere in the guild costs a full table scan.
+    KEY idx_ac_article_id_posted_at (article_id, posted_at),    -- Reads an article's comments in time order (the listing's main query path). The primary key (id) is implicitly appended, so comments sharing a posted_at still come out in ascending id order.
+    -- When the bot re-reads a thread's history it deletes the rows under this post_id that the pass did not find, narrowed by a message_id range. Taking message_id into the index decides that range from the index alone. post_id stays leftmost, so this doubles as the index the foreign key requires.
     KEY idx_ac_post_id_message_id (post_id, message_id),
     CONSTRAINT fk_ac_post    FOREIGN KEY (post_id)    REFERENCES article_discord_posts (id) ON DELETE CASCADE,
     CONSTRAINT fk_ac_article FOREIGN KEY (article_id) REFERENCES articles (id)              ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- タグ購読者への DM の待ち行列。article_discord_posts と同じアウトボックス方式で、
--- server が公開時に購読者の行を積み、bot が送信して sent_at を埋める。
--- 主キー (article_id, user_id) が、チャンネルへの通知における (article_id, channel_id) と同じく
--- 二重送信を防ぐ。宛先チャンネルを持たない記事でも購読者への DM は成立するため、
--- この待ち行列は article_discord_posts とは独立に積む。
+-- The queue of DMs to tag subscribers. Same outbox design as article_discord_posts: at publication the server enqueues a row per subscriber, and the bot sends it and fills sent_at in.
+-- The primary key (article_id, user_id) prevents double sending, just as (article_id, channel_id) does for channel notifications.
+-- An article with no destination channel still gets its DMs to subscribers, so this queue is enqueued independently of article_discord_posts.
 CREATE TABLE article_subscription_notices (
     article_id   BIGINT UNSIGNED NOT NULL,
     user_id      BIGINT UNSIGNED NOT NULL,
     enqueued_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    sent_at      DATETIME        NULL,                          -- 送信した時刻(未送信なら NULL)。
+    sent_at      DATETIME        NULL,                          -- When it was sent (NULL while unsent).
     PRIMARY KEY (article_id, user_id),
     KEY idx_article_subscription_notices_user_id (user_id),
     KEY idx_asn_sent_at (sent_at),
@@ -500,36 +436,33 @@ CREATE TABLE article_subscription_notices (
     CONSTRAINT fk_asn_user    FOREIGN KEY (user_id)    REFERENCES users (id)    ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- --------------------------------------------------------------------------
--- 広告
--- --------------------------------------------------------------------------
+-- Ads
 
--- 広告枠。フロントエンドのテンプレートが slug で参照する。
--- 推奨寸法を持つのは、外部の管理アプリが入稿前に見え方を自前で再現できるようにするため
--- (コアはプレビュー用エンドポイントを持たない)。
+-- Ad slots, referenced by slug from the frontend templates.
+-- The recommended dimensions are held so an external management app can reproduce the look itself before a creative is submitted; the core has no preview endpoint.
 CREATE TABLE ad_slots (
     id                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    slug                VARCHAR(64)     NOT NULL,               -- フロントエンドが参照する識別子。
+    slug                VARCHAR(64)     NOT NULL,               -- The identifier the frontend references.
     name                VARCHAR(100)    NOT NULL,
-    description         VARCHAR(500)    NULL,                   -- 入稿側へ伝える注意事項(既定がダークテーマである等)。
-    recommended_width   INT UNSIGNED    NOT NULL,               -- 推奨するクリエイティブの寸法。
+    description         VARCHAR(500)    NULL,                   -- Notes for whoever submits the creative (that the default is a dark theme, and so on).
+    recommended_width   INT UNSIGNED    NOT NULL,               -- Recommended creative dimensions.
     recommended_height  INT UNSIGNED    NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uq_ad_slots_slug (slug)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 配信する画像広告。掲載期間はコアが判定するため、外部の管理アプリ側にスケジューラを要求しない。
--- 広告主・掲載プラン・課金・管理 UI は外部アプリケーションの担当であり、コアは配信と計測に徹する。
+-- The image ads that get served. The core decides the run period itself, so an external management app is not required to bring a scheduler.
+-- Advertisers, run plans, billing and the management UI belong to the external application; the core does nothing but serve and track.
 CREATE TABLE ads (
     id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     slot_id          BIGINT UNSIGNED NOT NULL,
-    advertiser_name  VARCHAR(100)    NOT NULL,                  -- 表示・実績の突き合わせ用。広告主の管理は外部アプリが持つ。
+    advertiser_name  VARCHAR(100)    NOT NULL,                  -- For display and for reconciling performance stats. The external app manages advertisers.
     image_url        VARCHAR(1000)   NOT NULL,
     link_url         VARCHAR(1000)   NOT NULL,
-    alt_text         VARCHAR(200)    NULL,                      -- 代替テキスト。読み上げと画像不達時のため。
-    weight           INT UNSIGNED    NOT NULL DEFAULT 1,        -- 重み付き抽選の重み。
-    starts_at        DATETIME        NULL,                      -- 掲載開始(NULL なら即時)。
-    ends_at          DATETIME        NULL,                      -- 掲載終了(NULL なら無期限)。
+    alt_text         VARCHAR(200)    NULL,                      -- Alt text, for screen readers and for when the image does not arrive.
+    weight           INT UNSIGNED    NOT NULL DEFAULT 1,        -- Weight for the weighted random selection.
+    starts_at        DATETIME        NULL,                      -- Start of the run (NULL means immediately).
+    ends_at          DATETIME        NULL,                      -- End of the run (NULL means indefinite).
     is_active        TINYINT(1)      NOT NULL DEFAULT 1,
     created_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -538,8 +471,7 @@ CREATE TABLE ads (
     CONSTRAINT fk_ads_slot FOREIGN KEY (slot_id) REFERENCES ad_slots (id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 日次ロールアップ。イベント 1 行ずつ記録すると表示のたびに行が増えるため、日次で加算する
--- (INSERT ... ON DUPLICATE KEY UPDATE)。秒単位の分析が要ると分かった時点で足せばよい。
+-- Daily rollup. Recording one row per event would add a row on every impression, so the counts are added up per day (INSERT ... ON DUPLICATE KEY UPDATE). Per-second analysis can be added at the point it turns out to be needed.
 CREATE TABLE ad_stats_daily (
     ad_id        BIGINT UNSIGNED NOT NULL,
     stat_date    DATE            NOT NULL,
@@ -549,7 +481,7 @@ CREATE TABLE ad_stats_daily (
     CONSTRAINT fk_ad_stats_daily_ad FOREIGN KEY (ad_id) REFERENCES ads (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 既知の広告枠。フロントエンドのテンプレートがこの slug を参照するため、移行で投入する。
+-- The known ad slots. The frontend templates reference these slugs, so the migration seeds them.
 INSERT INTO ad_slots (slug, name, description, recommended_width, recommended_height) VALUES
     ('header',         'ヘッダー',   'トップの見出し直上に出る横長のバナー。既定はダークテーマのため、白背景のロゴは背景に溶ける。', 728,  90),
     ('article_inline', '記事内',     '記事本文の途中に挟まる枠。本文と誤読されない境界と「広告」ラベルをコアが描画する。',       640, 200),

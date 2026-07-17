@@ -1,35 +1,31 @@
 /*
- * 管理画面(/admin)の制御。プラットフォームの設定と、分類(カテゴリ・タグ・報道社)を 1 つの画面で扱う。
+ * Drives the admin screen (/admin): the platform settings and the taxonomy (categories, tags, publishers) on one screen.
  *
- * この画面が触るのは 2 種類のものである。settings 表の設定(GET/PATCH /api/admin/settings)と、専用の表を持つ
- * 分類(/api/admin/{categories,tags,publishers})である。前者は「全体を見渡して数個を直す」ため一括で保存し、
- * 後者は「1 件を足す・直す・消す」ため行ごとに即座に確定する。この違いがそのままタブの操作の違いになっている。
+ * Two kinds of thing are edited here: settings held in the settings table (GET/PATCH /api/admin/settings), and taxonomy, which has tables of its own (/api/admin/{categories,tags,publishers}).
+ * Settings are saved in one batch because the job is "survey the whole thing and fix a few of them"; taxonomy commits immediately per row because the job is "add / edit / delete one". That difference is exactly the difference between the tabs.
  *
- * ロールを指す設定(admin.role_ids・速報の各ロール)と報道社の所属ロールは、ID の直接入力ではなく、bot が
- * 取り込んだロール(GET /api/admin/roles)から名前と色で選ばせる。とりわけ admin.role_ids は貼り間違いが
- * そのまま自分の締め出しになるため、選択にする意味が大きい。取り込みが間に合っていないロールのために、ID の
- * 直接入力も併せて残す(bot はロールの作成イベントを受けて写すため、作った直後はまだ一覧に無いことがある)。
+ * Settings that name roles (admin.role_ids, the breaking-news roles) and a publisher's affiliation role are picked by name and colour out of the roles the bot imported (GET /api/admin/roles) rather than typed in as IDs. Picking rather than typing is worth most on admin.role_ids, where a paste error is itself a lockout from this very screen.
+ * Direct ID entry stays available alongside for roles the import has not caught up with: the bot mirrors a role when it receives the role-create event, so a freshly created role can still be missing from the listing.
  *
- * 設定のキー・型・値域・参照先はすべてサーバーの登録簿が持ち、この画面には設定のキーを 1 つも書かない。値域は
- * 応答の minimum / maximum / exclusive_minimum から、ロール選択の要否は ref から決める。画面がこれらを写し取ると
- * 登録簿と食い違い、その食い違いが「保存を押して初めて 400 で上限を知る」形で現れる。
+ * The server's registry owns every setting's key, type, range and reference target, and this screen hardcodes no setting key at all. Ranges come from the response's minimum / maximum / exclusive_minimum, and whether a role picker is needed comes from ref.
+ * Copying any of that into the UI would drift from the registry, and the drift would surface as "you only learn the maximum by pressing Save and getting a 400".
  */
 
 import { get, post, patch, del, me, escapeHtml, formatDateTime, renderAdSlot, ApiError } from '/static/js/api.js';
 import { mountChrome, listOf, errorMessage, loginUrl, tagIconHtml, pubLogoHtml } from '/static/js/chrome.js';
 
-/* ---------------------------------------------------------------- 状態 */
+/* State */
 
 let viewer = null;
-/* GET /api/admin/settings が返した各設定の記述。保存時に「変更されたか」を判定する基準でもあるため、画面を描き直すたびに入れ替える。 */
+/* The per-setting descriptors returned by GET /api/admin/settings. Also the baseline for deciding what changed on save, so it is swapped out every time the screen is redrawn. */
 let defs = [];
-/* GET /api/admin/roles の結果。設定のロール選択と報道社の所属ロールが共有する。取得に失敗した場合は null のままで、ロールの欄は ID の直接入力へ落とす。 */
+/* The result of GET /api/admin/roles, shared by the settings role pickers and by a publisher's affiliation role. Left null when the fetch fails, and the role fields then fall back to direct ID entry. */
 let roles = null;
-/* 分類は初めてそのタブを開いたときに読む。設定と違い、開くまで要らない。 */
+/* Taxonomy is read the first time its tab is opened. Unlike the settings, it is not needed until then. */
 const loaded = { categories: false, tags: false, publishers: false };
-/* 分類の一覧の最後に読んだ行。行の編集を開くときに現在値を引くために保持する。 */
+/* The rows from the last taxonomy listing read, kept so that opening a row's editor can pull the current values. */
 const entityCache = { categories: [], tags: [], publishers: [] };
-/* 設定タブに未保存の変更があるか。分類タブは行ごとに即座に確定するため、未保存の状態を持つのは設定タブだけである。 */
+/* Whether the settings tab has unsaved changes. The taxonomy tabs commit immediately per row, so only the settings tab carries unsaved state. */
 let settingsDirty = false;
 
 const TABS = [
@@ -39,7 +35,7 @@ const TABS = [
   { id: 'publishers', label: '報道社' },
 ];
 
-/* 設定を束ねる見出し。キーの最初の区切りまでで分ける。ここに無い区切りはその文字列をそのまま見出しにするため、登録簿に新しい系統のキーが増えても、見出しの追加を忘れて欄そのものが消えることはない。 */
+/* The headings that group the settings, split on the first segment of the key. A prefix missing from this map is used verbatim as the heading, so a new family of keys in the registry can never make the fields themselves disappear just because nobody added a heading. */
 const GROUP_LABELS = {
   discord: 'Discord',
   admin: 'プラットフォーム管理',
@@ -47,7 +43,7 @@ const GROUP_LABELS = {
   media: '画像',
 };
 
-/* 特定の設定にだけ添える注意。値の説明(description)は登録簿が持つが、ここに書くのは「この欄を触ると何が起きうるか」という操作の側の警告である。 */
+/* Notices attached to particular settings only. The registry owns the value's description; what goes here is the operational warning of what can happen if you touch this field. */
 const EXTRA_NOTICES = {
   'admin.role_ids': '<div class="notice"><span class="ic">⚠</span><div>' +
     '<b>この欄の指定を誤ると、あなた自身がこの画面から締め出されます。</b>' +
@@ -56,7 +52,7 @@ const EXTRA_NOTICES = {
     '</div></div>',
 };
 
-/* ---------------------------------------------------------------- 小さな部品 */
+/* Small helpers */
 
 function warnHtml(html) {
   return `<div class="notice"><span class="ic">⚠</span><div>${html}</div></div>`;
@@ -66,24 +62,24 @@ function infoHtml(html) {
   return `<div class="notice info"><span class="ic">ℹ</span><div>${html}</div></div>`;
 }
 
-/** パネル本体を 1 枚のカードの文言で置き換える。読み込めない・権限が無いなど、入力欄を残す意味が無い状態に使う。 */
+/** Replace the panel body with a single card of text. For states where leaving the input fields up is pointless: the load failed, there is no permission, and so on. */
 function renderMessage(title, bodyHtml) {
   document.querySelector('[data-main]').innerHTML =
     `<section class="card"><div class="section-head"><h2>${escapeHtml(title)}</h2></div><div class="body">${bodyHtml}</div></section>`;
 }
 
-/** ロールの色(24bit)を CSS の色にする。色なし(0)は Discord 上でも既定色であり、見分けのための淡い枠だけにする。 */
+/** Turn a role colour (24-bit) into a CSS colour. No colour (0) is the default colour on Discord too, so the swatch is left transparent and only its faint box tells it apart. */
 function roleSwatch(color) {
   const hex = color ? '#' + Number(color).toString(16).padStart(6, '0') : 'transparent';
   return `<span class="role-swatch" style="background:${escapeHtml(hex)}"></span>`;
 }
 
-/* ---------------------------------------------------------------- ロール選択 */
+/* Role pickers */
 
 /**
- * ロールの複数選択(設定の id_list、ref=role 用)。bot が取り込んだロールを名前と色で並べ、選択済みの ID のうち
- * 一覧に無いもの(削除された・まだ取り込まれていない)は「未取得」として checked のまま残す。落とすと、画面で
- * 触っていないのに保存で消えてしまう。一覧そのものを取得できていない場合は ID の直接入力へ落とす。
+ * Multi-select for roles (for id_list settings with ref=role). Lists the roles the bot imported by name and colour.
+ * A selected ID that is absent from the listing (deleted, or not imported yet) is kept checked and marked as not fetched: dropping it would delete it on save even though nobody touched it in the UI.
+ * If the listing itself could not be fetched, falls back to direct ID entry.
  */
 function rolePickerMulti(key, selectedIds) {
   const selected = (selectedIds || []).map(String);
@@ -112,7 +108,7 @@ function orphanCheckbox(id) {
   return `<label class="orphan">${roleSwatch(0)}<input type="checkbox" data-role-id="${escapeHtml(id)}" checked>未取得のロール: ${escapeHtml(id)}</label>`;
 }
 
-/** 選択済みのロール ID を読み取る(複数)。チェックされたロールと、直接入力された ID を併せる。重複は畳む。 */
+/** Read the selected role IDs (multi). Combines the checked roles with directly entered IDs; duplicates are collapsed. */
 function readRolesByKey(key) {
   const ids = [];
   const box = document.querySelector(`[data-rolepick="${key}"]`);
@@ -125,9 +121,8 @@ function readRolesByKey(key) {
 }
 
 /**
- * ロールの単一選択(報道社の role_id 用。0 個か 1 個)。所属ロールは既存でなければ API が弾くため、一覧に無い
- * ロールを新たに割り当てる余地は無く、選択肢(取り込み済みのロール)だけで足りる。現在値が一覧から消えている
- * (ロールが削除された)場合に備え、その ID も選択肢として残す。
+ * Single select for a role (for a publisher's role_id: zero or one). The API rejects an affiliation role that does not already exist, so there is no room to assign a role that is absent from the listing and the options (the imported roles) are enough.
+ * The current value is kept as an option too, in case it has vanished from the listing (the role was deleted).
  */
 function roleSelectSingle(selectedId) {
   const sel = selectedId == null ? '' : String(selectedId);
@@ -142,9 +137,9 @@ function roleSelectSingle(selectedId) {
   return `<select data-f="role_id">${opts.join('')}</select>`;
 }
 
-/* ---------------------------------------------------------------- 設定タブ */
+/* Settings tab */
 
-/** 値域(int / number)を入力欄の属性にする。exclusive の整数は「より大きい」を +1 して min にできる。number の exclusive は min で表せないため付けず、読み取り時に弾く。 */
+/** Express an int / number range as input attributes. An exclusive minimum on an int is "greater than", which +1 turns into min. An exclusive minimum on a number cannot be expressed as min, so no attribute is emitted and the value is rejected when read instead. */
 function numberAttrs(d) {
   const attrs = [d.kind === 'int' ? 'step="1"' : 'step="any"'];
   if (d.minimum != null) {
@@ -155,7 +150,7 @@ function numberAttrs(d) {
   return attrs.join(' ');
 }
 
-/** 値域を言葉にした注記。入力欄の制約に加えて文でも示す(number の exclusive のように属性で表せないものもあるため)。 */
+/** The range put into words. Stated as prose on top of the input attributes, because some ranges cannot be expressed as attributes at all — an exclusive minimum on a number, for one. */
 function rangeHint(d) {
   if (d.kind !== 'int' && d.kind !== 'number') return '';
   const parts = [];
@@ -164,15 +159,15 @@ function rangeHint(d) {
   return parts.length ? `値域: ${parts.join('、')}。` : '';
 }
 
-/** 変更不可の設定を読み取り専用で出すときの表示文字列。 */
+/** The display string for rendering a not-editable setting read-only. */
 function readonlyText(d) {
   if (d.kind === 'id_list') return (d.value || []).map(String).join(', ');
   return d.value === null || d.value === undefined ? '' : String(d.value);
 }
 
 /**
- * 入力欄。型(kind)は登録簿が定義し、検証もサーバーが行う。ここでの型の使い分けは入力のしやすさのためであり、検証の代わりではない。
- * ID(id / id_list)をテキストで扱うのは要件である。数値の入力欄にすると、値は JavaScript の Number を経由することになり、2^53 を超えるスノーフレークは黙って下位桁が壊れる。
+ * The input control. The registry defines the kind and the server does the validation; picking a control per kind here is for ease of input, not a substitute for validation.
+ * Handling IDs (id / id_list) as text is a requirement: a number input would route the value through JavaScript's Number, and a snowflake beyond 2^53 silently has its low digits corrupted.
  */
 function controlHtml(d, id) {
   const field = `id="${id}" data-field="${escapeHtml(d.key)}"`;
@@ -180,14 +175,14 @@ function controlHtml(d, id) {
     return `<input type="text" ${field} value="${escapeHtml(readonlyText(d))}" readonly>`;
   }
   if (d.kind === 'secret') {
-    /* 現在値は応答に含まれない(値を返した時点で、この画面を開ける者すべてに bot のトークンが渡る)。空欄は「変更しない」を意味する。 */
+    /* The current value is not in the response: returning it would hand the bot token to everyone who can open this screen. Blank means "leave unchanged". */
     return `<input type="password" ${field} autocomplete="new-password" placeholder="変更するときだけ新しい値を入力">`;
   }
   if (d.kind === 'int' || d.kind === 'number') {
     return `<input type="number" ${numberAttrs(d)} ${field} value="${escapeHtml(d.value)}">`;
   }
   if (d.ref === 'role' && d.kind === 'id_list') {
-    /* ロールの複数選択。data-field はロールの入れ物に付け、値の読み取りは readRolesByKey が担う。 */
+    /* Role multi-select. data-field goes on the container, and readRolesByKey does the reading. */
     return `<div ${field}>${rolePickerMulti(d.key, d.value)}</div>`;
   }
   if (d.kind === 'id_list') {
@@ -197,7 +192,7 @@ function controlHtml(d, id) {
   return `<input type="text" ${field}${numeric} value="${escapeHtml(d.value)}">`;
 }
 
-/** 設定の状態を示すバッジ。 */
+/** The badges showing a setting's state. */
 function badgesHtml(d) {
   const out = [];
   if (!d.editable) out.push('<span class="badge vis-members">変更不可</span>');
@@ -206,7 +201,7 @@ function badgesHtml(d) {
   return out.join(' ');
 }
 
-/** 最終更新の表示。誰が変えたのかを残すのは、設定の変更が事後に説明を求められる操作だからである。 */
+/** The last-updated line. Who changed it is recorded because changing a setting is an act that may have to be accounted for after the fact. */
 function metaText(d) {
   const at = formatDateTime(d.updated_at);
   const parts = [at ? `最終更新 ${at}` : '最終更新の記録はありません'];
@@ -214,7 +209,7 @@ function metaText(d) {
   return parts.join(' ・ ');
 }
 
-/** 設定 1 つの行。 */
+/** One setting's row. */
 function settingRowHtml(d, index) {
   const id = `set-${index}`;
   const key = escapeHtml(d.key);
@@ -233,7 +228,7 @@ function settingRowHtml(d, index) {
   return `<div class="form-row" data-row="${escapeHtml(d.key)}">${parts.join('')}</div>`;
 }
 
-/** キーの最初の区切りで設定を束ねる。並びは応答(登録簿)の順をそのまま保つ。 */
+/** Group the settings by the first segment of the key. The order of the response (the registry's order) is preserved as-is. */
 function settingGroups(list) {
   const groups = [];
   for (const d of list) {
@@ -248,7 +243,7 @@ function settingGroups(list) {
   return groups;
 }
 
-/** 設定タブを描く。 */
+/** Render the settings tab. */
 function renderSettingsPanel() {
   const panel = document.querySelector('[data-panel="settings"]');
   if (defs.length === 0) {
@@ -266,7 +261,7 @@ function renderSettingsPanel() {
     '<span class="spacer"></span><span class="hint" data-dirty-count></span></div></section>';
 
   panel.querySelector('[data-save]').addEventListener('click', (ev) => saveSettings(ev.currentTarget));
-  // 変更の有無は入力のたびに見直す。ロールの選択(checkbox)も直接入力(input)も同じ経路で拾えるよう、input と change の両方を購読する。委譲は再生成されない panel 要素に一度だけ張る(保存のたびに張り直すと重複して積み上がる)。
+  // What changed is re-checked on every input. Both input and change are listened to so that a role checkbox and direct text entry are picked up by the same path. The delegation is attached once to the panel element, which is never re-created — re-attaching it on every save would stack up duplicate listeners.
   if (!panel.dataset.wired) {
     panel.addEventListener('input', refreshSettingsDirty);
     panel.addEventListener('change', refreshSettingsDirty);
@@ -275,7 +270,7 @@ function renderSettingsPanel() {
   refreshSettingsDirty();
 }
 
-/** 入力欄の値を、API へ送る形へ整える。{changed, value} か {error} を返す。 */
+/** Shape a field's value into the form sent to the API. Returns {changed, value} or {error}. */
 function readSettingField(d) {
   if (d.ref === 'role' && d.kind === 'id_list') {
     const ids = readRolesByKey(d.key);
@@ -297,7 +292,7 @@ function readSettingField(d) {
   const text = el.value.trim();
 
   if (d.kind === 'secret') {
-    /* 空欄は「変更しない」。空文字を送ると、現在の秘密が空で上書きされてしまう。 */
+    /* Blank means "leave unchanged": sending an empty string would overwrite the current secret with nothing. */
     return { changed: text !== '', value: text };
   }
 
@@ -314,7 +309,7 @@ function readSettingField(d) {
   return { changed: text !== String(d.value === null || d.value === undefined ? '' : d.value), value: text };
 }
 
-/** 値域の検査。サーバーも同じ検査をするが、保存を押す前に同じ文言で弾いておけば、送って 400 が返るのを待たずに直せる。 */
+/** The range check. The server runs the same check, but rejecting with the same wording before Save is pressed lets it be fixed without waiting for a 400 to come back. */
 function checkRange(d, num) {
   if (d.minimum != null) {
     if (d.exclusive_minimum && num <= d.minimum) return `${d.label}: ${d.minimum} より大きい値にしてください。`;
@@ -324,14 +319,14 @@ function checkRange(d, num) {
   return null;
 }
 
-/** ID の集合が(順序に依らず)等しいか。ロール選択は並びが登録簿の順と異なりうるため、順序で比べると偽の「変更あり」になる。 */
+/** Whether two sets of IDs are equal, regardless of order. A role picker's order can differ from the registry's, so comparing in order would report a change that is not there. */
 function sameIdSet(a, b) {
   if (a.length !== b.length) return false;
   const set = new Set(a);
   return b.every((x) => set.has(x));
 }
 
-/** 変更された欄に印を付け、未保存の有無と件数を更新する。 */
+/** Mark the changed fields and update the unsaved flag and count. */
 function refreshSettingsDirty() {
   let changed = 0;
   for (const d of defs) {
@@ -351,7 +346,7 @@ function refreshSettingsDirty() {
   if (counter) counter.textContent = changed > 0 ? `${changed} 件の変更が未保存です` : '';
 }
 
-/** 設定タブの保存の結果や入力の誤りを出す。 */
+/** Show the settings tab's save result or input errors. */
 function showSettingsStatus(html) {
   const box = document.querySelector('[data-settings-status]');
   if (!box) return;
@@ -359,7 +354,7 @@ function showSettingsStatus(html) {
   box.hidden = false;
 }
 
-/** 変更された欄だけを集めて送る。 */
+/** Collect only the changed fields and send them. */
 async function saveSettings(btn) {
   const updates = {};
   const errors = [];
@@ -393,7 +388,7 @@ async function saveSettings(btn) {
       location.href = loginUrl();
       return;
     }
-    /* サーバーは 1 つでも不正なら何も書かないため、入力はそのまま残す。値を捨てて読み直すと、直せば通る入力まで消えてしまう。 */
+    /* The server writes nothing if even one value is invalid, so the input is left as it is. Throwing the values away and re-reading would wipe out entries that would have gone through once fixed. */
     showSettingsStatus(warnHtml(`<b>設定を保存できませんでした。</b>${escapeHtml(errorMessage(e))}`));
     return;
   } finally {
@@ -406,7 +401,7 @@ async function saveSettings(btn) {
     .filter((d) => d && d.restart_required)
     .map((d) => d.label);
 
-  /* 応答は更新後の一覧そのものであるため、読み直さずにそのまま映す。 */
+  /* The response is the updated listing itself, so it is shown as-is without re-reading. */
   defs = listOf(data, 'settings');
   settingsDirty = false;
   renderSettingsPanel();
@@ -416,9 +411,9 @@ async function saveSettings(btn) {
   showSettingsStatus(infoHtml(escapeHtml(done.join(' '))));
 }
 
-/* ---------------------------------------------------------------- 分類タブ(カテゴリ・タグ・報道社) */
+/* Taxonomy tabs (categories, tags, publishers) */
 
-/** 入力欄の断片。data-f 属性で読み取り側と結びつける。 */
+/** An input-field snippet, tied to the reading side by its data-f attribute. */
 function textInput(name, value, opts = {}) {
   const attr = opts.numeric ? ' inputmode="numeric"' : '';
   return `<input type="text" data-f="${name}"${attr} value="${escapeHtml(value == null ? '' : value)}"${opts.placeholder ? ` placeholder="${escapeHtml(opts.placeholder)}"` : ''}>`;
@@ -459,12 +454,12 @@ function readCheckbox(container, name) {
   return Boolean(el && el.checked);
 }
 
-/** 通知先チャンネルの欄。チャンネルは bot が取り込んでおらず選択肢を示せないため、ID の直接入力に注記を添える。 */
+/** The notify channel field. The bot does not import channels and no options can be offered, so direct ID entry gets a note instead. */
 function channelHint(kind) {
   return `Discord のチャンネル ID を貼り付けます(未設定ならこの${kind}は通知しません)。開発者モードを有効にし、チャンネルを右クリックして「ID をコピー」で得られます。取り違えても bot のログに出るだけで、ここには誤りが現れません。`;
 }
 
-/** 3 つの分類の差分。フィールドの描画・読み取り・一覧の要約・作成に要る項目名を持つ。共有できる足場(一覧・削除・行の開閉)は下の関数が担う。 */
+/** Where the three taxonomy kinds differ: rendering and reading the fields, the listing summary, and which fields creation requires. The scaffolding they can share (listing, delete, opening and closing a row) is handled by the functions below. */
 const ENTITIES = {
   categories: {
     label: 'カテゴリ',
@@ -572,7 +567,7 @@ const ENTITIES = {
   },
 };
 
-/** その分類パネルの状態を出す。 */
+/** Show that taxonomy panel's status. */
 function showEntityStatus(name, html) {
   const box = document.querySelector(`[data-panel="${name}"] [data-status]`);
   if (!box) return;
@@ -580,7 +575,7 @@ function showEntityStatus(name, html) {
   box.hidden = false;
 }
 
-/** 分類の一覧の 1 行。名前と slug、要約、編集と削除。編集を押すと同じ行の下に編集域が開く。 */
+/** One row of a taxonomy listing: name and slug, the summary, edit and delete. Pressing edit opens an editor below that same row. */
 function entityRowHtml(name, row) {
   const spec = ENTITIES[name];
   const icon = spec.icon ? spec.icon(row) : '';
@@ -592,7 +587,7 @@ function entityRowHtml(name, row) {
     `<tr class="tax-editrow" data-editrow hidden><td colspan="3"></td></tr>`;
 }
 
-/** 分類パネルを描く。新規フォーム・一覧・状態表示を持つ。 */
+/** Render a taxonomy panel: the create form, the listing and the status area. */
 function renderEntityPanel(name, rows) {
   const spec = ENTITIES[name];
   const panel = document.querySelector(`[data-panel="${name}"]`);
@@ -615,7 +610,7 @@ function renderEntityPanel(name, rows) {
   if (body) body.addEventListener('click', (ev) => onEntityListClick(name, ev));
 }
 
-/** 一覧内の編集・削除・保存・取消のクリックを受ける。行は描き直されるため、入れ物の側で受ける。 */
+/** Take the edit / delete / save / cancel clicks inside the listing. The rows get re-rendered, so the container takes them. */
 function onEntityListClick(name, ev) {
   const editBtn = ev.target.closest('[data-edit]');
   if (editBtn) return toggleEntityEditor(name, editBtn.closest('tr'));
@@ -631,7 +626,7 @@ function onEntityListClick(name, ev) {
   }
 }
 
-/** 行の編集域を開く/閉じる。開くときに現在値でフォームを組む。 */
+/** Open or close a row's editor, building the form from the current values on open. */
 function toggleEntityEditor(name, tr) {
   const spec = ENTITIES[name];
   const editRow = tr.nextElementSibling;
@@ -649,12 +644,12 @@ function toggleEntityEditor(name, tr) {
   editRow.hidden = false;
 }
 
-/** 作成に必須の項目が入っているかを画面側でも確かめる。サーバーも確かめるが、往復の前に気付ける。 */
+/** Check on the client too that the fields creation requires are filled in. The server checks as well, but this catches it before the round trip. */
 function missingRequired(spec, payload) {
   return spec.required.filter((key) => payload[key] == null || payload[key] === '');
 }
 
-/** 分類を作成する。 */
+/** Create a taxonomy entry. */
 async function createEntity(name, btn) {
   const spec = ENTITIES[name];
   const container = document.querySelector(`[data-panel="${name}"] [data-new]`);
@@ -681,7 +676,7 @@ async function createEntity(name, btn) {
   showEntityStatus(name, infoHtml(`${escapeHtml(spec.label)}を作成しました。`));
 }
 
-/** 行の編集を保存する。 */
+/** Save a row's edits. */
 async function saveEntityEdit(name, btn) {
   const spec = ENTITIES[name];
   const tr = btn.closest('[data-editrow]').previousElementSibling;
@@ -709,7 +704,7 @@ async function saveEntityEdit(name, btn) {
   showEntityStatus(name, infoHtml(`${escapeHtml(spec.label)}を更新しました。`));
 }
 
-/** 分類を削除する。記事が参照している場合はサーバーが 409 で理由(件数)を返すため、それをそのまま出す。 */
+/** Delete a taxonomy entry. When articles reference it the server returns 409 with the reason (the count), which is shown as-is. */
 async function deleteEntity(name, id, label) {
   const spec = ENTITIES[name];
   if (!confirm(`${spec.label}「${label}」を削除します。よろしいですか?`)) return;
@@ -727,7 +722,7 @@ async function deleteEntity(name, id, label) {
   showEntityStatus(name, infoHtml(`${escapeHtml(spec.label)}を削除しました。`));
 }
 
-/** 分類の一覧を読み直して描き直す。 */
+/** Re-read a taxonomy listing and re-render it. */
 async function reloadEntity(name) {
   const spec = ENTITIES[name];
   const rows = listOf(await get(spec.path), name);
@@ -735,15 +730,15 @@ async function reloadEntity(name) {
   renderEntityPanel(name, rows);
 }
 
-/* ---------------------------------------------------------------- タブの切り替え */
+/* Tab switching */
 
-/** タブの現在地を hash から決める。未知・空なら設定。 */
+/** Decide the active tab from the hash. Unknown or empty means settings. */
 function currentTab() {
   const hash = (location.hash || '').replace(/^#/, '');
   return TABS.some((t) => t.id === hash) ? hash : 'settings';
 }
 
-/** タブを表示する。分類タブは初めて開いたときに読み込む。設定タブの入力は消さない(タブの切り替えでは描き直さず、hidden の付け外しだけを行う)。 */
+/** Show a tab. A taxonomy tab loads the first time it is opened. The settings tab's input is never discarded: switching tabs does not re-render, it only adds and removes hidden. */
 async function showTab(name) {
   for (const link of document.querySelectorAll('[data-tab]')) {
     link.classList.toggle('active', link.dataset.tab === name);
@@ -767,7 +762,7 @@ async function showTab(name) {
   }
 }
 
-/* ---------------------------------------------------------------- 画面の骨格 */
+/* Screen skeleton */
 
 function renderTabs() {
   const bar = TABS.map((t) => `<a href="#${t.id}" data-tab="${t.id}">${escapeHtml(t.label)}</a>`).join('');
@@ -775,14 +770,14 @@ function renderTabs() {
   document.querySelector('[data-main]').innerHTML = `<nav class="tabs">${bar}</nav>${panels}`;
 }
 
-/** ログインしていない利用者に、この画面が何のためにあるかを示してログインへ送る。 */
+/** Tell a logged-out user what this screen is for and send them to log in. */
 function renderLoginRequired() {
   renderMessage('ログインが必要です',
     '<p>プラットフォームの設定の確認と変更には、Discord でのログインが必要です。</p>' +
     `<a class="btn-discord" href="${escapeHtml(loginUrl())}">🎮 Discord でログイン</a>`);
 }
 
-/** 管理者でない利用者への説明。権限が無いこと自体は隠さない(この画面の存在は秘密ではなく、秘密なのは設定の値の方であり、それは API が渡さない)。 */
+/** The explanation for a non-admin user. Having no permission is not itself hidden: the existence of this screen is no secret — the setting values are, and the API does not hand those over. */
 function renderForbidden() {
   renderMessage('この画面は管理者だけが開けます',
     '<p style="font-size:13px;">プラットフォームの設定と分類を読み書きできるのは管理者だけです。あなたの現在の資格ではこの画面の内容を取得できません。</p>' +
@@ -804,7 +799,7 @@ async function main() {
     return;
   }
 
-  /* 設定とロールを揃えてから設定タブを組む。設定にはロールの複数選択があるため、ロールが先に要る。ロールだけ引けない場合は ID 直接入力へ落とすため、失敗しても設定は出す。 */
+  /* Settings and roles are both in hand before the settings tab is built: the settings include role multi-selects, so the roles have to come first. If only the roles cannot be fetched the fields fall back to direct ID entry, so the settings are still rendered. */
   let settings;
   try {
     [settings, roles] = await Promise.all([
@@ -830,7 +825,7 @@ async function main() {
   window.addEventListener('hashchange', () => showTab(currentTab()));
   await showTab(currentTab());
 
-  /* 設定タブに未保存の変更があるまま画面を離れようとしたら引き止める。分類タブは行ごとに即座に確定するため、この対象にならない。 */
+  /* Hold the user back if they try to leave with unsaved changes on the settings tab. The taxonomy tabs commit immediately per row, so they never fall under this. */
   window.addEventListener('beforeunload', (ev) => {
     if (settingsDirty) {
       ev.preventDefault();

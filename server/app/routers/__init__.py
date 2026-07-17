@@ -1,3 +1,3 @@
-"""HTTP の経路。各ルーターは自身が担う URL を完全な形で宣言し、main.py は接頭辞を足さずに取り込む。広告のように 1 つの関心事が /api/ 配下と /ads/ 配下の両方に現れる経路があるため、接頭辞を取り込み側で決める方式は成立しない。"""
+"""HTTP routes. Each router declares the full URL it serves and main.py includes it without adding a prefix, because a single concern can span two trees: ads have routes under both /api/ and /ads/, which no include-side prefix can express."""
 
 from __future__ import annotations

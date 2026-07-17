@@ -1,10 +1,10 @@
-"""画像の実体を内容アドレスで置くブロブストア。
+"""Content-addressed blob store for image files.
 
-保存先は {storage_dir}/{hash[0:2]}/{hash[2:4]}/{hash}.{variant}.webp とする。ハッシュの先頭 4 桁でディレクトリを二段に分けるのは、1 つのディレクトリに数十万のファイルが並ぶと ext4 でも列挙が重くなるためである。
+Blobs live at {storage_dir}/{hash[0:2]}/{hash[2:4]}/{hash}.{variant}.webp. The first 4 hex digits fan out into two directory levels because hundreds of thousands of files in a single directory make enumeration slow even on ext4.
 
-内容アドレスであるため、同じ内容のファイルは必ず同じパスに落ちる。書き込みは常に同じ内容の上書きにしかならないが、途中まで書かれたファイルを配信が読むことは起こりうるため、一時ファイルへ書いてから置換する。
+Being content-addressed, identical content always lands on the same path, so a write is only ever an overwrite with identical bytes. Serving can still read a partially written file, so write to a temporary file and replace.
 
-content_hash と variant は配信の URL からそのまま渡ってくる値であるため、パスを組み立てる前に必ず検査する。検査を省くと ../ を含む値でストレージの外を指せる。
+content_hash and variant arrive verbatim from the delivery URL, so validate them before building a path. Skip the check and a value containing ../ points outside the storage directory.
 """
 
 from __future__ import annotations
@@ -15,15 +15,15 @@ from pathlib import Path
 from typing import Final
 from uuid import uuid4
 
-# 生成・配信する変種。'orig' は原寸で必須。数字は横幅(ピクセル)を表し、原寸より広い変種は生成しない。
+# The variants generated and served. 'orig' is the original size and is mandatory. The numbers are widths in pixels; no variant wider than the original is produced.
 VARIANTS: Final = ('orig', '1200w', '400w')
 
-# content_hash は SHA-256 の 16 進表記(小文字)。大文字を許すと、DB の照合(CHAR(64) の ai_ci は大小を区別しない)は通るのにファイル名が一致せず、存在する画像が 404 になる。
+# content_hash is SHA-256 as lowercase hex. Allowing uppercase would still pass the DB lookup (CHAR(64) with an ai_ci collation ignores case) while failing to match the filename, so an image that exists would 404.
 _CONTENT_HASH_PATTERN: Final = re.compile(r'\A[0-9a-f]{64}\Z')
 
 
 def blob_path(storage_dir: Path, content_hash: str, variant: str) -> Path:
-    """画像の実体のパスを返す。content_hash が 16 進 64 桁(小文字)でない場合、または未知の変種の場合は ValueError。"""
+    """Return the path of the image blob. ValueError if content_hash is not 64 lowercase hex digits, or the variant is unknown."""
     if not _CONTENT_HASH_PATTERN.match(content_hash):
         raise ValueError(f'content_hash は SHA-256 の 16 進 64 桁(小文字)である必要があります: {content_hash!r}')
     if variant not in VARIANTS:
@@ -32,13 +32,13 @@ def blob_path(storage_dir: Path, content_hash: str, variant: str) -> Path:
 
 
 def write_blob(storage_dir: Path, content_hash: str, variant: str, data: bytes) -> None:
-    """画像の実体を書き出す。既に同じパスにファイルがあれば置き換える(内容アドレスであるため中身は同一)。
+    """Write the image blob, replacing any file already at the path (content-addressed, so the bytes are identical).
 
-    一時ファイルへ書いてから os.replace で置換する。同一ディレクトリ内の置換は原子的であり、配信側が中途半端なファイルを読むことがない。fsync まで行うのは、DB の行だけが残ってファイルが壊れている状態を電源断で作らないため。
+    Write to a temporary file, then os.replace it. Replacement within one directory is atomic, so the serving side never reads a half-written file. The fsync is there so a power loss cannot leave the DB row behind with a corrupt file.
     """
     path = blob_path(storage_dir, content_hash, variant)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # 同じ内容を同時に書く取り込みが競合しても互いの一時ファイルを壊さないよう、プロセスと呼び出しごとに一意な名前にする。
+    # Name the temporary file uniquely per process and per call, so concurrent ingests writing the same content cannot clobber each other's temporary file.
     temporary = path.parent / f'.{path.name}.{os.getpid()}.{uuid4().hex}.tmp'
     try:
         with open(temporary, 'wb') as stream:
@@ -52,7 +52,7 @@ def write_blob(storage_dir: Path, content_hash: str, variant: str, data: bytes) 
 
 
 def read_blob(storage_dir: Path, content_hash: str, variant: str) -> bytes | None:
-    """画像の実体を読む。無ければ None(配信側は変種が無ければ orig へ落とすため、欠落は例外ではない)。"""
+    """Read the image blob, or None if it is absent (the serving side falls back to orig when a variant is missing, so a miss is not exceptional)."""
     try:
         return blob_path(storage_dir, content_hash, variant).read_bytes()
     except FileNotFoundError:
@@ -60,5 +60,5 @@ def read_blob(storage_dir: Path, content_hash: str, variant: str) -> bytes | Non
 
 
 def blob_exists(storage_dir: Path, content_hash: str, variant: str) -> bool:
-    """画像の実体があるか。"""
+    """Whether the image blob exists."""
     return blob_path(storage_dir, content_hash, variant).is_file()

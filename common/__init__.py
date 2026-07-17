@@ -1,3 +1,3 @@
-"""server と bot が共有する層。設定の読み込み(config)・データベース接続(db)・ID の正規化(snowflake)を提供する。両方の Docker イメージへそのままコピーされるため、この層は FastAPI にも discord.py にも依存してはならない。"""
+"""Layer shared by server and bot: config loading (config), database connections (db), ID normalization (snowflake). Both Docker images copy this layer verbatim, so it must not depend on FastAPI or discord.py."""
 
 from __future__ import annotations

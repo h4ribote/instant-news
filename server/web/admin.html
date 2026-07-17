@@ -41,8 +41,8 @@
 
 <main class="container layout">
   <!--
-    本体は js/admin.js が組み立てる。設定(settings 表)とカテゴリ・タグ・報道社(専用の表)をタブで切り替える。
-    設定の欄は GET /api/admin/settings の応答から生成するため、この HTML には設定のキーを 1 つも書かない。
+    js/admin.js builds the main column; tabs switch between settings (the settings table) and categories, tags and publishers (their own tables).
+    The setting fields are generated from the GET /api/admin/settings response, so this HTML names no setting key at all.
   -->
   <div class="main" data-main></div>
 

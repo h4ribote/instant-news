@@ -1,5 +1,5 @@
-# 2.x に固定する。bot はゲートウェイのイベント名・raw イベントの持つ項目・intents のビットに依存しており、
-# それらは major 版の境界で変わりうる。上限が無いと、再ビルドしただけでイベントが静かに届かなくなる。
+# Pinned to 2.x: the bot depends on gateway event names, the fields raw events carry, and the intents bits, all of which can change across a major version boundary.
+# Without an upper bound, a rebuild alone would silently stop events from arriving.
 discord.py>=2.7,<3
 pyyaml
 aiomysql

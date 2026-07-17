@@ -1,6 +1,6 @@
-"""Discord OAuth2 によるログインとログアウトの経路。
+"""Login and logout routes for Discord OAuth2.
 
-いずれもブラウザのトップレベルの遷移として使われるため、応答は JSON ではなくリダイレクトである。API キー(Authorization: Bearer)はここでは扱わない。キーは発行済みの資格情報を提示するものであり、認可フローを通る余地が無い。
+Both are entered as top-level browser navigations, so they answer with a redirect rather than JSON. API keys (Authorization: Bearer) are not handled here: a key presents an already-issued credential, so it has no place in the authorization flow.
 """
 
 from __future__ import annotations
@@ -33,17 +33,17 @@ router = APIRouter(tags=['auth'])
 
 @router.get('/auth/login')
 async def login(request: Request, redirect_to: str | None = None) -> RedirectResponse:
-    """Discord の認可画面へ送る。
+    """Send the user to Discord's consent screen.
 
-    redirect_to はログイン後の戻り先。このサイト内のパスに限る(検査は sanitize_redirect_to が行う)。値はブラウザへ返さず oauth_states に預けるため、戻り先の指定が URL の往復で書き換わることがない。
+    redirect_to is where the user lands after login, and is restricted to a path inside this site (sanitize_redirect_to does the checking). It is stashed in oauth_states rather than handed back to the browser, so the requested destination cannot be rewritten over the URL round trip.
 
-    認可 URL の材料のうち client_id は要求のたびに settings 表から読み、認可後に戻る URL は config.yaml の base_url から導出する(auth.oauth_redirect_uri)。config はその導出と、state の Cookie に Secure を付けるかどうかの判断に要る。
+    Of the authorization URL's ingredients, client_id is read from the settings table on every request, while the redirect_uri is derived from base_url in config.yaml (auth.oauth_redirect_uri). config is needed for that derivation and to decide whether the state cookie gets Secure.
     """
     db = await get_db(request)
     config = await get_config(request)
     settings = await get_settings(request)
     authorize_url, state = await begin_login(db, config, settings, redirect_to)
-    # 302 を明示する。FastAPI の既定である 307 はメソッドを保存するため、認可画面へ GET 以外で送ろうとする経路が生まれうる。
+    # Pin the status to 302: FastAPI's default of 307 preserves the method, which would open a path that sends something other than GET to the consent screen.
     response = RedirectResponse(authorize_url, status_code=status.HTTP_302_FOUND)
     set_state_cookie(response, config, state)
     return response
@@ -57,40 +57,40 @@ async def callback(
     error: str | None = None,
     error_description: str | None = None,
 ) -> RedirectResponse:
-    """認可の結果を受け取り、セッションを発行して戻り先へ送る。
+    """Take the authorization result, issue a session, and send the user on to the post-login destination.
 
-    code / state を必須の引数として宣言しない。認可を断った場合や失敗した場合、Discord は code を付けずに error だけを載せて戻してくるため、必須にすると「利用者が断った」という正常な経路が形式の誤り(422)として現れてしまう。
+    code and state are deliberately not declared as required parameters. When the user declines, or the flow fails, Discord comes back carrying only error and no code, so requiring them would surface the perfectly normal "the user declined" path as a format error (422).
     """
     db = await get_db(request)
     config = await get_config(request)
     if error:
-        # 利用者が認可を断った場合もここへ来る。Discord の文言をそのまま見せず、こちらの言葉で伝える。
+        # A user declining authorization also lands here. Report it in our own words instead of showing Discord's verbatim.
         logger.info('Discord の認可が完了しませんでした: error=%s description=%s', error, error_description)
         raise BadRequest('Discord の認可が完了しませんでした。もう一度ログインしてください。')
     if not code or not state:
         raise BadRequest('認可の応答に code と state が含まれていません。もう一度ログインしてください。')
-    # 設定を読むのは認可が成立してからでよい。要求のたびに読むため、client_secret を画面から差し替えれば次のログインからその値で交換される。
+    # Settings need not be read until the authorization has actually succeeded. They are read on every request, so a client_secret replaced from the UI is used for the exchange from the next login onward.
     raw_session, redirect_to = await complete_login(
         db,
         config,
         await get_settings(request),
         code=code,
         state=state,
-        # 認可を開始したブラウザであることの照合。DB の state だけでは、攻撃者が開始した認可の戻り先を被害者に踏ませる経路(攻撃者のアカウントで被害者をログインさせる)を塞げない。
+        # Checks that this is the browser that began the authorization. The state in the DB alone cannot close the path where an attacker starts an authorization and makes the victim walk its callback (logging the victim in under the attacker's account).
         state_cookie=request.cookies.get(OAUTH_STATE_COOKIE_NAME),
     )
     response = RedirectResponse(redirect_to, status_code=status.HTTP_302_FOUND)
     set_session_cookie(response, config, raw_session)
-    # 役目を終えた state を残さない。次のログインでは新しい state を発行する。
+    # Don't leave a state behind once it has served its purpose. The next login issues a new one.
     clear_state_cookie(response, config)
     return response
 
 
 @router.post('/auth/logout', status_code=status.HTTP_204_NO_CONTENT)
 async def logout(request: Request) -> Response:
-    """セッションを破棄し、Cookie を落とす。
+    """Destroy the session and drop the cookie.
 
-    認証を要求しない。既に無効な Cookie で呼ばれてもログアウトは成立しているべきであり、「ログアウトするにはログインしていなければならない」という状態は利用者にとって手詰まりでしかない。DB の行を消すため、Cookie が何らかの理由で残っても、そのセッションは二度と通らない。他サイトからの POST で呼ばれても Cookie が載らない(SameSite=Lax)ため、意図しないログアウトを踏ませることもできない。
+    Requires no authentication. Logout should hold even when called with an already-invalid cookie; "you have to be logged in to log out" is nothing but a dead end for the user. The DB row is deleted, so even if the cookie survives for some reason, that session never passes again. A POST from another site carries no cookie (SameSite=Lax), so nobody can be walked into an unintended logout either.
     """
     db = await get_db(request)
     config = await get_config(request)

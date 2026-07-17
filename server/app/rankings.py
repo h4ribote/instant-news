@@ -1,19 +1,19 @@
-"""報道社ランキングの集計。
+"""The publisher ranking tally.
 
-反応の実体は Discord 側にあり、bot が article_discord_posts へ賛成(up_count)と反対(down_count)の数を、article_comments へコメントを写してくる。1 記事が複数チャンネルへ通知されうるため、記事としての賛否はその記事の全行の合計であり、報道社としての実績はさらにその報道社の全記事の合計になる。
+The real reactions live on Discord: the bot mirrors up-vote (up_count) and down-vote (down_count) counts into article_discord_posts, and comments into article_comments. One article may be notified to several channels, so an article's up/down votes are the sum over all of its rows, and a publisher's track record is in turn the sum over all of that publisher's articles.
 
-点数は記事ごとに次の規則で求め、それを報道社ごとに合計する(賛成 up、反対 down、コメント数 c として)。
+The score is computed per article by the rule below and then summed per publisher (up-votes as up, down-votes as down, comment count as c).
 
-  ・2 × down ≥ up … その記事は叩かれている。点数は up + c とし、反対は加えない。
-  ・2 × down < up  … 叩かれてはいない。点数は up + (down ÷ 2 の切り捨て) + c とし、反対も関心の証として半分だけ加える。
+  - 2 × down ≥ up … the article is being piled on. The score is up + c; down-votes are not added.
+  - 2 × down < up  … it is not being piled on. The score is up + (down ÷ 2, floored) + c; down-votes are added at half weight, as evidence of interest.
 
-反対が点数を引くことはない。反対は「読まれなかった」ことではなく「読まれたうえで反対された」ことの印であり、賛成に対して十分小さい限りは注目の大きさとして数える。一方で反対が賛成に迫るほど付いた記事は、その注目を実績として数えない。読者へ見せる記事の点数(賛成 − 反対)とは別の量であり、こちらは順位を決めるためだけに使う。
+Down-votes never subtract from the score. A down-vote marks "read, and disagreed with", not "not read", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record. This is a different quantity from the article score shown to readers (up-votes − down-votes); it exists only to decide the ordering.
 
-判定は必ず記事ごとに行う。叩かれているかどうかは記事の性質であり、報道社の合計に対して判定すると、1 本の炎上がその報道社の他の記事の評価まで一斉に変えてしまう。したがって集計は 2 段になる(記事ごとに畳んでから、報道社ごとに畳む)。1 段の GROUP BY では、条件を記事ごとに当てる場所が無い。
+The test is always applied per article. Being piled on is a property of an article: testing it against the publisher's totals would let a single pile-on change the rating of every other article of that publisher at once. The tally is therefore two-stage (fold per article, then fold per publisher). A single GROUP BY leaves nowhere to apply the condition per article.
 
-集計対象を status='published' かつ visibility='public' に限るのは、閲覧制限のある記事を公開のランキングに混ぜないためである。ランキングは誰でも見られる単一の成果物であり、members 限定・ロール限定の記事を数に含めると、その記事を読めない者にも「そこに何かがある」ことと、その反応の大きさが漏れる。
+The tally is restricted to status='published' AND visibility='public' so that articles with access restrictions are not mixed into a public ranking. The ranking is a single artefact anyone can see; counting members-only or role-restricted articles would leak both that "something is there" and the size of its reactions to people who cannot read it.
 
-記事広告(is_sponsored)は含める。開示されている以上、読者はそれが広告であることを踏まえたうえで反応しており、その反応は実際に起きた事実である。除外すると、開示した記事だけが実績を失うことになり、開示しない動機を作ってしまう。
+Sponsored articles (is_sponsored) are included. They are disclosed, so readers react knowing the article is an ad, and that reaction is a fact that actually happened. Excluding them would mean only disclosed articles lose track record, which creates an incentive not to disclose.
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ from typing import Any, Final
 
 from common.db import Database
 
-# 期間の既定値と、1 度に返す報道社の既定数。
+# The default period, and the default number of publishers returned in one call.
 DEFAULT_DAYS: Final = 7
 DEFAULT_LIMIT: Final = 10
 
-# 記事 1 本の点数。上の docstring の規則をそのまま書き下したものであり、記事ごとに畳んだ表(別名 a)に対して当てる。
-# FLOOR で切り捨てるのは、反対 1 件を 0.5 点として持ち込まないため(点数は整数で扱う)。
+# The score of one article: the rule from the module docstring written out, applied to the per-article folded table (aliased a).
+# FLOOR truncates so that a single down-vote is never brought in as 0.5 of a point; scores are integers.
 ARTICLE_SCORE_SQL: Final = '''
     CASE WHEN 2 * a.down_votes >= a.up_votes
          THEN a.up_votes + a.comments
@@ -37,12 +37,12 @@ ARTICLE_SCORE_SQL: Final = '''
 
 
 def article_totals_sql(where: str) -> str:
-    '''記事ごとに賛否とコメント数を畳む問い合わせを組み立てる。外側は必ず別名 a で受ける(ARTICLE_SCORE_SQL がその名前を参照するため)。
+    '''Build the query that folds up/down votes and comment count per article. The outer query must always alias the result a, because ARTICLE_SCORE_SQL refers to it by that name.
 
-    where には呼び出し側が対象の記事を絞る条件を渡す。プレースホルダを含んでよいが、値そのものを文字列で埋め込んではならない。
+    where takes the caller's condition narrowing down the articles to tally. It may contain placeholders, but values themselves must never be interpolated into it as text.
 
-    通知先が 0 件の記事(カテゴリにもタグにも通知チャンネルが無い記事)は賛否を持ち得ないが、記事数には数える必要があるため LEFT JOIN で落とさない。
-    コメント数を結合ではなく相関副問い合わせで求めるのは、通知の行と結合すると 1 記事が通知先の数だけ行に増え、賛否の合計がその数だけ水増しされるためである。
+    An article with no notify target (neither its category nor any of its tags has a notify channel) cannot have up/down votes, yet still has to count towards the article count, so LEFT JOIN keeps it.
+    The comment count is a correlated subquery rather than a join because joining the notification rows multiplies one article into as many rows as it has notify targets, inflating the up/down sums by that factor.
     '''
     return f'''
         SELECT articles.id AS article_id,
@@ -57,7 +57,7 @@ def article_totals_sql(where: str) -> str:
     '''
 
 
-# 報道社ごとに、記事ごとの点数を合計する。
+# Sum the per-article scores for each publisher.
 _RANKING_SQL: Final = f'''
     SELECT
         p.id,
@@ -81,13 +81,13 @@ _RANKING_SQL: Final = f'''
 
 
 async def publisher_ranking(db: Database, *, days: int = DEFAULT_DAYS, limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
-    """直近 days 日の報道社ランキングを score の降順で最大 limit 件返す。
+    """Return the publisher ranking for the last days days, score descending, at most limit rows.
 
-    score の規則はモジュールの docstring に述べたとおりである。同点は記事数の多い順、さらに同じなら名前順で並べ、結果の順序が呼び出しごとに揺れないようにする。
+    The score rule is the one stated in the module docstring. Ties are broken by article count descending, then by name, so the result order does not shift from call to call.
 
-    返す各行は {'publisher': {...}, 'article_count': int, 'up_count': int, 'down_count': int, 'comment_count': int, 'score': int} の形をとる。publisher には報道社の行をそのまま入れるため、そのまま PublisherOut として検証できる。
+    Each row returned has the shape {'publisher': {...}, 'article_count': int, 'up_count': int, 'down_count': int, 'comment_count': int, 'score': int}. publisher holds the publisher row verbatim, so it validates as PublisherOut as-is.
 
-    days・limit は呼び出し側(ルータのクエリパラメータ)で範囲を検証する前提だが、0 以下の指定は結果が空になるか SQL が壊れるだけで意図が伝わらないため、ここで明確に弾く。
+    days and limit are expected to be range-checked by the caller (the router's query parameters), but a value below 1 would only produce an empty result or break the SQL without conveying the intent, so it is rejected outright here.
     """
     if days < 1:
         raise ValueError(f'集計期間の日数は 1 以上で指定してください: {days}')
@@ -106,7 +106,7 @@ async def publisher_ranking(db: Database, *, days: int = DEFAULT_DAYS, limit: in
                 'stance': row['stance'],
             },
             'article_count': int(row['article_count']),
-            # SUM() は MySQL では DECIMAL を返すため、JSON へ出す前に int へ寄せる。
+            # SUM() returns DECIMAL on MySQL, so coerce to int before it goes out as JSON.
             'up_count': int(row['up_count']),
             'down_count': int(row['down_count']),
             'comment_count': int(row['comment_count']),

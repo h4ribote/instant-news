@@ -1,12 +1,12 @@
-"""プラットフォームの設定。真実は MySQL の settings 表にあり、config.yaml の対応する値は初回起動時の初期値としてのみ使う。
+"""Platform settings. The source of truth is the MySQL settings table; the matching values in config.yaml are used only as seed values on first boot.
 
-config.yaml が常に真実であり続けるのは、設定を DB から読むために先に要る値(server・database)と、コンテナの外で決まる値(画像の保存先。名前付きボリュームのマウント先と一致していなければ意味を成さない)だけである。それ以外は管理者がフロントエンドから変更できる必要があり、設定ファイルの書き換えとコンテナの再起動を要求する理由がない。
+config.yaml stays the source of truth only for what is needed before settings can be read from the DB (server, database) and for what is decided outside the container (the image storage directory, which is meaningless unless it matches the named volume's mount point). Everything else must be changeable by an admin from the frontend, and there is no reason to require editing the config file and restarting the container for it.
 
-起動のたびに設定ファイルで DB を上書きしてはならない。画面から変更した値が次の再起動で黙って元へ戻り、「設定したはずの値が効いていない」という最も原因を追いにくい状態になる。どちらが真実かは一方に決める必要があり、ここでは DB を真実とする。
+The config file must never overwrite the DB on every boot: values changed from the UI would silently revert on the next restart, producing the hardest state of all to diagnose — the value you thought you set is not taking effect. One of the two has to be authoritative, and here it is the DB.
 
-型・既定値・検証・秘密かどうか・変更に再起動を要するかは、この登録簿(REGISTRY)がコード側で定義する。settings 表は値だけを持つ。設定を増やすときは登録簿に足すだけでよく、表の変更も画面の変更も要らない(画面は登録簿を読んで生成する)。
+Kind, default, validation, secrecy and whether a change needs a restart are defined in code by this registry (REGISTRY). The settings table holds values only. Adding a setting means adding it to the registry — no table change and no UI change (the UI reads the registry and generates itself).
 
-値の JSON 表現では Discord の ID を文字列にする。JavaScript の Number は 2^53 までしか正確に表せず、スノーフレークは黙って壊れる。
+The JSON representation renders Discord IDs as strings: JavaScript's Number is exact only to 2^53, so snowflakes break silently.
 """
 
 from __future__ import annotations
@@ -23,51 +23,51 @@ from .snowflake import to_snowflake
 if TYPE_CHECKING:
     from .db import Database
 
-# 設定の再読み込み間隔(秒)。server と bot は別のプロセスであり、一方が変更した設定を他方が知る手段はこの読み直ししかない。短くすると変更が早く伝わるが DB への問い合わせが増える。設定の変更は稀であり、数秒の遅れは実害にならない。変更した本人には即座に反映される(set_many が自プロセスの caches を捨てるため)。
+# Settings reload interval, in seconds. server and bot are separate processes, and re-reading is the only way one learns of a setting the other changed. A shorter interval propagates changes sooner but queries the DB more often; changes are rare and a few seconds of lag does no real harm. Whoever made the change sees it immediately, since set_many drops its own process's cache.
 CACHE_TTL_SECONDS: Final = 10.0
 
 SettingKind = Literal['id', 'id_list', 'int', 'number', 'str', 'secret']
 
-# ID がどの実体を指すかを表す標識。kind は値の形(id か id_list か)しか語らないため、これが無いと「この設定はロールの配列である」ことを画面へ伝える手段が無く、画面はキー名を直に見て分岐するしかない。キー名で分岐させると「画面にキーを直書きしない」という登録簿の設計が崩れ、後から別の実体を指す id_list を足したときに、その欄までロールの選択肢が並ぶ。
-# 参照先の実体を DB に持つものだけを表せる。チャンネル(channel)を足すには、bot が discord_roles と同じようにチャンネルを取り込む必要がある(現在その表は無く、通知先チャンネルは ID の直接入力である)。
+# Marker for which entity an ID points at. kind only states the shape of the value (id or id_list), so without this there is no way to tell the UI "this setting is an array of roles" and it would have to branch on the key name. Branching on key names breaks the registry's design of never hardcoding keys in the UI, and the day an id_list pointing at some other entity is added, that field gets the list of roles too.
+# Only entities the DB holds rows for can be expressed here. Adding a channel would require the bot to import channels the way it imports discord_roles (there is no such table today, so notify channels are entered as raw IDs).
 SettingRef = Literal['role']
 
 
 class _Required:
-    """既定値を持たない設定であることを表す標識。この設定は初回起動時に config.yaml で与える必要がある。"""
+    """Marker for a setting with no default: it must be given in config.yaml on first boot."""
 
     def __repr__(self) -> str:
         return '<必須>'
 
 
-# 既定値を持てない設定に使う。guild の ID や資格情報のように、その環境でしか決まらない値には妥当な既定が存在しない。
+# For settings that cannot have a default: values determined solely by the environment, such as the guild ID or credentials, have no sensible default.
 REQUIRED: Final = _Required()
 
 
 @dataclass(frozen=True)
 class SettingDef:
-    """設定 1 つの定義。画面の生成・検証・秘密の扱いのすべてがこの定義から決まる。"""
+    """One setting's definition. UI generation, validation and secret handling all follow from it."""
 
     key: str
     kind: SettingKind
     label: str
     description: str
-    # 変更できない設定。値は画面に表示するが書き換えさせない。
+    # Not editable: the value is shown on the admin screen but cannot be written.
     editable: bool = True
-    # 変更してもプロセスが読み直さない設定。画面はその旨を示す。
+    # The process does not re-read this after a change; the admin screen says so.
     restart_required: bool = False
-    # ID がどの実体を指すか。kind が id / id_list の設定にだけ意味がある。画面はこれを見て、ID の直接入力の代わりに実体の選択 UI を出す。
+    # Which entity the ID points at. Meaningful only when kind is id / id_list. The UI reads this and offers an entity picker instead of raw ID entry.
     ref: SettingRef | None = None
     minimum: float | None = None
-    # minimum を「以上」ではなく「より大きい」として扱う。0 に意味が無い設定(タイムアウト等)に使う。
+    # Treat minimum as "greater than" rather than "at least". For settings where 0 is meaningless, such as timeouts.
     exclusive_minimum: bool = False
     maximum: float | None = None
-    # 初回起動時に config.yaml がこの設定を持たない場合に使う既定値。REQUIRED なら config.yaml で与える必要がある。既定値を持たせることで、設定を増やしても既存のデプロイの config.yaml を編集せずに済む。
+    # Default used when config.yaml omits this setting on first boot. REQUIRED means config.yaml must supply it. Giving a setting a default is what lets one be added without existing deployments having to edit their config.yaml.
     default: Any = REQUIRED
 
     @property
     def secret(self) -> bool:
-        """生値を API から返してはならない設定か。設定済みかどうかだけを返す。"""
+        """Whether this setting's raw value must never be returned from the API; only whether it is set is returned."""
         return self.kind == 'secret'
 
     @property
@@ -75,7 +75,7 @@ class SettingDef:
         return self.default is not REQUIRED
 
 
-# 設定の登録簿。ここに無いキーは読み書きしない(settings 表に古い行が残っていても無視される)。
+# The settings registry. Keys absent from here are never read or written; a stale row left in the settings table is ignored.
 REGISTRY: Final[tuple[SettingDef, ...]] = (
     SettingDef(
         key='discord.guild_id', kind='id', editable=False,
@@ -177,16 +177,14 @@ REGISTRY: Final[tuple[SettingDef, ...]] = (
 DEFS_BY_KEY: Final[dict[str, SettingDef]] = {d.key: d for d in REGISTRY}
 
 
-# --------------------------------------------------------------------------
-# 設定値の形。config.yaml から組み立てても settings 表から組み立てても同じ型になる。
-# --------------------------------------------------------------------------
+# The shape of the settings. Building from config.yaml and building from the settings table yield the same types.
 
 
 @dataclass(frozen=True)
 class OAuthConfig:
-    """Discord OAuth2 のアプリケーション資格情報。必要なスコープは identify と guilds.members.read。
+    """Discord OAuth2 application credentials. The scopes required are identify and guilds.members.read.
 
-    認可後に戻る URL(redirect_uri)は設定として持たない。戻り先の経路はこちらのルーターが決めており(server/app/auth.py の OAUTH_CALLBACK_PATH)、オリジンは config.yaml の server.base_url であるため、入りうる正当な値は 1 つしかない。設定として独立に持つと、base_url と食い違った値を保存できてしまい、そのときログインだけが静かに壊れる(Discord が、認可の結果を受け取る経路が無い場所へ戻す)。導出は server/app/auth.py の oauth_redirect_uri が行う。
+    The redirect_uri is not a setting. Our own router owns the callback route (OAUTH_CALLBACK_PATH in server/app/auth.py) and the origin is server.base_url from config.yaml, so exactly one legitimate value exists. Holding it as an independent setting would allow storing a value that drifts from base_url, and then login alone breaks silently, because Discord returns the user to a place with no route to receive the authorization result. oauth_redirect_uri in server/app/auth.py derives it.
     """
 
     client_id: str
@@ -195,9 +193,9 @@ class OAuthConfig:
 
 @dataclass(frozen=True)
 class BotConfig:
-    """bot の資格情報と、待ち行列を見に行く間隔・取りこぼしを照合する間隔。
+    """The bot's credentials, the interval at which it checks the queue, and the intervals at which it reconciles missed events.
 
-    ロールの変更も投票もコメントもゲートウェイのイベントで即座に反映されるため、ここに「反映の速さ」を決める設定は無い。間隔が決めるのは、イベントを取りこぼした場合にそれが正されるまでの上限だけである。
+    Role changes, votes and comments all apply immediately from gateway events, so nothing here decides how fast a change takes effect. The intervals set only the upper bound on how long a missed event can go uncorrected.
     """
 
     token: str
@@ -209,7 +207,7 @@ class BotConfig:
 
 @dataclass(frozen=True)
 class DiscordConfig:
-    """対象とする単一 guild と、その guild に対する認証・bot の設定。"""
+    """The single target guild, and the auth and bot settings for it."""
 
     guild_id: int
     oauth: OAuthConfig
@@ -218,9 +216,9 @@ class DiscordConfig:
 
 @dataclass(frozen=True)
 class AdminConfig:
-    """プラットフォーム管理の資格をロールへ委譲するための設定。
+    """Settings for delegating platform admin eligibility to roles.
 
-    role_ids が空でも、Discord の Administrator 権限を持つロールの保有者と guild オーナーは管理者として扱われる(guild オーナーは users.is_guild_owner として bot が取り込むため、設定には現れない)。
+    Even with role_ids empty, holders of a role carrying Discord's Administrator permission and the guild owner are treated as admins (the guild owner never appears in settings, because the bot imports it as users.is_guild_owner).
     """
 
     role_ids: tuple[int, ...]
@@ -228,7 +226,7 @@ class AdminConfig:
 
 @dataclass(frozen=True)
 class BreakingConfig:
-    """速報の権限と mention 先。どちらも空のリストが「誰も立てられない」「mention しない」という有効な設定である。"""
+    """Breaking-news permission and mention targets. An empty list is a valid setting for both: nobody may flag an article as breaking, and no role is mentioned."""
 
     allowed_role_ids: tuple[int, ...]
     mention_role_ids: tuple[int, ...]
@@ -236,16 +234,16 @@ class BreakingConfig:
 
 @dataclass(frozen=True)
 class ArticlesConfig:
-    """記事の投稿に関する制約。"""
+    """Constraints on posting articles."""
 
     breaking: BreakingConfig
-    # API キー 1 本あたりの記事の作成・更新の上限(1 時間あたり)。自動投稿は本質的に暴走しうるため、キー単位で上限を設ける。
+    # Rate limit on article creates and updates per API key, per hour. Automated posting can inherently run away, so the limit is per key.
     api_rate_limit_per_hour: int
 
 
 @dataclass(frozen=True)
 class MediaFetchConfig:
-    """本文中の画像 URL からの取得に関する上限。任意の URL をサーバーに取得させる機能であるため、上限は安全側の要件でもある。"""
+    """Limits on fetching from image URLs found in the article body. Since the feature makes the server fetch arbitrary URLs, these limits are also a safety requirement."""
 
     max_images_per_article: int
     max_bytes: int
@@ -256,17 +254,17 @@ class MediaFetchConfig:
 
 @dataclass(frozen=True)
 class MediaLimits:
-    """画像の取り込みの上限。保存先(storage_dir)は実行環境と一体であるため、ここには含めず config.yaml が持つ。"""
+    """Limits on image ingest. The storage directory (storage_dir) is inseparable from the runtime environment, so it is not here — config.yaml holds it."""
 
     fetch: MediaFetchConfig
-    # デコード後の最大画素数。展開爆弾(数 KB の PNG が展開時に数十 GB の画素になる)への対策はバイト数では効かない。
+    # Max pixels after decoding. A byte limit is no defence against a decompression bomb: a few-KB PNG that expands to tens of GB of pixels.
     max_pixels: int
     quota_bytes_per_user: int
 
 
 @dataclass(frozen=True)
 class RuntimeSettings:
-    """settings 表が持つ設定の一式。config.yaml の初期値からも同じ型を組み立てる。"""
+    """The full set of settings held in the settings table. The same type is built from config.yaml's seed values."""
 
     discord: DiscordConfig
     admin: AdminConfig
@@ -274,9 +272,7 @@ class RuntimeSettings:
     media: MediaLimits
 
 
-# --------------------------------------------------------------------------
-# 値の検証と正規化。API からの入力も config.yaml の初期値も同じ関門を通す。
-# --------------------------------------------------------------------------
+# Validating and normalizing values. API input and config.yaml seed values pass through the same gate.
 
 
 def _type_name(value: Any) -> str:
@@ -284,9 +280,9 @@ def _type_name(value: Any) -> str:
 
 
 def coerce_value(defn: SettingDef, raw: Any) -> Any:
-    """外部から来た値を検証して正規化する。不正なら理由を含む ValueError を送出する。
+    """Validate and normalize a value arriving from outside; raise ValueError with the reason when it is invalid.
 
-    id は int、id_list は tuple[int, ...] を正規形とする。設定ファイルからも API からも文字列で受け取り、ここで一度だけ int へ寄せる。
+    The canonical form is int for id and tuple[int, ...] for id_list. Both the config file and the API deliver them as strings, and this is the one place they are converted to int.
     """
     if defn.kind == 'id':
         try:
@@ -303,14 +299,14 @@ def coerce_value(defn: SettingDef, raw: Any) -> Any:
                 ids.append(to_snowflake(item))
             except ValueError as exc:
                 raise ValueError(f'設定 {defn.key}[{index}]: Discord の ID として解釈できません({exc})。') from exc
-        # 重複は意味を持たないため落とす。順序は入力のまま保つ(画面での並びが勝手に変わらないようにするため)。
+        # Duplicates carry no meaning, so drop them. Keep the input order, so the ordering in the UI does not rearrange itself.
         seen: dict[int, None] = {}
         for value in ids:
             seen.setdefault(value, None)
         return tuple(seen)
 
     if defn.kind == 'int':
-        # bool は int の派生であるため、先に弾かないと true が 1 として通ってしまう。
+        # bool derives from int, so unless it is rejected first, true would pass as 1.
         if isinstance(raw, bool) or not isinstance(raw, int):
             raise ValueError(f'設定 {defn.key}: 整数である必要があります(実際は {_type_name(raw)})。')
         return _check_range(defn, raw)
@@ -342,7 +338,7 @@ def _check_range(defn: SettingDef, value: float) -> Any:
 
 
 def to_json_value(defn: SettingDef, value: Any) -> Any:
-    """正規形を JSON へ落とす。ID は文字列にする(JavaScript の Number では 64bit の ID が壊れるため)。"""
+    """Render the canonical form as JSON. IDs become strings, because JavaScript's Number corrupts a 64-bit ID."""
     if defn.kind == 'id':
         return str(value)
     if defn.kind == 'id_list':
@@ -350,13 +346,11 @@ def to_json_value(defn: SettingDef, value: Any) -> Any:
     return value
 
 
-# --------------------------------------------------------------------------
-# 平坦なキーから RuntimeSettings を組み立てる
-# --------------------------------------------------------------------------
+# Building RuntimeSettings from flat keys.
 
 
 def build(values: Mapping[str, Any]) -> RuntimeSettings:
-    """平坦な辞書から RuntimeSettings を組み立てる。キーの欠落は KeyError。"""
+    """Build RuntimeSettings from a flat dict. A missing key raises KeyError."""
     return RuntimeSettings(
         discord=DiscordConfig(
             guild_id=values['discord.guild_id'],
@@ -395,18 +389,16 @@ def build(values: Mapping[str, Any]) -> RuntimeSettings:
 
 
 class MissingSettingsError(RuntimeError):
-    """settings 表に必要なキーが揃っていない。初期値の投入(bootstrap)が済んでいない場合に起こる。"""
+    """The settings table does not have all the required keys. Happens when the seed values have not been bootstrapped."""
 
 
-# --------------------------------------------------------------------------
-# 設定の読み書き
-# --------------------------------------------------------------------------
+# Reading and writing settings.
 
 
 class SettingsStore:
-    """settings 表を読み書きし、短い時間だけ結果を保持する。
+    """Reads and writes the settings table, holding the result for a short time.
 
-    server と bot は別のプロセスであるため、一方が変更した設定を他方へ伝える経路は DB しかない。読み直しの間隔(CACHE_TTL_SECONDS)がそのまま伝播の遅れになる。
+    server and bot are separate processes, so the DB is the only path by which one tells the other about a setting it changed. The re-read interval (CACHE_TTL_SECONDS) is exactly the propagation lag.
     """
 
     def __init__(self, db: Database, *, ttl: float = CACHE_TTL_SECONDS) -> None:
@@ -417,13 +409,13 @@ class SettingsStore:
         self._lock = asyncio.Lock()
 
     async def bootstrap(self, initial: Mapping[str, Any]) -> list[str]:
-        """未登録のキーを初期値で埋め、埋めたキーを返す。
+        """Seed the keys that have no row yet, and return the keys that were filled in.
 
-        値の出どころは、config.yaml に書かれていればその値、無ければ登録簿の既定値。既定値を持たない設定(guild の ID や資格情報のように、その環境でしか決まらない値)が config.yaml にも無い場合は、どのキーが足りないのかを挙げて落とす。
+        A value comes from config.yaml if it is written there, otherwise from the registry's default. When a setting with no default (one determined solely by the environment, such as the guild ID or credentials) is absent from config.yaml too, fail and list which keys are missing.
 
-        既にある行は触らない。起動のたびに config.yaml で上書きすると、画面から変更した値が次の再起動で黙って元へ戻る。設定を増やした場合、新しいキーだけがここで埋まる(既定値を持つ設定なら config.yaml を編集せずに済む)。
+        Rows that already exist are left alone. Overwriting from config.yaml on every boot would silently revert values changed from the UI at the next restart. When a setting is added, only the new key is seeded here (a setting with a default needs no config.yaml edit).
 
-        欠けているキーを先に読み出してから書くのは、通常の再起動で 1 件も INSERT しないためである。全キーを INSERT IGNORE で流すと、MySQL が既存の行ごとに重複キーの警告を出し、aiomysql がそれを Python の警告へ写す。起動のたびに settings の主キーに対する重複の警告が並ぶと、まさに設定ファイルが DB を上書きしているように読め、この設計の意図と正反対の印象を与える。
+        The missing keys are read before writing so that a normal restart INSERTs nothing. Running INSERT IGNORE over every key makes MySQL emit a duplicate-key warning for each existing row, which aiomysql relays into a Python warning. A wall of duplicate-key warnings against the settings primary key on every boot reads exactly like the config file overwriting the DB — the opposite of what this design intends.
         """
         rows = await self._db.fetch_all('SELECT setting_key FROM settings')
         existing = {str(row['setting_key']) for row in rows}
@@ -442,7 +434,7 @@ class SettingsStore:
             raw = initial[defn.key] if defn.key in initial else defn.default
             value = coerce_value(defn, raw)
             payload = json.dumps(to_json_value(defn, value), ensure_ascii=False)
-            # server と bot が同時に初回起動した場合、読み出しから書き込みまでの間に相手が入れうる。先に入れた方を正とするため IGNORE で受け流す。
+            # If server and bot first-boot at the same time, the other one can insert between our read and our write. IGNORE lets that pass: the first writer wins.
             affected = await self._db.execute(
                 'INSERT IGNORE INTO settings (setting_key, value, updated_by) VALUES (%s, %s, NULL)',
                 defn.key, payload,
@@ -453,13 +445,13 @@ class SettingsStore:
         return inserted
 
     async def refresh(self) -> None:
-        """保持している値を捨て、次の読み取りで DB から読み直させる。"""
+        """Drop the held values so the next read goes back to the DB."""
         async with self._lock:
             self._cache = None
             self._cached_at = 0.0
 
     async def raw_values(self, *, force: bool = False) -> dict[str, Any]:
-        """登録簿のキーごとの正規形を返す。"""
+        """Return the canonical form of each key in the registry."""
         async with self._lock:
             fresh = self._cache is not None and (time.monotonic() - self._cached_at) < self._ttl
             if fresh and not force:
@@ -474,7 +466,7 @@ class SettingsStore:
                     missing.append(defn.key)
                     continue
                 raw = stored[defn.key]
-                # aiomysql は JSON 列を文字列で返すため、ここで解く。
+                # aiomysql returns JSON columns as strings, so decode here.
                 if isinstance(raw, (str, bytes, bytearray)):
                     raw = json.loads(raw)
                 values[defn.key] = coerce_value(defn, raw)
@@ -487,13 +479,13 @@ class SettingsStore:
             return dict(values)
 
     async def snapshot(self, *, force: bool = False) -> RuntimeSettings:
-        """設定の一式を組み立てて返す。"""
+        """Assemble and return the full set of settings."""
         return build(await self.raw_values(force=force))
 
     async def set_many(self, updates: Mapping[str, Any], *, updated_by: int | None) -> list[str]:
-        """設定を部分更新する。変更したキーを返す。
+        """Partially update settings; return the keys that changed.
 
-        検証は全件まとめて先に行う。1 つでも不正なら何も書かない(一部だけ適用された中途半端な設定を作らないため)。
+        Everything is validated up front, together. If even one value is invalid, nothing is written, so no half-applied settings state can be created.
         """
         if not updates:
             return []
@@ -513,16 +505,16 @@ class SettingsStore:
                     'UPDATE settings SET value = %s, updated_by = %s WHERE setting_key = %s',
                     payload, updated_by, key, conn=conn,
                 )
-        # 変更した本人には即座に反映する。他のプロセスは CACHE_TTL_SECONDS 以内に追いつく。
+        # Whoever made the change sees it immediately; the other processes catch up within CACHE_TTL_SECONDS.
         await self.refresh()
         return [key for key, _ in prepared]
 
     async def describe(self) -> list[dict[str, Any]]:
-        """画面を生成するための、定義と現在値の一覧。
+        """The definitions and current values from which the UI generates itself.
 
-        秘密の設定は生値を返さず、設定済みかどうかだけを返す。API から返した時点で、画面を開ける者すべてに bot のトークンが渡ることになる。
+        A secret setting returns no raw value, only whether it is set. Returning one from the API would hand the bot token to everyone who can open the UI.
 
-        **入力欄の生成に要る記述は、値域(minimum / maximum / exclusive_minimum)と参照先(ref)まで含めてここが全て渡す。**渡さない項目は画面が知る術を持たず、画面側に同じ知識を書き写すことになる。書き写した分だけ登録簿と食い違い、値域なら「保存を押して初めて 400 で上限を知る」形で、参照先なら「キー名で分岐した設定にだけ選択 UI が出る」形で現れる。
+        **Everything needed to build an input field is passed from here, down to the range (minimum / maximum / exclusive_minimum) and the ref.** Whatever is not passed, the UI has no way to know, so it would end up duplicating the registry's knowledge, and every duplicated piece drifts from the registry. For the range, that surfaces as learning the max from a 400 only after pressing save; for the ref, as a picker appearing only for the settings the UI branched on by key name.
         """
         values = await self.raw_values()
         rows = await self._db.fetch_all('SELECT setting_key, updated_at, updated_by FROM settings')
@@ -556,5 +548,5 @@ class SettingsStore:
 
 
 def known_keys() -> Iterable[str]:
-    """登録簿にあるキー。CLI の入力補助と検証に使う。"""
+    """The keys in the registry. Used for the CLI's input completion and validation."""
     return (defn.key for defn in REGISTRY)

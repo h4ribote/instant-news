@@ -1,8 +1,8 @@
-"""記事のエンドポイント。
+"""Article endpoints.
 
-閲覧できない記事には 403 ではなく 404 を返す。403 は「そこに何かがある」ことを教えてしまい、存在自体が秘密である限定公開の記事では、それだけで漏洩になる。この規則は詳細・改版履歴・差分のすべてに一様に適用する(記事本体を隠しながら改版履歴からタイトルと本文が読めては意味がない)。
+An article the caller cannot view returns 404, not 403. A 403 reveals that something is there, and for a limited-visibility article whose very existence is secret, that alone is a leak. The rule applies uniformly to the detail, the revision history and the diff: hiding the article body achieves nothing if the title and body can still be read out of the revision history.
 
-業務上の規則の判定は articles.py に置き、ここは要求の受け取りと応答の組み立てに徹する。同じ保存・公開の手順を予約公開のループからも呼ぶためである。
+The business rules live in articles.py; this module sticks to receiving requests and assembling responses, so that the scheduled-publishing loop can call the same save and publish procedures.
 """
 
 from __future__ import annotations
@@ -44,13 +44,13 @@ router = APIRouter(tags=['articles'])
 _DEFAULT_PER_PAGE: Final = 20
 _MAX_PER_PAGE: Final = 100
 
-# コメントの 1 ページの件数。記事より多めに採るのは、コメントが 1 件あたり小さく、会話として続けて読むものであるため。
+# Comments per page. Larger than for articles because each comment is small and they are read straight through as a conversation.
 _DEFAULT_COMMENTS_PER_PAGE: Final = 50
 _MAX_COMMENTS_PER_PAGE: Final = 200
 
-# 賛否とコメント数は記事の全通知メッセージの合計である。1 記事が複数のチャンネルへ通知されうるため、article_discord_posts は記事につき複数行を持ち、行ごとに独立した数を保持する。
-# 差し引きを SQL で求めるときは必ず SUM() を経た値どうしで引く。up_count と down_count は符号なしであり、行ごとの引き算(dp.up_count - dp.down_count)は反対が賛成を上回った瞬間に、値が丸まるのではなく文そのものが失敗する。SUM() は DECIMAL を返すため負の値を扱える。
-# articles には別名を付けない。visibility_sql_filter が返す条件の断片は articles を表名として参照するため、別名を付けるとその断片が解決できない列を指し、一覧のクエリが実行時に落ちる。
+# Up/down votes and the comment count are summed over all of the article's notification posts: one article can be notified to several channels, so article_discord_posts holds several rows per article, each with its own independent counts.
+# When the subtraction is done in SQL, always subtract values that have been through SUM(). up_count and down_count are unsigned, so a per-row subtraction (dp.up_count - dp.down_count) does not clamp the moment down-votes exceed up-votes; the statement itself fails. SUM() returns DECIMAL, which can hold negatives.
+# Never alias articles. The condition fragment returned by visibility_sql_filter refers to articles by table name, so an alias makes that fragment name columns it cannot resolve and the listing query dies at runtime.
 _ARTICLE_COLUMNS: Final = """
     articles.id, articles.slug, articles.title, articles.excerpt, articles.body_md, articles.body_html,
     articles.cover_image_url, articles.author_id, articles.publisher_id, articles.category_id,
@@ -87,9 +87,7 @@ SELECT r.id, r.revision_number, r.editor_id, r.via_token_id, r.title, r.body_md,
 """
 
 
-# --------------------------------------------------------------------------
-# 行から応答の形へ
-# --------------------------------------------------------------------------
+# Rows to response shapes
 
 
 def _author_data(row: dict[str, Any]) -> dict[str, Any]:
@@ -153,7 +151,7 @@ def _list_item_data(row: dict[str, Any], tags: list[dict[str, Any]]) -> dict[str
         'sponsor_name': row['sponsor_name'],
         'status': row['status'],
         'view_count': int(row['view_count']),
-        # SUM() は MySQL から Decimal で返るため、そのまま int の項目へ渡さず明示的に変換する。
+        # SUM() comes back from MySQL as Decimal, so convert explicitly instead of passing it straight into an int field.
         'up_count': int(row['up_count']),
         'down_count': int(row['down_count']),
         'score': int(row['up_count']) - int(row['down_count']),
@@ -185,9 +183,9 @@ def _revision_item_data(row: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _fetch_tags(db: Database, article_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
-    """記事ごとのタグを引く。
+    """Fetch the tags of each article.
 
-    記事の一覧と同じクエリで JOIN すると、タグの数だけ記事の行が複製され、頁の件数が狂う。1 度の追加クエリでまとめて引き、記事へ割り当てる。
+    JOINing them into the listing query itself duplicates an article's row once per tag and throws off the page count. One extra query fetches them all at once and assigns them to their articles.
     """
     if not article_ids:
         return {}
@@ -213,9 +211,9 @@ async def _fetch_tags(db: Database, article_ids: list[int]) -> dict[int, list[di
 
 
 def _thread_url(guild_id: int, thread_id: int | None) -> str | None:
-    """スレッドを開く URL。スレッドはそれ自体が 1 つのチャンネルであるため、チャンネルの URL と同じ形で指せる。
+    """URL that opens the thread. A thread is itself a channel, so it is addressed in the same form as a channel URL.
 
-    組み立てるのがサーバーであるのは、この URL に対象 guild の ID が要るためである。guild_id はプラットフォームの設定にしかなく、画面はそれを知る手段を持たない。
+    The server builds it because the URL needs the target guild's ID: guild_id exists only in the platform settings, and the UI has no way to know it.
     """
     if thread_id is None:
         return None
@@ -223,7 +221,7 @@ def _thread_url(guild_id: int, thread_id: int | None) -> str | None:
 
 
 async def _fetch_discord_posts(db: Database, settings: RuntimeSettings, article_id: int) -> list[DiscordPostOut]:
-    """記事の通知メッセージの内訳を引く。未送信の行も返す(まだ送られていないことも、記事面が知ってよい事実である)。"""
+    """Fetch the breakdown of an article's notification posts. Rows not yet sent are returned too: that a post has not gone out yet is a fact the article page may know."""
     rows = await db.fetch_all(
         'SELECT dp.channel_id, dp.message_id, dp.thread_id, dp.up_count, dp.down_count, dp.posted_at, '
         '(SELECT COUNT(*) FROM article_comments ac WHERE ac.post_id = dp.id) AS comment_count '
@@ -238,7 +236,7 @@ async def _fetch_discord_posts(db: Database, settings: RuntimeSettings, article_
             thread_url=_thread_url(settings.discord.guild_id, row['thread_id']),
             up_count=int(row['up_count']),
             down_count=int(row['down_count']),
-            # 差し引きはここで求める。行の列どうしを SQL で引くと、符号なしの引き算になって文が失敗する。
+            # The subtraction is done here. Subtracting the row's columns from each other in SQL is unsigned arithmetic, and the statement fails.
             score=int(row['up_count']) - int(row['down_count']),
             comment_count=int(row['comment_count']),
             posted_at=row['posted_at'],
@@ -248,7 +246,7 @@ async def _fetch_discord_posts(db: Database, settings: RuntimeSettings, article_
 
 
 async def _article_out(db: Database, settings: RuntimeSettings, row: dict[str, Any]) -> ArticleOut:
-    """記事詳細の応答を組み立てる。"""
+    """Assemble the article detail response."""
     tags = (await _fetch_tags(db, [row['id']])).get(row['id'], [])
     role_rows = await db.fetch_all('SELECT role_id FROM article_visibility_roles WHERE article_id = %s', row['id'])
     correction_rows = await db.fetch_all(
@@ -269,13 +267,11 @@ async def _article_out(db: Database, settings: RuntimeSettings, row: dict[str, A
     return ArticleOut.model_validate(data)
 
 
-# --------------------------------------------------------------------------
-# 記事の取得と閲覧の判定
-# --------------------------------------------------------------------------
+# Loading an article and the visibility check
 
 
 def _parse_id(value: str) -> int:
-    """パスの ID を int へ。ID として解釈できない値は、存在しない記事と区別する意味が無いため 404 にする。"""
+    """Parse the path ID to int. A value that cannot be read as an ID gives 404: there is no point distinguishing it from an article that does not exist."""
     try:
         return to_snowflake(value)
     except ValueError as exc:
@@ -289,7 +285,7 @@ async def _load_article(db: Database, *, article_id: int | None = None, slug: st
 
 
 async def _require_viewable(db: Database, settings: RuntimeSettings, principal: Principal | None, slug: str) -> dict[str, Any]:
-    """slug から記事を引き、閲覧できなければ 404 にする。settings は管理者の判定(設定で委譲されたロールを含む)に要る。"""
+    """Load an article by slug and 404 if it cannot be viewed. settings is needed for the admin check, which includes the roles delegated through the settings."""
     row = await _load_article(db, slug=slug)
     if row is None or not await can_view_article(db, principal, row, settings=settings):
         raise NotFound('記事が見つかりません。')
@@ -297,7 +293,7 @@ async def _require_viewable(db: Database, settings: RuntimeSettings, principal: 
 
 
 async def _require_editable(db: Database, settings: RuntimeSettings, principal: Principal, article_id: int) -> dict[str, Any]:
-    """記事を引き、その主体が編集・公開できることを確かめる。"""
+    """Load an article and confirm the principal may edit and publish it."""
     row = await _load_article(db, article_id=article_id)
     if row is None:
         raise NotFound('記事が見つかりません。')
@@ -305,9 +301,7 @@ async def _require_editable(db: Database, settings: RuntimeSettings, principal: 
     return row
 
 
-# --------------------------------------------------------------------------
-# 一覧
-# --------------------------------------------------------------------------
+# Listing
 
 
 @router.get('/api/articles', response_model=ArticleListOut)
@@ -323,11 +317,11 @@ async def list_articles(
     db: Database = Depends(get_db),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> ArticleListOut:
-    """公開済みの記事を新しい順に返す。閲覧範囲の絞り込みを必ず通す。"""
+    """Return published articles newest first. The visibility filter is always applied, and no admin clause is added on top of it: see visibility_sql_filter for what that leaves out."""
     conditions = ["articles.status = 'published'"]
     params: list[Any] = []
 
-    # 断片は既に括弧で閉じられているため、そのまま AND で連結できる。
+    # The fragment already comes parenthesised, so it can be ANDed straight in.
     visibility_sql, visibility_params = visibility_sql_filter(principal)
     conditions.append(visibility_sql)
     params.extend(visibility_params)
@@ -349,17 +343,17 @@ async def list_articles(
         conditions.append('articles.author_id = %s')
         params.append(author_id)
     if tag is not None:
-        # EXISTS で絞る。JOIN するとタグを複数持つ記事の行が複製され、件数と頁が狂う。
+        # Filter with EXISTS: a JOIN duplicates the row of an article that has several tags, throwing off both the total and the pages.
         conditions.append('EXISTS (SELECT 1 FROM article_tags atg JOIN tags t ON t.id = atg.tag_id WHERE atg.article_id = articles.id AND t.slug = %s)')
         params.append(tag)
     if latest_only:
-        # 相場のような定期記事が横断的な新着の流れを埋めるのを防ぐ。
+        # Keeps recurring articles such as market prices from filling the site-wide latest feed.
         conditions.append('c.include_in_latest = 1')
 
     where = ' AND '.join(conditions)
     total = int(await db.fetch_val(f'SELECT COUNT(*) {_ARTICLE_FROM} WHERE {where}', *params) or 0)
 
-    # 並びは公開日時の降順。同時刻の記事が頁の境界で重複・欠落しないよう ID で一意に決める。
+    # Ordered by published_at descending, made total by ID so that articles sharing a timestamp are neither duplicated nor dropped at a page boundary.
     rows = await db.fetch_all(
         f'SELECT {_ARTICLE_COLUMNS} {_ARTICLE_FROM} WHERE {where} ORDER BY articles.published_at DESC, articles.id DESC LIMIT %s OFFSET %s',
         *params,
@@ -371,9 +365,7 @@ async def list_articles(
     return ArticleListOut(items=items, page=page, per_page=per_page, total=total, has_next=page * per_page < total)
 
 
-# --------------------------------------------------------------------------
-# 保存・公開
-# --------------------------------------------------------------------------
+# Saving and publishing
 
 
 @router.post('/api/articles', response_model=ArticleSaveOut, status_code=201)
@@ -384,7 +376,7 @@ async def create_article(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal = Depends(require_scope('articles:write')),
 ) -> ArticleSaveOut:
-    """記事を作成する。"""
+    """Create an article."""
     article_id, failures = await save_article(db, config, settings, principal, article_id=None, payload=payload)
     return await _save_response(db, settings, article_id, failures)
 
@@ -398,15 +390,15 @@ async def update_article(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal = Depends(require_scope('articles:write')),
 ) -> ArticleSaveOut:
-    """記事を更新する。"""
+    """Update an article."""
     saved_id, failures = await save_article(db, config, settings, principal, article_id=_parse_id(article_id), payload=payload)
     return await _save_response(db, settings, saved_id, failures)
 
 
 async def _save_response(db: Database, settings: RuntimeSettings, article_id: int, failures: list[IngestFailure]) -> ArticleSaveOut:
-    """保存の応答を組み立てる。
+    """Assemble the save response.
 
-    取り込めなかった画像は必ず応答へ載せる。取り込めなかった URL は本文にそのまま残り、外部の CDN であればいずれ失効して画像が消えるため、黙って成功として扱うと、朽ちるリンクが誰にも気付かれないまま記事に残る。
+    Images that could not be ingested always go into the response. A URL that failed to ingest stays in the body as it is, and on an external CDN it eventually expires and the image disappears, so treating the save as a silent success leaves a rotting link in the article that nobody ever notices.
     """
     row = await _load_article(db, article_id=article_id)
     if row is None:
@@ -424,7 +416,7 @@ async def publish(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal = Depends(require_scope('articles:write')),
 ) -> ArticleOut:
-    """記事を公開する。署名を凍結し、同じトランザクションで通知を積む。"""
+    """Publish an article: freeze the byline and enqueue the notifications in the same transaction."""
     parsed = _parse_id(article_id)
     await _require_editable(db, settings, principal, parsed)
     await publish_article(db, settings, parsed)
@@ -434,9 +426,7 @@ async def publish(
     return await _article_out(db, settings, row)
 
 
-# --------------------------------------------------------------------------
-# 詳細・改版履歴
-# --------------------------------------------------------------------------
+# Detail and revision history
 
 
 @router.get('/api/articles/{slug}', response_model=ArticleOut)
@@ -446,9 +436,9 @@ async def get_article(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> ArticleOut:
-    """記事の詳細を返す。閲覧できなければ 404。"""
+    """Return the article detail. 404 if it cannot be viewed."""
     row = await _require_viewable(db, settings, principal, slug)
-    # updated_at を自身の値で明示的に更新する。省くと ON UPDATE CURRENT_TIMESTAMP が働き、閲覧のたびに「更新日時」が進んで、記事が編集されたのか読まれただけなのかを区別できなくなる。
+    # updated_at is explicitly written back to its own value. Omit it and ON UPDATE CURRENT_TIMESTAMP fires, advancing the last-updated time on every view, so an article that was edited can no longer be told apart from one that was merely read.
     await db.execute('UPDATE articles SET view_count = view_count + 1, updated_at = updated_at WHERE id = %s', row['id'])
     row['view_count'] = int(row['view_count']) + 1
     return await _article_out(db, settings, row)
@@ -463,13 +453,13 @@ async def list_comments(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> CommentListOut:
-    """記事のコメントを古い順に返す。閲覧できない記事なら 404。
+    """Return an article's comments oldest first. 404 if the article cannot be viewed.
 
-    コメントの閲覧範囲は記事の閲覧範囲そのものである。記事を読めない相手にコメントを返すと、本文を伏せたまま、その記事について何がどれだけ語られたかが漏れる。判定は記事詳細と同じ _require_viewable に委ねる(ここに独自の判定を書くと、記事側の規則が変わったときに片方だけが古くなる)。
+    A comment's visibility is the article's visibility itself. Returning comments to someone who cannot read the article leaks what was said about it and how much, while the body stays hidden. The check is delegated to the same _require_viewable the article detail uses; a separate check written here would go stale on its own the day the article-side rule changes.
 
-    古い順に返すのは、コメントが会話だからである。点数の高い順に並べ替えると、返信が元の発言より前に出て文脈が壊れる。
+    Oldest first because comments are a conversation. Sorting by score puts a reply ahead of the message it answers and breaks the context.
 
-    この API は読み出しのみで、書き込みを受け付けない。コメントの実体は Discord のスレッドにあり、書く場所はそこだけである(thread_url がその入口)。
+    This API is read-only and accepts no writes. The real comments are the replies in the Discord thread, and that is the only place to write them (thread_url is the entry point).
     """
     article = await _require_viewable(db, settings, principal, slug)
     total = int(await db.fetch_val('SELECT COUNT(*) FROM article_comments WHERE article_id = %s', article['id']) or 0)
@@ -487,7 +477,7 @@ async def list_comments(
         """,
         article['id'], per_page, (page - 1) * per_page,
     )
-    # スレッドは通知ごとに開くため、1 記事に複数ありうる。入口として示すのは最初に送られた通知のものにする(コメントはどのスレッドのものも同じ記事のコメントとして扱う)。
+    # A thread is opened per notification post, so one article can have several. The one offered as the entry point is the thread of the notification post sent first; comments from any thread count as the same article's comments.
     thread_row = await db.fetch_one(
         'SELECT thread_id FROM article_discord_posts WHERE article_id = %s AND thread_id IS NOT NULL ORDER BY enqueued_at, id LIMIT 1',
         article['id'],
@@ -506,7 +496,7 @@ async def list_comments(
                 body=row['body'],
                 up_count=int(row['up_count']),
                 down_count=int(row['down_count']),
-                # 差し引きはここで求める。行の列どうしを SQL で引くと符号なしの引き算になり、反対が賛成を上回った瞬間に文が失敗する。
+                # The subtraction is done here. Subtracting the row's columns from each other in SQL is unsigned arithmetic, and the statement fails the moment down-votes exceed up-votes.
                 score=int(row['up_count']) - int(row['down_count']),
                 posted_at=row['posted_at'],
                 edited_at=row['edited_at'],
@@ -525,7 +515,7 @@ async def list_revisions(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> list[RevisionListItem]:
-    """改版履歴の一覧を返す。"""
+    """Return the revision history listing."""
     article = await _require_viewable(db, settings, principal, slug)
     rows = await db.fetch_all(f'{_REVISION_SELECT} WHERE r.article_id = %s ORDER BY r.revision_number', article['id'])
     return [RevisionListItem.model_validate(_revision_item_data(row)) for row in rows]
@@ -539,7 +529,7 @@ async def get_revision(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> RevisionOut:
-    """過去版のスナップショットを返す。"""
+    """Return a past revision's snapshot."""
     article = await _require_viewable(db, settings, principal, slug)
     row = await _fetch_revision(db, article['id'], revision_number)
     data = _revision_item_data(row)
@@ -555,10 +545,10 @@ async def get_revision_diff(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> RevisionDiffOut:
-    """直前版との差分を unified diff の行の配列で返す。"""
+    """Return the diff against the immediately preceding revision as an array of unified-diff lines."""
     article = await _require_viewable(db, settings, principal, slug)
     current = await _fetch_revision(db, article['id'], revision_number)
-    # 直前版は revision_number - 1 とは限らない。連番は記事内で 1 から振るが、より小さい番号のうち最大のものを直前版とすれば、履歴に欠けがあっても正しく並ぶ。
+    # The immediately preceding revision is not necessarily revision_number - 1. The numbers run from 1 within an article, but taking the largest number below this one as the predecessor keeps the order right even where the history has gaps.
     previous = await db.fetch_one(
         f'{_REVISION_SELECT} WHERE r.article_id = %s AND r.revision_number < %s ORDER BY r.revision_number DESC LIMIT 1',
         article['id'],
@@ -571,7 +561,7 @@ async def get_revision_diff(
         current['body_md'].splitlines(),
         fromfile=f'revision {previous_number}' if previous_number is not None else '(初版の前)',
         tofile=f'revision {current["revision_number"]}',
-        # 行末の改行は splitlines() で落としてあるため、差分の側でも付けない。
+        # splitlines() has already dropped the trailing newlines, so the diff must not add them back.
         lineterm='',
     )
     return RevisionDiffOut(revision_number=current['revision_number'], previous_revision_number=previous_number, diff=list(diff))

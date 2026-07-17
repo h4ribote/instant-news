@@ -1,3 +1,3 @@
-"""HTTP サーバー。FastAPI アプリの組み立て(main)と API キー発行 CLI(cli)を持つ。"""
+"""HTTP server. Holds the FastAPI app assembly (main) and the API key issuing CLI (cli)."""
 
 from __future__ import annotations

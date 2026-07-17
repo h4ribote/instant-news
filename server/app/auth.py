@@ -1,14 +1,14 @@
-"""Discord OAuth2(PKCE)によるログイン、サーバー側セッション、API キーの発行。
+"""Discord OAuth2 (PKCE) login, server-side sessions, and API key issuance.
 
-このプラットフォームは独自のパスワードを持たず、Discord アカウントだけを身元とする。閲覧範囲も管理者資格も Discord のロールで決まるため、認可のスコープには identify(誰であるか)に加えて guilds.members.read(対象 guild でのロール)が要る。後者が無いとログインは成立しても、その利用者について何一つ判定できない。
+The platform has no password of its own: a Discord account is the only identity. Visibility and admin eligibility are both decided by Discord roles, so the authorization scopes need identify (who you are) plus guilds.members.read (roles in the target guild). Without guilds.members.read, login still succeeds but nothing whatsoever can be decided about the user.
 
-セッションと API キーは、どちらも生値を保存しない。Cookie や Authorization ヘッダに載るのは乱雑な不透明トークンで、DB にはその SHA-256 だけを置く。生値はそれを作った瞬間にしか存在せず、DB を読めても復元できない。
+Neither sessions nor API keys store the raw value. What rides in the cookie and the Authorization header is an opaque random token; the DB holds only its SHA-256. The raw value exists only at the moment it is created, and reading the DB cannot recover it.
 
-**API キーの生値は発行の応答で一度だけ返す。**再取得の手段を用意すると、保存しないという設計そのものが無意味になる。
+**An API key's raw value is returned exactly once, in the issue response.** Providing any way to retrieve it again would make the decision not to store it meaningless.
 
-OAuth2 の資格情報(client_id / client_secret)と対象 guild は settings 表が真実であり、要求のたびに読んだものを受け取る。起動時に読んで握り込まないため、画面から client_secret を差し替えれば次のログインからその値で交換される。
+The source of truth for the OAuth2 credentials (client_id / client_secret) and the target guild is the settings table, and these functions receive what was read on the current request. Nothing is read at startup and held, so replacing client_secret from the UI means the next login exchanges with that value.
 
-一方、config.yaml の server.base_url から決まるものが 2 つある。認可後に戻る URL(oauth_redirect_uri)と、Cookie に Secure を付けるかどうか(_cookies_are_secure)である。どちらも公開 URL がどこにあり https かどうかという実行環境の性質そのものであって、画面から変えられる設定ではない。したがって認可フローに関わる関数は、settings 表から来る RuntimeSettings と config.yaml から来る Config の両方を受ける。
+Two things come instead from config.yaml's server.base_url: the URL Discord returns to after authorization (oauth_redirect_uri) and whether cookies carry Secure (_cookies_are_secure). Both are properties of the runtime environment itself — where the public URL is and whether it is https — not settings changeable from the UI. So the functions involved in the authorization flow take both the RuntimeSettings coming from the settings table and the Config coming from config.yaml.
 """
 
 from __future__ import annotations
@@ -39,42 +39,42 @@ logger = logging.getLogger(__name__)
 DISCORD_API_BASE: Final = 'https://discord.com/api/v10'
 DISCORD_AUTHORIZE_URL: Final = 'https://discord.com/oauth2/authorize'
 DISCORD_TOKEN_URL: Final = f'{DISCORD_API_BASE}/oauth2/token'
-# identify は身元の取得、guilds.members.read は対象 guild でのロールの取得に要る。閲覧範囲も API キーの資格もロールで決まるため、両方が揃って初めて判定が成立する。
+# identify fetches the identity; guilds.members.read fetches the roles in the target guild. Visibility and API key eligibility are both decided by roles, so no decision is possible until both are in hand.
 OAUTH_SCOPES: Final = 'identify guilds.members.read'
 DISCORD_TIMEOUT_SECONDS: Final = 10.0
 
-# 認可後に Discord が利用者を戻す先の経路。routers/auth.py の callback がこの定数をそのまま経路の宣言に使うため、認可で申告する戻り先と、実際にそれを受け取る経路が食い違うことがない。
+# The route Discord returns the user to after authorization. routers/auth.py's callback declares its route from this same constant, so the redirect_uri sent at authorization can never diverge from the route that actually receives it.
 OAUTH_CALLBACK_PATH: Final = '/auth/callback'
 
 SESSION_COOKIE_NAME: Final = 'session'
 SESSION_LIFETIME: Final = timedelta(days=30)
 
 OAUTH_STATE_COOKIE_NAME: Final = 'oauth_state'
-# state の Cookie は認可フローでしか使わない。/auth 配下に限ることで、API や画像の配信の要求には載らない。
+# The state cookie is used only by the authorization flow. Confining it under /auth keeps it off API and image-delivery requests.
 OAUTH_STATE_COOKIE_PATH: Final = '/auth'
 OAUTH_STATE_LIFETIME: Final = timedelta(minutes=10)
 
-# oauth_states.state は CHAR(64)。16 進 64 桁がちょうど収まる。
+# oauth_states.state is CHAR(64), which fits 64 hex digits exactly.
 OAUTH_STATE_BYTES: Final = 32
-# PKCE の code_verifier は 43〜128 文字(RFC 7636)。token_urlsafe(64) は 86 文字で、oauth_states.code_verifier の VARCHAR(128) にも収まる。
+# PKCE's code_verifier is 43-128 characters (RFC 7636). token_urlsafe(64) gives 86, which also fits oauth_states.code_verifier's VARCHAR(128).
 PKCE_VERIFIER_BYTES: Final = 64
 
 API_TOKEN_PREFIX: Final = 'ink_'
-# api_tokens.token_prefix は VARCHAR(12)。一覧でどのキーがどれかを見分けるためだけに平文で持つ。
+# api_tokens.token_prefix is VARCHAR(12). Kept in plaintext solely so the listing can tell one key from another.
 API_TOKEN_PREFIX_LENGTH: Final = 12
 SECRET_TOKEN_BYTES: Final = 32
 
 DEFAULT_REDIRECT_TO: Final = '/'
-# oauth_states.redirect_to の VARCHAR(512) に合わせる。
+# Matches oauth_states.redirect_to's VARCHAR(512).
 MAX_REDIRECT_TO_LENGTH: Final = 512
 
 _TOKEN_COLUMNS: Final = 'id, user_id, token_prefix, name, created_at, last_used_at, expires_at, revoked_at'
 
 
 class DiscordAuthError(AppError):
-    """Discord 側との通信や応答が期待通りでない。
+    """The call to Discord failed, or its response was not what was expected.
 
-    こちらの要求の誤りではないため 4xx にはしない。利用者にできることは時間をおいて再試行することだけであり、それを状態コードで伝える。
+    Not 4xx: the incoming request was not at fault. All the user can do is retry after a while, and the status code says exactly that.
     """
 
     status_code = 502
@@ -82,29 +82,27 @@ class DiscordAuthError(AppError):
     default_message = 'Discord との通信に失敗しました。時間をおいてもう一度お試しください。'
 
 
-# --------------------------------------------------------------------------
-# 遷移先の検証
-# --------------------------------------------------------------------------
+# Redirect target validation
 
 
 def sanitize_redirect_to(value: str | None) -> str:
-    """ログイン後の遷移先を、このサイト内のパスへ限定する。
+    """Confine the post-login redirect target to a path inside this site.
 
-    外部の URL をそのまま受けると、このサイトのログイン URL を踏ませるだけで任意のサイトへ利用者を飛ばせる踏み台になる(オープンリダイレクト)。フィッシングは「見慣れたドメインのリンクを踏んだのに知らないサイトに居る」という形で成立するため、ここは黙って落とすのが正しい。判断に迷う値はエラーにせずトップへ寄せる(遷移先の指定は利便性のためのものであり、それが理由でログインできなくなるのは筋が悪い)。
+    Taking an external URL as given turns this site into a stepping stone that bounces users anywhere merely by getting them to follow our login URL (an open redirect). Phishing works precisely as "I followed a link on a familiar domain and ended up on a site I do not know", so silently dropping such values is the right call here. Doubtful values fall back to home rather than erroring: naming a redirect target is a convenience, and being unable to log in because of one is backwards.
     """
     if value is None:
         return DEFAULT_REDIRECT_TO
     candidate = value.strip()
     if not candidate or len(candidate) > MAX_REDIRECT_TO_LENGTH:
         return DEFAULT_REDIRECT_TO
-    # 制御文字と空白を含む値は受けない。Location ヘッダへの改行の注入や、ブラウザごとの解釈の揺れの足がかりになる。
+    # Values containing control characters or whitespace are refused: they are a foothold for injecting a newline into the Location header and for exploiting per-browser differences in interpretation.
     if any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F for character in candidate):
         return DEFAULT_REDIRECT_TO
-    # ブラウザによっては \ を / と同じ区切りとして解釈するため、/\example.invalid が //example.invalid(別ホスト)として扱われる。
+    # Some browsers read \ as the same separator as /, so /\example.invalid gets treated as //example.invalid — a different host.
     if '\\' in candidate:
         return DEFAULT_REDIRECT_TO
     parsed = urlsplit(candidate)
-    # scheme や netloc を持つ値は絶対 URL であり、行き先がこのサイトとは限らない。
+    # A value carrying a scheme or a netloc is an absolute URL, and need not lead to this site.
     if parsed.scheme or parsed.netloc:
         return DEFAULT_REDIRECT_TO
     if not parsed.path.startswith('/') or parsed.path.startswith('//'):
@@ -112,29 +110,27 @@ def sanitize_redirect_to(value: str | None) -> str:
     return urlunsplit(('', '', parsed.path, parsed.query, parsed.fragment))
 
 
-# --------------------------------------------------------------------------
-# 認可フローの開始
-# --------------------------------------------------------------------------
+# Starting the authorization flow
 
 
 def oauth_redirect_uri(config: Config) -> str:
-    """認可後に Discord が戻す先の URL。設定としては持たず、公開 URL と経路から組み立てる。
+    """The URL Discord returns to after authorization. Not held as a setting; built from the public URL and the route.
 
-    設定として独立に持つと base_url と食い違う値を保存でき、そのときログインだけが静かに壊れる。入りうる正当な値は 1 つしかない以上、それを設定にする理由が無い。**この値を Discord のアプリケーション設定の Redirects へ登録すること。**登録が無い、または食い違う場合、Discord は認可画面の時点で断る。
+    If it were held as an independent setting, a value disagreeing with base_url could be stored, and then login alone would break silently. Exactly one legitimate value can go here, so there is no reason to make it a setting. **Register this value under Redirects in Discord's application settings.** If the registration is missing or disagrees, Discord refuses at the consent screen.
 
-    認可の開始とコードの交換の両方でこの関数から取る。Discord は 2 つの要求の redirect_uri が完全に一致することを求めるため、組み立てる場所を 1 つに限って、片方だけが違う値になる余地を無くす。base_url は読み込み時に末尾の / を落としてあるため、そのまま連結してよい。
+    Both the start of authorization and the code exchange take it from this function. Discord demands that the redirect_uri of the two requests match exactly, so building it in exactly one place leaves no room for one of them to differ. base_url has its trailing / stripped at load time, so it can be concatenated as-is.
     """
     return f'{config.server.base_url}{OAUTH_CALLBACK_PATH}'
 
 
 def _code_challenge(verifier: str) -> str:
-    """PKCE の code_challenge(S256)を作る。パディングの = は付けない(RFC 7636 の base64url は付けない形で定義されている)。"""
+    """Build the PKCE code_challenge (S256). No = padding: RFC 7636 defines its base64url without it."""
     digest = hashlib.sha256(verifier.encode('ascii')).digest()
     return base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
 
 
 def build_authorize_url(config: Config, settings: RuntimeSettings, *, state: str, code_challenge: str) -> str:
-    """Discord の認可画面の URL を組み立てる。"""
+    """Build the URL of Discord's consent screen."""
     params = {
         'client_id': settings.discord.oauth.client_id,
         'redirect_uri': oauth_redirect_uri(config),
@@ -143,18 +139,18 @@ def build_authorize_url(config: Config, settings: RuntimeSettings, *, state: str
         'state': state,
         'code_challenge': code_challenge,
         'code_challenge_method': 'S256',
-        # 既に認可済みなら確認画面を出さずに戻す。求めるスコープが変われば Discord 側が改めて確認を求めるため、同意を省いてしまうことにはならない。
+        # Return without showing the consent screen if authorization was already granted. Discord asks again whenever the requested scopes change, so this does not skip consent.
         'prompt': 'none',
     }
     return f'{DISCORD_AUTHORIZE_URL}?{urlencode(params)}'
 
 
 async def begin_login(db: Database, config: Config, settings: RuntimeSettings, redirect_to: str | None) -> tuple[str, str]:
-    """認可フローを開始する。戻り値は (認可画面の URL, state)。
+    """Start the authorization flow. Returns (consent screen URL, state).
 
-    PKCE を使うのは、認可コードを盗まれても交換させないため。code_verifier はこちらの DB にしか無く、コードだけを手に入れても交換に必要な材料が揃わない。
+    PKCE is used so that a stolen authorization code still cannot be exchanged: the code_verifier exists only in our DB, so getting hold of the code alone does not assemble what the exchange needs.
     """
-    # 期限切れの state を溜め込まない。認可フローは数分で終わるものであり、放置された行を掃除する者は他に居ない。
+    # Do not let expired states pile up. The authorization flow finishes within minutes, and nobody else cleans up abandoned rows.
     await db.execute('DELETE FROM oauth_states WHERE expires_at <= NOW()')
     state = secrets.token_hex(OAUTH_STATE_BYTES)
     verifier = secrets.token_urlsafe(PKCE_VERIFIER_BYTES)
@@ -169,9 +165,9 @@ async def begin_login(db: Database, config: Config, settings: RuntimeSettings, r
 
 
 async def consume_state(db: Database, state: str) -> dict[str, Any] | None:
-    """state を 1 回だけ引き当てる。無効・期限切れ・使用済みなら None。
+    """Look a state up exactly once. None if it is invalid, expired, or already used.
 
-    引き当てた行はその場で消し、削除できた側だけが「引き当てた」ことにする。同じ state で同時に 2 つの要求が来ても通るのは片方だけであり、認可コードの再送で二重にログインが成立することがない。
+    The row found is deleted on the spot, and only the side whose DELETE removed it counts as having looked it up. If two requests arrive at once with the same state only one gets through, so replaying the authorization code cannot log in twice.
     """
     row = await db.fetch_one(
         'SELECT state, code_verifier, redirect_to FROM oauth_states WHERE state = %s AND expires_at > NOW()',
@@ -184,9 +180,7 @@ async def consume_state(db: Database, state: str) -> dict[str, Any] | None:
     return row
 
 
-# --------------------------------------------------------------------------
-# Discord の API
-# --------------------------------------------------------------------------
+# The Discord API
 
 
 def _read_json(response: httpx.Response) -> Any:
@@ -197,9 +191,9 @@ def _read_json(response: httpx.Response) -> Any:
 
 
 def _require_ok(response: httpx.Response, what: str) -> Mapping[str, Any]:
-    """応答が成功であることを確かめ、JSON のマッピングを返す。
+    """Check that the response succeeded and return its JSON mapping.
 
-    Discord の応答本文をそのまま利用者へ返さない。client_id や内部の識別子が混ざることがあり、伝えるべき情報でもない。原因の追跡はログで行う。
+    Discord's response body is never handed straight back to the user: it can carry client_id or internal identifiers, and none of it is information the user should be told. Chasing down causes is done in the logs.
     """
     if response.status_code >= 400:
         logger.warning('Discord への %s に失敗しました: status=%s body=%s', what, response.status_code, response.text[:500])
@@ -211,7 +205,7 @@ def _require_ok(response: httpx.Response, what: str) -> Mapping[str, Any]:
 
 
 async def _get_json(client: httpx.AsyncClient, url: str, access_token: str, what: str) -> Mapping[str, Any] | None:
-    """アクセストークンを添えて GET する。404 は None を返し、意味づけは呼び出し元に任せる。"""
+    """GET with the access token attached. 404 returns None, leaving its meaning to the caller."""
     try:
         response = await client.get(url, headers={'Authorization': f'Bearer {access_token}'})
     except httpx.HTTPError as exc:
@@ -222,9 +216,9 @@ async def _get_json(client: httpx.AsyncClient, url: str, access_token: str, what
 
 
 async def exchange_code(client: httpx.AsyncClient, config: Config, settings: RuntimeSettings, code: str, code_verifier: str) -> str:
-    """認可コードをアクセストークンへ交換する。
+    """Exchange the authorization code for an access token.
 
-    得たトークンは identify と guild メンバー情報の取得にだけ使い、保存しない。以後の要求は自前のセッションで認証するため、Discord の資格情報を持ち続ける理由が無い(持てば、漏れたときに漏れるものが増えるだけになる)。
+    The token obtained is used only to fetch identify and the guild member info, and is never stored. Later requests authenticate with our own session, so there is no reason to keep holding Discord credentials — holding them would only widen what leaks when something leaks.
     """
     form = {
         'client_id': settings.discord.oauth.client_id,
@@ -239,7 +233,7 @@ async def exchange_code(client: httpx.AsyncClient, config: Config, settings: Run
     except httpx.HTTPError as exc:
         raise DiscordAuthError() from exc
     if 400 <= response.status_code < 500:
-        # 認可コードは 1 回きりで短命であり、再読み込みや戻るボタンで必ずここへ来る。Discord 側の障害ではないため、やり直せることを伝える。
+        # The authorization code is single-use and short-lived, so a reload or the back button always lands here. This is not a Discord outage, so tell the user they can start over.
         logger.info('認可コードの交換を拒否されました: status=%s body=%s', response.status_code, response.text[:500])
         raise BadRequest('Discord の認可コードを交換できませんでした。もう一度ログインしてください。')
     payload = _require_ok(response, 'アクセストークンの取得')
@@ -250,7 +244,7 @@ async def exchange_code(client: httpx.AsyncClient, config: Config, settings: Run
 
 
 async def fetch_identity(client: httpx.AsyncClient, access_token: str) -> Mapping[str, Any]:
-    """identify スコープで自分自身の情報を取得する。"""
+    """Fetch the caller's own information via the identify scope."""
     payload = await _get_json(client, f'{DISCORD_API_BASE}/users/@me', access_token, 'ユーザー情報の取得')
     if payload is None:
         raise DiscordAuthError('Discord のユーザー情報を取得できませんでした。')
@@ -258,9 +252,9 @@ async def fetch_identity(client: httpx.AsyncClient, access_token: str) -> Mappin
 
 
 async def fetch_guild_member(client: httpx.AsyncClient, settings: RuntimeSettings, access_token: str) -> Mapping[str, Any] | None:
-    """対象 guild でのメンバー情報(保有ロールを含む)を取得する。参加していなければ None。
+    """Fetch the member info (including held roles) in the target guild. None if not joined.
 
-    Discord は非メンバーに対して 404 を返す。これは失敗ではなく「参加していない」という答えであり、非メンバーとして扱う(このサイトは未参加でも公開記事を読めるため、ログイン自体は成立させる)。
+    Discord answers 404 for non-members. That is not a failure but the answer "not joined", so treat it as a non-member: this site lets non-members read public articles, so login itself still succeeds.
     """
     return await _get_json(
         client,
@@ -270,15 +264,13 @@ async def fetch_guild_member(client: httpx.AsyncClient, settings: RuntimeSetting
     )
 
 
-# --------------------------------------------------------------------------
-# 利用者の同期
-# --------------------------------------------------------------------------
+# User sync
 
 
 def _clamp(value: Any, length: int) -> str | None:
-    """表示用の文字列を列の長さへ収める。値が無ければ None。
+    """Fit a display string into the column length. None when there is no value.
 
-    Discord 側の仕様変更で想定より長い値が来たときに、ログインが 500 で落ちるのではなく表示が切り詰められるだけで済むようにする。ここで扱うのはいずれも表示のための項目であり、判定には使わない。
+    If a Discord spec change starts sending values longer than expected, login truncates the display instead of dying with a 500. Everything handled here is for display and never feeds a decision.
     """
     if value is None:
         return None
@@ -287,7 +279,7 @@ def _clamp(value: Any, length: int) -> str | None:
 
 
 def _member_role_ids(member: Mapping[str, Any] | None) -> list[int]:
-    """メンバー情報から保有ロールの ID を取り出す。順序を保ったまま重複を畳む。"""
+    """Extract the held role IDs from the member info, collapsing duplicates while preserving order."""
     if member is None:
         return []
     raw_roles = member.get('roles')
@@ -303,9 +295,9 @@ def _member_role_ids(member: Mapping[str, Any] | None) -> list[int]:
 
 
 async def sync_user(db: Database, identity: Mapping[str, Any], member: Mapping[str, Any] | None) -> int:
-    """identify と guild メンバー情報を users / user_roles へ写し、users.id を返す。
+    """Mirror identify and the guild member info into users / user_roles and return users.id.
 
-    **is_guild_owner はここでは触らない。**オーナーであるかは guild 自体を読める bot だけが知りうる情報であり、この経路(利用者の資格で自分自身を読む)からは判定できない。ここで既定値を書くと、ログインするたびにオーナーの管理者資格が消える。
+    **is_guild_owner is not touched here.** Who the owner is can only be known by the bot, which can read the guild itself; this path — reading yourself with the user's own eligibility — cannot decide it. Writing the default here would wipe the owner's admin eligibility on every login.
     """
     raw_id = identity.get('id')
     try:
@@ -332,31 +324,29 @@ async def sync_user(db: Database, identity: Mapping[str, Any], member: Mapping[s
             1 if member is not None else 0,
             conn=conn,
         )
-        # LAST_INSERT_ID() は ON DUPLICATE KEY UPDATE の経路では既存行の ID を返さないため、改めて引く。
+        # LAST_INSERT_ID() does not return the existing row's ID on the ON DUPLICATE KEY UPDATE path, so look it up again.
         user_id = int(await db.fetch_val('SELECT id FROM users WHERE discord_user_id = %s', discord_user_id, conn=conn))
-        # ロールは洗い替える。差分で足し引きすると、Discord 側で外されたロールがこちらに残り続け、閲覧制限が効かなくなる。
+        # Refresh the roles to match the current state. Adding and subtracting a delta would leave roles that were removed on Discord's side lingering here, and access restrictions would stop working. Writing only the row-level diff against the full set of roles the user now holds, as the bot's reconcile does (bot/app/roles.py), reaches the same state; applying increments without knowing that full set does not.
         await db.execute('DELETE FROM user_roles WHERE user_id = %s', user_id, conn=conn)
         if role_ids:
             placeholders = ', '.join(['%s'] * len(role_ids))
-            # discord_roles に無いロールは入れない。user_roles.role_id が discord_roles を参照しており、bot がまだ取り込んでいないロールを入れようとすると外部キーで落ちる。
+            # Roles absent from discord_roles are not inserted. user_roles.role_id references discord_roles, so trying to insert a role the bot has not imported yet fails on the foreign key.
             await db.execute(
                 f'INSERT IGNORE INTO user_roles (user_id, role_id) SELECT %s, id FROM discord_roles WHERE id IN ({placeholders})',
                 user_id,
                 *role_ids,
                 conn=conn,
             )
-        # 期限切れのセッションを掃除する。ログインは掃除を掛ける自然な機会であり、対象がこの利用者に限られるため安い。
+        # Clean up expired sessions. Login is a natural occasion to sweep, and it is cheap because it is confined to this one user.
         await db.execute('DELETE FROM sessions WHERE user_id = %s AND expires_at <= NOW()', user_id, conn=conn)
     return user_id
 
 
-# --------------------------------------------------------------------------
-# セッション
-# --------------------------------------------------------------------------
+# Sessions
 
 
 async def create_session(db: Database, user_id: int) -> str:
-    """セッションを発行し、Cookie に載せる生値を返す。生値が存在するのはこの戻り値だけで、DB には SHA-256 しか残らない。"""
+    """Issue a session and return the raw value to put in the cookie. The raw value exists only as this return value; the DB keeps nothing but its SHA-256."""
     raw_token = secrets.token_urlsafe(SECRET_TOKEN_BYTES)
     await db.execute(
         'INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, NOW() + INTERVAL %s SECOND)',
@@ -368,23 +358,23 @@ async def create_session(db: Database, user_id: int) -> str:
 
 
 async def destroy_session(db: Database, token_hash: str) -> None:
-    """セッションを破棄する。行を消すため、Cookie が手元に残っていても二度と通らない。"""
+    """Destroy a session. The row is deleted, so a cookie still held by the client never gets through again."""
     await db.execute('DELETE FROM sessions WHERE token_hash = %s', token_hash)
 
 
 def _cookies_are_secure(config: Config) -> bool:
-    """Cookie に Secure を付けるか。
+    """Whether to put Secure on cookies.
 
-    base_url が https のときだけ付ける。http で動かす開発構成に Secure を付けると、ブラウザが Cookie を保存せず、原因の分かりにくい「ログインしたのにログインしていない」状態になる。
+    Only when base_url is https. Secure on a development setup served over http makes the browser refuse to store the cookie, producing a baffling "logged in but not logged in" state.
     """
     return config.server.base_url.lower().startswith('https://')
 
 
 def set_session_cookie(response: Response, config: Config, raw_token: str) -> None:
-    """セッションの Cookie を載せる。
+    """Set the session cookie.
 
-    HttpOnly … JavaScript から読めなくする。万一どこかに XSS が生まれても、セッションを持ち出せない。
-    SameSite=Lax … 他サイトからの POST に Cookie を載せない。これだけで、状態を変える要求に対する CSRF がほぼ塞がる。ログイン後の戻り先はトップレベルの遷移であるため Lax でも Cookie は載る。
+    HttpOnly: unreadable from JavaScript, so an XSS appearing anywhere still cannot carry the session off.
+    SameSite=Lax: no cookie on cross-site POSTs, which by itself closes off nearly all CSRF against state-changing requests. The post-login return to the redirect_uri is a top-level navigation, so Lax still sends the cookie.
     """
     response.set_cookie(
         SESSION_COOKIE_NAME,
@@ -398,7 +388,7 @@ def set_session_cookie(response: Response, config: Config, raw_token: str) -> No
 
 
 def clear_session_cookie(response: Response, config: Config) -> None:
-    """セッションの Cookie を落とす。属性は設定時と揃える(揃っていないとブラウザは別の Cookie とみなし、古いものが残る)。"""
+    """Drop the session cookie. The attributes must match those used when setting it: otherwise the browser regards it as a different cookie and the old one survives."""
     response.delete_cookie(
         SESSION_COOKIE_NAME,
         path='/',
@@ -409,9 +399,9 @@ def clear_session_cookie(response: Response, config: Config) -> None:
 
 
 def set_state_cookie(response: Response, config: Config, state: str) -> None:
-    """認可フローの state をブラウザにも預ける。
+    """Also entrust the authorization flow's state to the browser.
 
-    state を DB に置くだけでは「その認可を開始したのがこのブラウザか」を確かめられない。攻撃者が自分で認可を開始し、その戻り先 URL を被害者に踏ませると、被害者のブラウザが攻撃者のアカウントでログインした状態になる(以後その人が書いたものは攻撃者の手元に残る)。開始したブラウザにしか無い値と突き合わせることで、これが成立しなくなる。
+    Keeping state only in the DB cannot confirm that this browser is the one that started that authorization. An attacker who starts an authorization themselves and gets a victim to follow the resulting return URL leaves the victim's browser logged in to the attacker's account, and everything that person writes from then on ends up in the attacker's hands. Checking against a value only the initiating browser holds is what defeats this.
     """
     response.set_cookie(
         OAUTH_STATE_COOKIE_NAME,
@@ -425,7 +415,7 @@ def set_state_cookie(response: Response, config: Config, state: str) -> None:
 
 
 def clear_state_cookie(response: Response, config: Config) -> None:
-    """認可フローの state の Cookie を落とす。"""
+    """Drop the authorization flow's state cookie."""
     response.delete_cookie(
         OAUTH_STATE_COOKIE_NAME,
         path=OAUTH_STATE_COOKIE_PATH,
@@ -436,7 +426,7 @@ def clear_state_cookie(response: Response, config: Config) -> None:
 
 
 async def complete_login(db: Database, config: Config, settings: RuntimeSettings, *, code: str, state: str, state_cookie: str | None) -> tuple[str, str]:
-    """認可コードからログインを完成させる。戻り値は (セッションの生値, 遷移先のパス)。"""
+    """Complete the login from the authorization code. Returns (the session's raw value, the redirect target path)."""
     if not state_cookie or not secret_equal(state_cookie, state):
         raise BadRequest('ログインの状態を確認できませんでした。もう一度ログインしてください。')
     stored = await consume_state(db, state)
@@ -445,7 +435,7 @@ async def complete_login(db: Database, config: Config, settings: RuntimeSettings
     verifier = stored.get('code_verifier')
     if not isinstance(verifier, str) or not verifier:
         raise BadRequest('ログインの状態を確認できませんでした。もう一度ログインしてください。')
-    # 3 回の要求を 1 本の接続で流す。いずれも同じ相手への短い往復であり、都度つなぎ直す理由が無い。
+    # Run the three requests over one connection. All are short round trips to the same host, so there is no reason to reconnect for each.
     async with httpx.AsyncClient(timeout=DISCORD_TIMEOUT_SECONDS) as client:
         access_token = await exchange_code(client, config, settings, code, verifier)
         identity = await fetch_identity(client, access_token)
@@ -456,15 +446,13 @@ async def complete_login(db: Database, config: Config, settings: RuntimeSettings
     return raw_session, sanitize_redirect_to(stored.get('redirect_to'))
 
 
-# --------------------------------------------------------------------------
-# API キー
-# --------------------------------------------------------------------------
+# API keys
 
 
 async def ensure_can_issue_scopes(db: Database, settings: RuntimeSettings, owner: Principal, scopes: Iterable[str]) -> None:
-    """要求されたスコープを、この主体が「今の」資格で発行できるかを検査する。送出は Forbidden。
+    """Check whether this principal may issue the requested scopes under its eligibility as it stands right now. Raises Forbidden.
 
-    キーの権限は要求のたびに現在のロールと現在の settings.admin.role_ids から判定されるため、発行時の検査を省いても管理者でない者のキーが管理操作を通すことはない。それでも検査するのは、管理者でない者に管理者スコープ付きのキーを持たせると、それが「後で管理者になった瞬間に管理権限を得る」休眠状態の資格になるため。キーの一覧を眺めても、そのキーが今は無力であることしか分からず、いつ有効化されるかは誰にも見えない。
+    A key's permissions are decided on every request from the current roles and the current settings.admin.role_ids, so even without a check at issue time a non-admin's key never passes an admin operation. The check exists anyway because letting a non-admin hold a key carrying admin scopes creates dormant eligibility that gains admin permission the moment they become an admin. Looking at the key listing only reveals that the key is powerless today; nobody can see when it would come alive.
     """
     if not owner.is_guild_member:
         raise Forbidden('対象の Discord サーバーに参加していないため、API キーを発行できません。')
@@ -474,7 +462,7 @@ async def ensure_can_issue_scopes(db: Database, settings: RuntimeSettings, owner
 
 
 async def _attach_scopes(db: Database, rows: list[dict[str, Any]], *, conn: Connection | None = None) -> list[dict[str, Any]]:
-    """キーの行にスコープの一覧を添える。行ごとに引かず 1 回でまとめて引く。"""
+    """Attach the scope listing to the key rows. The scopes are fetched in one query rather than one per row."""
     if not rows:
         return rows
     token_ids = [int(row['id']) for row in rows]
@@ -493,7 +481,7 @@ async def _attach_scopes(db: Database, rows: list[dict[str, Any]], *, conn: Conn
 
 
 async def load_api_token(db: Database, token_id: int, *, user_id: int | None = None, conn: Connection | None = None) -> dict[str, Any] | None:
-    """API キーの 1 行をスコープ付きで返す。user_id を与えると、その利用者のキーでなければ None になる。"""
+    """Return one API key row with its scopes. Given user_id, the result is None unless the key belongs to that user."""
     if user_id is None:
         row = await db.fetch_one(f'SELECT {_TOKEN_COLUMNS} FROM api_tokens WHERE id = %s', token_id, conn=conn)
     else:
@@ -504,9 +492,9 @@ async def load_api_token(db: Database, token_id: int, *, user_id: int | None = N
 
 
 async def list_api_tokens(db: Database, user_id: int | None = None) -> list[dict[str, Any]]:
-    """キーの一覧をスコープ付きで返す。user_id を省くと全利用者のキーを返す。
+    """Return the key listing with scopes. Omit user_id to return every user's keys.
 
-    失効済み・期限切れのキーも返す。いつ発行され、いつ最後に使われ、いつ失効したのかは監査の材料であり、一覧から消すとその履歴が辿れなくなる。
+    Revoked and expired keys are returned too. The times a key was issued, last used, and revoked are audit material, and dropping the key from the listing makes that history untraceable.
     """
     if user_id is None:
         rows = await db.fetch_all(f'SELECT {_TOKEN_COLUMNS} FROM api_tokens ORDER BY created_at DESC, id DESC')
@@ -516,11 +504,11 @@ async def list_api_tokens(db: Database, user_id: int | None = None) -> list[dict
 
 
 async def create_api_token(db: Database, *, user_id: int, name: str, scopes: Sequence[str], expires_days: int | None = None) -> tuple[str, dict[str, Any]]:
-    """API キーを発行し、(生値, api_tokens の行) を返す。
+    """Issue an API key and return (raw value, the api_tokens row).
 
-    **生値を返せるのはここだけである。**DB には SHA-256 と、一覧で見分けるための先頭 12 文字しか残らない。呼び出し元は発行の応答へ載せたあと生値を捨てること。
+    **This is the only place that can return the raw value.** The DB keeps only the SHA-256 and the leading 12 characters used to tell keys apart in the listing. Callers must put the raw value in the issue response and then discard it.
 
-    発行の資格の検査はここでは行わない(ensure_can_issue_scopes が担う)。CLI からの発行のように、要求元の主体と発行先の利用者が別である経路があるため、資格の判定と発行の手続きを分けている。
+    Eligibility to issue is not checked here (ensure_can_issue_scopes owns that). Some paths, such as issuing from the CLI, have a requesting principal different from the user the key is issued to, so deciding eligibility is kept separate from the mechanics of issuing.
     """
     unique_scopes = list(dict.fromkeys(scopes))
     if not unique_scopes:
@@ -537,7 +525,7 @@ async def create_api_token(db: Database, *, user_id: int, name: str, scopes: Seq
                 conn=conn,
             )
         else:
-            # 期限は DB の時計で決める。アプリ側の時計で計算すると、両者がずれている環境で期限が意図せず前後する(有効・無効を判定するのは DB の NOW() である)。
+            # The expiry is decided by the DB's clock. Computing it from the app's clock would shift the expiry unintentionally wherever the two drift apart, since what decides valid from invalid is the DB's NOW().
             token_id = await db.execute_insert(
                 'INSERT INTO api_tokens (user_id, token_hash, token_prefix, name, expires_at) VALUES (%s, %s, %s, %s, NOW() + INTERVAL %s DAY)',
                 user_id,
@@ -557,9 +545,9 @@ async def create_api_token(db: Database, *, user_id: int, name: str, scopes: Seq
 
 
 async def revoke_api_token(db: Database, *, token_id: int, user_id: int | None = None) -> bool:
-    """API キーを失効させる。対象が無ければ False。
+    """Revoke an API key. False if there is no such key.
 
-    user_id を与えると、その利用者のキーでなければ失効できない。既に失効済みなら revoked_at は動かさない(最初に失効させた時刻こそが監査の事実であり、二度目の要求で上書きすると、いつ止めたのかが分からなくなる)。
+    Given user_id, a key that does not belong to that user cannot be revoked. If it is already revoked, revoked_at is left alone: the time of the first revocation is the audit fact, and overwriting it on a second request loses when the key was actually stopped.
     """
     if user_id is None:
         exists = await db.fetch_val('SELECT id FROM api_tokens WHERE id = %s', token_id)

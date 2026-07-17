@@ -1,8 +1,8 @@
-"""記事の全文検索 API。
+"""Full-text search API for articles.
 
-索引は articles の FULLTEXT (title, body_md) で、日本語を語の切れ目で分かち書きできないため ngram パーサを使う。検索語は自然言語モードで解釈する。ブールモード(+ - * " などが演算子として効く)にすると、記事の題名に含まれるだけの記号が検索式として解釈され、利用者の意図しない結果を返す。
+The index is the FULLTEXT (title, body_md) on articles, with the ngram parser because Japanese is not written with word breaks to tokenize on. Search terms are read in NATURAL LANGUAGE MODE. In BOOLEAN MODE + - * " and the like act as operators, so punctuation that merely happens to sit in an article's title would be parsed as a search expression and return results the user never intended.
 
-検索は閲覧範囲の絞り込みを必ず通す。全文検索は「その語を含む記事が存在するか」を利用者に教える機能であり、絞り込みを外すと、読めない記事の題名や本文の断片が索引を通して漏れる。件数がゼロか否かだけでも、限定公開の記事の存在は伝わってしまう。
+Search always goes through the visibility filter. Full-text search tells the user whether an article containing a given word exists, so dropping the filter leaks the titles and body snippets of unreadable articles through the index. Even a bare zero/non-zero result count gives away that a limited-visibility article exists.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .taxonomy import DEFAULT_PER_PAGE, fetch_article_page, published_and_visibl
 
 router = APIRouter(tags=['search'])
 
-# 検索語の照合式。WHERE と ORDER BY の双方に同じ式を書く。MySQL は同一の MATCH 式を 1 度しか評価しないため二重の走査にはならず、こう書くことで並び順が適合度であることが明示される。
+# The search-term match expression, written identically in WHERE and ORDER BY. MySQL evaluates one and the same MATCH expression only once, so this costs no second scan, and it makes explicit that the ordering is by relevance.
 _MATCH: Final = 'MATCH(articles.title, articles.body_md) AGAINST (%s IN NATURAL LANGUAGE MODE)'
 
 
@@ -31,9 +31,9 @@ async def search_articles(
     q: Annotated[str, Query(max_length=200)] = '',
     page: Annotated[int, Query(ge=1)] = 1,
 ) -> Page[ArticleListItem]:
-    """記事を全文検索し、適合度の高い順に返す。同じ適合度なら新しい順とする。
+    """Full-text search articles, most relevant first, ties broken newest-first.
 
-    検索語が空(または空白のみ)なら、索引を引かずに空の頁を返す。空の語で MATCH を評価しても結果は空であり、検索欄を開いただけの要求で全文索引を叩く理由が無い。
+    An empty (or whitespace-only) term returns an empty page of results without touching the index: MATCH on an empty term matches nothing anyway, and merely opening the search field is no reason to hit the full-text index.
     """
     query = q.strip()
     if not query:

@@ -1,6 +1,6 @@
-"""自分自身に関する経路。利用者の情報・API キー・タグ購読。
+"""Routes for the caller's own data: user info, API keys, tag subscriptions.
 
-いずれも「自分の」資源だけを扱う。対象は必ず要求の主体(principal.user_id)から決め、要求の本文やパスから受け取らない。他人の ID を指定する余地が無ければ、権限の検査を書き忘れることもない。
+Every route here touches only your own resources. The target is always taken from the requesting principal (principal.user_id), never from the request body or path. With no way to name someone else's ID, there is no permission check left to forget.
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ _TAG_COLUMNS = 't.id, t.slug, t.name, t.description, t.icon_url, t.notify_channe
 
 
 def _parse_id(value: str) -> int:
-    """パスの ID を 64bit の整数へ変換する。解釈できない値は 404。
+    """Convert a path ID to a 64-bit integer. An unparseable value is a 404.
 
-    形式の誤りを 422 として区別しない。存在しない ID を指定したのと結果は変わらず、区別して返すと「その形式なら在りうる」という情報だけを与えることになる。
+    A malformed ID is deliberately not distinguished as 422: the outcome is the same as naming an ID that does not exist, and separating the two would only tell the caller that IDs of that shape could exist.
     """
     try:
         return to_snowflake(value)
@@ -36,9 +36,9 @@ def _parse_id(value: str) -> int:
 
 
 def _reject_token_principal(principal: Principal) -> None:
-    """API キーによるキーの発行・失効を拒む。
+    """Refuse issuing or revoking a key when the caller is itself an API key.
 
-    キーがキーを発行できると、漏れたキーが自分の複製をいくらでも作れる。そうなると失効(revoked_at)が対処にならず、1 本消している間に別の 1 本が増える。キーの管理は必ず人間が Web UI か CLI から行う。
+    If a key could issue keys, a leaked key could mint unlimited copies of itself. Revocation (revoked_at) would then stop being a remedy: another key appears while you revoke one. Key management is always done by a human, from the Web UI or the CLI.
     """
     if principal.via_token:
         raise Forbidden('API キーの発行・失効は API キー経由では行えません。Web UI からログインするか CLI を使ってください。')
@@ -50,23 +50,23 @@ async def read_me(
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
 ) -> MeOut:
-    """自分の情報・保有ロール・所属報道社・管理者かどうか・購読タグ。
+    """Your own info, the roles you hold, your affiliated publishers, whether you are an admin, and your subscribed tags.
 
-    guild を離れた利用者でも読める。is_guild_member を偽として返すことが答えであり、ここを 403 にすると、なぜ何も書けないのかを画面から知る手段が無くなる。
+    Readable even by a user who has left the guild: returning is_guild_member false is the answer. A 403 here would leave the UI with no way to tell why nothing can be written.
     """
     user = await db.fetch_one(
         'SELECT id, discord_user_id, username, global_name, avatar_hash, is_guild_member, is_guild_owner FROM users WHERE id = %s',
         principal.user_id,
     )
     if user is None:
-        # 認証が通ったのに行が無いのは、判定の最中に利用者が消えた場合に限る。
+        # Authentication passed yet the row is gone: only possible if the user was deleted mid-check.
         raise NotFound('利用者が見つかりません。')
     roles = await db.fetch_all(
         'SELECT r.id, r.name, r.color, r.position FROM discord_roles r '
         'JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = %s ORDER BY r.position DESC, r.id',
         principal.user_id,
     )
-    # 所属報道社は保有ロールから引く。publishers.role_id が NULL の報道社(解散済み)は、この結合では出てこない。
+    # Affiliated publishers are looked up from the roles held. A publisher whose publishers.role_id is NULL (dissolved) never comes out of this join.
     publishers = await db.fetch_all(
         'SELECT p.id, p.role_id, p.slug, p.name, p.description, p.logo_url, p.stance FROM publishers p '
         'JOIN user_roles ur ON ur.role_id = p.role_id WHERE ur.user_id = %s ORDER BY p.name, p.id',
@@ -82,7 +82,7 @@ async def read_me(
             'user': user,
             'roles': roles,
             'publishers': publishers,
-            # 権限ビットは返さず、解決済みの答えだけを渡す。画面が自前で管理者かどうかを組み立てると、判定がサーバーと画面の 2 箇所に分かれて必ずずれる。画面が管理者向けの導線やスコープの選択肢を出し分けるのはこの値だけを見て行う(出し分けは利便性であって権限の境界ではなく、境界は各経路の資格の検査が担う)。
+            # No permission bits go out, only the resolved answer: if the UI assembled admin status itself the decision would live in two places, server and UI, and would inevitably drift. The UI looks at this value alone to decide whether to show admin entry points and scope options (showing or hiding them is convenience, not the permission boundary; the boundary is each route's eligibility check).
             'is_admin': await is_admin(db, settings, principal),
             'subscriptions': subscriptions,
         }
@@ -94,7 +94,7 @@ async def read_tokens(
     principal: Principal = Depends(get_principal),
     db: Database = Depends(get_db),
 ) -> list[TokenOut]:
-    """自分の API キーの一覧。生値は DB に無いため返せない(返せる設計であってはならない)。"""
+    """Listing of your own API keys. The raw value is not in the DB so it cannot be returned, and no design may ever make it returnable."""
     rows = await list_api_tokens(db, principal.user_id)
     return [TokenOut.model_validate(row) for row in rows]
 
@@ -106,9 +106,9 @@ async def issue_token(
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
 ) -> TokenCreated:
-    """API キーを発行する。生値はこの応答でだけ返り、以後は二度と取り出せない。
+    """Issue an API key. The raw value is returned in this response only and can never be retrieved again.
 
-    発行の資格は「今の」設定とロールから判定する。ここで通ったことは、そのキーが将来も通ることを意味しない(キーの権限は要求のたびに判定し直される)。
+    Eligibility to issue is decided from the settings and roles as they are now. Passing here does not mean the key will pass later: a key's permissions are decided afresh on every request.
     """
     _reject_token_principal(principal)
     await ensure_can_issue_scopes(db, settings, principal, payload.scopes)
@@ -129,10 +129,10 @@ async def delete_token(
     principal: Principal = Depends(get_principal),
     db: Database = Depends(get_db),
 ) -> Response:
-    """自分の API キーを失効させる。行は消さず revoked_at を入れる(いつ何を止めたのかを残すため)。"""
+    """Revoke your own API key. The row is kept and revoked_at is set, so the record of what was stopped and when survives."""
     _reject_token_principal(principal)
     if not await revoke_api_token(db, token_id=_parse_id(token_id), user_id=principal.user_id):
-        # 他人のキーも「見つからない」として返す。存在するが自分のものではない、という区別は、他人のキーの ID を探る手掛かりになる。
+        # Someone else's key is reported as not found too: an "exists but is not yours" distinction would be a way to probe for other users' key IDs.
         raise NotFound('API キーが見つかりません。')
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -152,7 +152,7 @@ async def read_subscriptions(
     principal: Principal = Depends(get_principal),
     db: Database = Depends(get_db),
 ) -> list[TagOut]:
-    """購読しているタグの一覧。"""
+    """Listing of the tags you subscribe to."""
     rows = await db.fetch_all(
         f'SELECT {_TAG_COLUMNS} FROM tags t '
         'JOIN tag_subscriptions s ON s.tag_id = t.id WHERE s.user_id = %s ORDER BY t.name, t.id',
@@ -167,7 +167,7 @@ async def subscribe_tag(
     principal: Principal = Depends(get_principal),
     db: Database = Depends(get_db),
 ) -> TagOut:
-    """タグを購読する。既に購読していても成功として扱う(PUT は同じ要求を何度出しても同じ状態になる)。"""
+    """Subscribe to a tag. Already being subscribed still counts as success: repeating the same PUT lands on the same state however many times it is sent."""
     tag = await _load_tag(db, tag_slug)
     await db.execute('INSERT IGNORE INTO tag_subscriptions (user_id, tag_id) VALUES (%s, %s)', principal.user_id, tag['id'])
     return TagOut.model_validate(tag)
@@ -179,7 +179,7 @@ async def unsubscribe_tag(
     principal: Principal = Depends(get_principal),
     db: Database = Depends(get_db),
 ) -> Response:
-    """タグの購読をやめる。購読していなくても成功として扱う(結果として望む状態は同じであるため)。"""
+    """Unsubscribe from a tag. Not being subscribed still counts as success, since the desired end state is the same."""
     tag = await _load_tag(db, tag_slug)
     await db.execute('DELETE FROM tag_subscriptions WHERE user_id = %s AND tag_id = %s', principal.user_id, tag['id'])
     return Response(status_code=status.HTTP_204_NO_CONTENT)

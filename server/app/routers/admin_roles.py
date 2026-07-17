@@ -1,10 +1,10 @@
-"""guild のロールの一覧(管理画面の選択肢)。
+"""The guild's role listing (the admin screen's options).
 
-管理画面は、ロールを指す設定(admin.role_ids・速報の各ロール)と報道社の所属ロールを扱う。それらを Discord のスノーフレークの直接入力にすると、管理者は Discord で開発者モードを有効にし、ロールを右クリックして ID を写して貼ることになる。**貼り間違いがそのまま自分の締め出しになる欄(admin.role_ids)まで同じ扱いにする理由は無い。**ロールの名前・色・並び順は bot が discord_roles へ同期しており、それを返す経路が無かっただけである。
+The admin screen deals with settings that point at roles (admin.role_ids and the breaking-news roles) and with publishers' affiliation roles. Entering those as raw Discord snowflakes would have an admin turn on Developer Mode in Discord, right-click each role and paste the ID across by hand. **There is no reason to do that to admin.role_ids, the field where a paste error locks you out.** The bot already syncs role names, colours and ordering into discord_roles; only a route returning them was missing.
 
-**この経路は API キーでは通らない(deps.ensure_admin が拒む)。**キーに貸し出せるのはスコープが名指しした力だけであり、「ロールを読む」ことを名指しするスコープは無い。settings:admin と taxonomy:admin の双方がロールの一覧を要するからといって、どちらか一方のスコープに紐づけると、そのキーが自分の担当を越えたものを読めるようになる。この一覧を必要とするのは Web UI であり、Web UI は常にセッションで動くため、これで足りる。機械のクライアントがロールの一覧を要するようになった時点で、それを名指すスコープを設けること。
+**An API key does not pass this route (deps.ensure_admin rejects it).** A key may borrow only the power its scope names, and no scope names "read roles". Both settings:admin and taxonomy:admin need the role listing, but tying it to either one would let that key read past its own remit. The Web UI is what needs this listing, and the Web UI always runs on a session, so this suffices. Add a scope naming it once a machine client comes to need the role listing.
 
-分類の管理 API(admin_taxonomy)が role_id の存在を検査してくれるため、キーからロールを扱うクライアントは、この一覧を持たなくても「そのロールは取り込まれていない」という形の答えを得られる。
+The taxonomy admin API (admin_taxonomy) checks that role_id exists, so a client driving roles through a key still gets an answer of the form "that role has not been imported" without holding this listing.
 """
 
 from __future__ import annotations
@@ -19,11 +19,11 @@ from ..deps import get_db, require_admin
 from ..principals import ADMINISTRATOR_BIT
 from ..schemas import AdminRoleOut
 
-# 経路ごとの宣言ではなくルーターへ課す。新しい経路を足したときに検査を書き忘れても、素通りする経路が生まれない。
+# Imposed on the router rather than declared per route: forgetting the check when adding a route cannot create a route that passes straight through.
 router = APIRouter(tags=['admin:roles'], dependencies=[Depends(require_admin())])
 
-# 並びは Discord の表示と揃える(position の降順)。管理者はこの画面と Discord のロール設定を見比べながら選ぶため、並びが違うと同じ名前を目で探し直すことになる。
-# permissions は Administrator かどうかへ解決してから返し、ビットそのものは応答に載せない。
+# Ordered to match Discord's own display (position descending). Admins choose while comparing this screen against Discord's role settings, so a different order leaves them hunting for the same name by eye.
+# permissions is resolved to whether it is Administrator before returning; the bits themselves never reach the response.
 _ROLES_SQL: Final = """
     SELECT id, name, color, position, (permissions & %s) <> 0 AS is_administrator
       FROM discord_roles
@@ -33,9 +33,9 @@ _ROLES_SQL: Final = """
 
 @router.get('/api/admin/roles')
 async def list_roles(db: Annotated[Database, Depends(get_db)]) -> list[AdminRoleOut]:
-    """対象 guild のロールの一覧。ロールを指す設定の欄と、報道社の所属ロールの選択肢に使う。
+    """The target guild's role listing. Used for the fields of settings that point at roles and for the publisher affiliation-role options.
 
-    真実のソースは Discord であり、この表は bot がロールの作成・更新・削除のイベントを受けて写したスナップショットである。作ったばかりのロールがごく短い間まだ現れないことがあるため、画面は ID の直接入力も残すこと。
+    The source of truth is Discord; this table is a snapshot the bot mirrors as it receives role create / update / delete events. A freshly created role can stay absent for a very short while, so the UI must keep direct ID entry as well.
     """
     rows = await db.fetch_all(_ROLES_SQL, ADMINISTRATOR_BIT)
     return [AdminRoleOut.model_validate(row) for row in rows]

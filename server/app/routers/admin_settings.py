@@ -1,12 +1,12 @@
-"""プラットフォームの設定の管理用 API(settings:admin)。
+"""Admin API for the platform settings (settings:admin).
 
-**settings:admin は他のどのスコープよりも強い。**管理ロール(admin.role_ids)を書き換えられる、すなわち管理者の資格そのものを配れるためである。ads:admin や taxonomy:admin が広告・分類という限られた対象を動かすのに対し、このスコープは誰が管理者であるかを決められる。これを与えたキーは実質的に管理者権限の委譲であり、対象を限って渡すことができない。管理者が発行できるスコープを 1 つに束ねてはならないという原則が、ここでは特に重い。
+**settings:admin is stronger than any other scope.** It can rewrite the admin roles (admin.role_ids), which is to say it can hand out admin eligibility itself. Where ads:admin and taxonomy:admin move a bounded set of things — ads, taxonomy — this scope decides who is an admin at all. A key holding it is effectively a delegation of admin permission, and there is no way to narrow what it is delegated over. The principle that the scopes an admin can issue must never be bundled into one weighs especially heavily here.
 
-**秘密の設定(bot のトークン・OAuth のシークレット)の生値はこの API から返さない。**設定済みかどうかだけを返す(SettingsStore.describe が担う)。API から返した時点で、画面を開ける者すべてに bot のトークンが渡る。設定を読める資格を与えることと、その秘密そのものを持ち出す力を与えることは別である。
+**The raw value of a secret setting (the bot token, the OAuth client secret) is never returned from this API.** Only whether it is set, which SettingsStore.describe decides. Returning it once means handing the bot token to everyone who can open the UI. Granting the eligibility to read settings is not the same as granting the power to carry the secret itself away.
 
-更新は部分更新であり、省略したキーは変更しない。これは秘密の設定を「変更しない」と表現する唯一の手段でもある(画面は秘密の生値を読めないため、全件を送る方式では秘密が必ず壊れる)。
+Updates are partial: an omitted key keeps its current value. That is also the only way to say "leave this one alone" about a secret setting, because the UI cannot read a secret's raw value, so a send-every-key scheme would destroy every secret.
 
-設定を誤って画面から締め出された場合(管理ロールの設定ミス等)、この API では復旧できない。要求のたびに管理者資格を再検査するため、資格を失った本人はこの経路にも入れなくなる。復旧の手段は CLI(python -m server.cli set-setting)だけである。
+If a settings change locks you out of the admin screen (a misconfigured admin role, say), this API cannot undo it. Admin eligibility is re-checked on every request, so the person who lost it cannot get in through this path either. The only way back is the CLI (python -m server.cli set-setting).
 """
 
 from __future__ import annotations
@@ -22,23 +22,23 @@ from ..errors import BadRequest
 from ..principals import Principal
 from ..schemas import SettingOut, SettingsOut, SettingsUpdate, SettingsUpdateOut
 
-# 依存性を 1 つの物として持つ。ルーター全体へ課したうえで、主体そのものを要る経路が同じ物を参照することで、FastAPI の依存性キャッシュが 1 要求につき 1 回だけ評価する。
+# Held as a single object: imposed on the whole router, and referenced by the route that needs the principal itself, so FastAPI's dependency cache evaluates it only once per request.
 _settings_admin: Final = require_scope('settings:admin')
 
-# 経路ごとの宣言ではなくルーターへ課す。新しい経路を足したときに検査を書き忘れても、素通りする経路が生まれない。
+# Imposed on the router rather than declared per route: forgetting the check when adding a route cannot create a route that passes straight through.
 router = APIRouter(tags=['admin:settings'], dependencies=[Depends(_settings_admin)])
 
 
 async def _describe(store: SettingsStore) -> list[SettingOut]:
-    """定義と現在値の一覧。秘密の設定の value を null に伏せるのは describe の側である。"""
+    """Definitions and current values. Masking a secret setting's value to null is describe's job, not this one's."""
     return [SettingOut.model_validate(entry) for entry in await store.describe()]
 
 
 @router.get('/api/admin/settings')
 async def list_settings(store: Annotated[SettingsStore, Depends(get_settings_store)]) -> SettingsOut:
-    """設定の定義と現在値を一覧する。画面はこの応答から入力欄を生成する。
+    """List the settings definitions and their current values. The UI builds its input fields from this response.
 
-    秘密の設定は value が null で返り、設定済みかどうかは is_set が示す。変更できない設定は editable が偽で返り、その理由は description にある。
+    A secret setting comes back with value null, and is_set says whether it is set. A setting that cannot be changed comes back with editable false, and description says why.
     """
     return SettingsOut(settings=await _describe(store))
 
@@ -49,13 +49,13 @@ async def update_settings(
     principal: Annotated[Principal, Depends(_settings_admin)],
     store: Annotated[SettingsStore, Depends(get_settings_store)],
 ) -> SettingsUpdateOut:
-    """設定を部分更新する。updates に載せたキーだけを変更し、省略したキーは現在の値のまま残す。
+    """Partially update the settings. Only the keys listed in updates change; an omitted key keeps its current value.
 
-    updated_by にはセッション経由・API キー経由のどちらでも principal.user_id を入れる。キーは所有者の権限を機械が借りたものであり、キー自身が設定を変更したのではない。発行者を記録することで、責任の所在は必ず人間に残る。
+    updated_by gets principal.user_id on the session path and the API key path alike. A key is the owner's permission borrowed by a machine; the key itself did not change the setting. Recording the issuer keeps responsibility with a human.
 
-    未知のキー・型の不一致・値域の逸脱・変更できない設定(discord.guild_id)への変更要求は、いずれも set_many が ValueError で拒む。**これを握り潰して黙って無視してはならない。**送った側は成功したと解釈し、変更したはずの値が効いていない状態だけが残る。理由を含む文言をそのまま 400 で返す。
+    An unknown key, a type mismatch, a value outside the range, and a change to a setting that is not editable (discord.guild_id) are all rejected by set_many with ValueError. **Never swallow that and silently ignore it.** The caller reads the request as a success, and all that is left is a value they believe they changed that is not in effect. Return the message, reason and all, as a 400.
 
-    検証は set_many が全件まとめて先に行うため、1 つでも不正なら何も書かれない。一部だけが適用された中途半端な設定は生まれない。
+    set_many validates every entry up front, so a single bad key means nothing is written and no half-applied settings state can arise.
     """
     try:
         updated = await store.set_many(payload.updates, updated_by=principal.user_id)

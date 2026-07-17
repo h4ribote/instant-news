@@ -1,8 +1,8 @@
-"""aiomysql の薄いラッパ。ORM は使わない。
+"""Thin wrapper over aiomysql. No ORM.
 
-SQL は必ずプレースホルダ(%s)で書き、値を文字列連結で埋め込まない。連結した瞬間に SQL インジェクションが成立する。IN 句のように個数が可変な場合も、個数分の %s を生成して引数として渡す。
+Always write SQL with placeholders (%s); never embed values by string concatenation, which is SQL injection the moment it happens. Where the count is variable, as in an IN clause, generate that many %s and pass the values as arguments.
 
-複数のクエリを 1 つのトランザクションで流す場合は transaction() が渡す Connection を各メソッドの conn 引数へ渡す。conn を省略した呼び出しはプールから都度コネクションを借りるため、同じトランザクションには乗らない。
+To run several queries in one transaction, pass the Connection yielded by transaction() to each method's conn argument. A call that omits conn borrows its own connection from the pool, so it does not join the transaction.
 """
 
 from __future__ import annotations
@@ -20,20 +20,20 @@ logger = logging.getLogger(__name__)
 
 POOL_MIN_SIZE: Final = 1
 POOL_MAX_SIZE: Final = 10
-# MySQL は wait_timeout(既定 8 時間)を過ぎた接続を切る。切られた接続をプールから掴むと最初のクエリが失敗するため、それより十分短い間隔で作り直す。
+# MySQL closes connections idle past wait_timeout (8 hours by default), and taking a closed one out of the pool fails on the first query, so recycle at a comfortably shorter interval.
 POOL_RECYCLE_SECONDS: Final = 3600
 CONNECT_TIMEOUT_SECONDS: Final = 10
 
 
 class Database:
-    """MySQL への接続プールと、その上の最小限のクエリ実行。"""
+    """A MySQL connection pool and the minimal query execution on top of it."""
 
     def __init__(self, config: DatabaseConfig) -> None:
         self._config = config
         self._pool: Pool | None = None
 
     async def connect(self) -> None:
-        """接続プールを生成する。既に生成済みなら何もしない。"""
+        """Create the connection pool. No-op if it already exists."""
         if self._pool is not None:
             return
         self._pool = await create_pool(
@@ -42,7 +42,7 @@ class Database:
             user=self._config.user,
             password=self._config.password,
             db=self._config.name,
-            # 既定は自動コミット。明示的なトランザクションは transaction() が BEGIN で開始する。
+            # Autocommit by default; transaction() opens explicit transactions with BEGIN.
             autocommit=True,
             charset='utf8mb4',
             cursorclass=DictCursor,
@@ -54,7 +54,7 @@ class Database:
         logger.info('データベースへ接続しました: %s:%s/%s', self._config.host, self._config.port, self._config.name)
 
     async def close(self) -> None:
-        """接続プールを閉じる。既に閉じているなら何もしない。"""
+        """Close the connection pool. No-op if it is already closed."""
         if self._pool is None:
             return
         pool = self._pool
@@ -70,30 +70,30 @@ class Database:
 
     @asynccontextmanager
     async def acquire(self) -> AsyncIterator[Connection]:
-        """プールからコネクションを 1 本借りる。抜けると必ずプールへ返る。"""
+        """Borrow one connection from the pool. It always goes back on exit."""
         pool = self._require_pool()
         async with pool.acquire() as conn:
             yield conn
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Connection]:
-        """トランザクションを開始し、正常終了で commit、例外で rollback する。
+        """Begin a transaction; commit on normal exit, roll back on exception.
 
-        渡された Connection を各メソッドの conn 引数へ渡すことで、同じトランザクションでクエリを流せる。
+        Pass the yielded Connection to each method's conn argument to run those queries in this transaction.
         """
         async with self.acquire() as conn:
             await conn.begin()
             try:
                 yield conn
             except BaseException:
-                # asyncio.CancelledError も BaseException 派生であり、取りこぼすと中途半端な状態のまま接続がプールへ返る。
+                # asyncio.CancelledError derives from BaseException too, and missing it would return the connection to the pool half-finished.
                 await conn.rollback()
                 raise
             await conn.commit()
 
     @asynccontextmanager
     async def _cursor(self, conn: Connection | None) -> AsyncIterator[DictCursor]:
-        """conn が与えられていればそのコネクション上に、なければ借りたコネクション上にカーソルを開く。"""
+        """Open a cursor on conn when given, otherwise on a connection borrowed for the call."""
         if conn is not None:
             async with conn.cursor(DictCursor) as cursor:
                 yield cursor
@@ -104,26 +104,26 @@ class Database:
 
     @staticmethod
     def _params(args: tuple[Any, ...]) -> tuple[Any, ...] | None:
-        """引数が無い場合に None を渡すためのもの。
+        """Pass None, not an empty tuple, when there are no arguments.
 
-        aiomysql は引数が None 以外のとき SQL を % で書式化するため、引数の無い SQL に空のタプルを渡すと、本文中の % (LIKE のワイルドカードなど)が書式指定子と解釈されて壊れる。
+        aiomysql %-formats the SQL whenever the arguments are not None, so an empty tuple makes a literal % in the statement (a LIKE wildcard, say) get read as a format specifier and break.
         """
         return args or None
 
     async def fetch_one(self, sql: str, *args: Any, conn: Connection | None = None) -> dict[str, Any] | None:
-        """先頭の 1 行を返す。無ければ None。"""
+        """Return the first row, or None if there is none."""
         async with self._cursor(conn) as cursor:
             await cursor.execute(sql, self._params(args))
             return await cursor.fetchone()
 
     async def fetch_all(self, sql: str, *args: Any, conn: Connection | None = None) -> list[dict[str, Any]]:
-        """全ての行を返す。"""
+        """Return every row."""
         async with self._cursor(conn) as cursor:
             await cursor.execute(sql, self._params(args))
             return list(await cursor.fetchall())
 
     async def fetch_val(self, sql: str, *args: Any, conn: Connection | None = None) -> Any:
-        """先頭の行の先頭の列を返す。行が無ければ None。"""
+        """Return the first column of the first row, or None if there is no row."""
         async with self._cursor(conn) as cursor:
             await cursor.execute(sql, self._params(args))
             row = await cursor.fetchone()
@@ -132,13 +132,13 @@ class Database:
             return next(iter(row.values()))
 
     async def execute(self, sql: str, *args: Any, conn: Connection | None = None) -> int:
-        """SQL を実行し、影響を受けた行数を返す。"""
+        """Execute the SQL and return the number of affected rows."""
         async with self._cursor(conn) as cursor:
             await cursor.execute(sql, self._params(args))
             return int(cursor.rowcount)
 
     async def execute_insert(self, sql: str, *args: Any, conn: Connection | None = None) -> int:
-        """INSERT を実行し、生成された AUTO_INCREMENT の値を返す。"""
+        """Execute the INSERT and return the generated AUTO_INCREMENT value."""
         async with self._cursor(conn) as cursor:
             await cursor.execute(sql, self._params(args))
             return int(cursor.lastrowid)

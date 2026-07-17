@@ -1,18 +1,18 @@
-"""外部の URL から画像を取得する。任意の URL をサーバーに取得させる機能であり、対策を欠くとそのまま SSRF になる。
+"""Fetch images from external URLs. The feature makes the server fetch a URL of someone else's choosing, so without the measures below it is SSRF outright.
 
-このサービスは MySQL と同じ Docker ネットワークに居るため http://db:3306 は実際に到達可能であり、クラウド上では 169.254.169.254 がインスタンスの資格情報を返す。「内部の URL など誰も書かない」という前提は成り立たない。本文の Markdown に画像として書くだけで、サーバーの目線で任意の宛先へ HTTP 要求を出させられる。
+This service sits on the same Docker network as MySQL, so http://db:3306 really is reachable, and in the cloud 169.254.169.254 returns the instance's credentials. "Nobody would write an internal URL" is not a premise that holds: writing one as an image in the body Markdown is enough to make the server issue an HTTP request to any destination, with the server's own network vantage point.
 
-そのため、ここでは次の全てを行う。1 つでも欠けると擦り抜けが成立する。
+So all of the following are done here. Drop any one of them and a bypass opens up.
 
-- スキームは http / https のみ。リダイレクト先も含め毎回検査する。
-- 名前解決して得た全ての IP を検査する。1 つでも禁止範囲に当たれば取得しない(A レコードを複数返し、検査を通った 1 つだけを見せる細工を防ぐ)。
-- 検査した IP そのものへ接続する。検査と接続の間にもう一度名前解決すると、その隙に DNS の応答を差し替えられ、検査は公開 IP・接続は内部 IP という擦り抜けが成立する(DNS リバインディング)。URL のホストを検査済みの IP へ差し替え、Host ヘッダと SNI に元のホスト名を入れることで、解決を固定したまま証明書の検証を元のホスト名に対して行う。
-- リダイレクトを httpx に追わせない。追わせると、その追跡はライブラリの中で名前解決からやり直され、検査を経ずに内部へ到達する。各ホップの Location を自前で解決し、ホップごとに IP を検査し直す。
-- Content-Length を信用しない。宣言と実際の送信量は一致する必要がなく、小さいと偽って無制限に送りつけられる。ストリームしながら数え、上限を超えた時点で打ち切る。数えるのは伸長前の実通信バイト数である。伸長後を数えると、上限の検査に届く前にライブラリの復号器が既に確保を終えており、上限は「保持する量」しか縛らない。
-- 応答を伸長させない。Accept-Encoding: identity は要求側の希望に過ぎず、敵対的なサーバーはこれを無視して Content-Encoding: gzip を返せる。したがって、伸長を行わない経路で読み(aiter_raw)、identity 以外の Content-Encoding が付いた応答は拒否する。これが無いと、約 1 MB の gzip 爆弾で 2 桁倍のメモリを確保させられる(希望を書いたヘッダは対策ではない)。画像は既に圧縮されており、正当な画像配信が応答を更に gzip することはないため、拒否しても取得を妨げない。
-- プロキシの環境変数を読ませない(trust_env=False)。プロキシを経由すると、接続先はプロキシであって検査した IP ではなくなり、宛先を固定した意味が消える。
+- Only the http / https schemes, checked on every hop, redirect next hops included.
+- Check every IP the name resolves to, and fetch nothing if even one lands in a forbidden range (this defeats returning several A records and exposing only the one that passed).
+- Connect to the checked IP itself. Resolving again between check and connect leaves a gap in which the DNS answer can be swapped, so the check sees a public IP while the connection goes to an internal one (DNS rebinding). Replacing the URL's host with the checked IP and putting the original hostname in the Host header and SNI pins the resolution while still validating the certificate against the original hostname.
+- Never let httpx follow redirects: it would re-resolve inside the library and reach internal addresses without any check. Each hop's Location is resolved here and the IP re-checked per hop.
+- Do not trust Content-Length. The declared size need not match what is actually sent, so a peer can understate it and then send without limit. Bytes are counted while streaming and the read is cut off the moment the max is passed. What is counted is the wire bytes before decompression: count after it and the library's decoder has already finished allocating before the check runs, so the max bounds only what is retained.
+- Never decompress the response. Accept-Encoding: identity is no more than the requesting side's wish, and a hostile server can ignore it and return Content-Encoding: gzip. So the read goes through a path that does not decompress (aiter_raw), and a response carrying any Content-Encoding other than identity is refused. Without this, a ~1 MB gzip bomb forces tens of times that much memory to be allocated (a header stating a wish is not a countermeasure). Images are already compressed and legitimate image delivery does not gzip the response on top, so refusing costs no real fetches.
+- Do not read the proxy environment variables (trust_env=False). Through a proxy the connection target is the proxy rather than the checked IP, which voids the point of pinning the destination.
 
-拒否した理由に解決結果の IP を含めない。取り込みの失敗は記事の保存の応答として執筆者へ返るため、IP を書くと「内部のホスト名を書いて、返ってきた理由から内部ネットワークを地図にする」ことができてしまう。IP はログにだけ残す。
+Refusal reasons never name the resolved IP. An ingest failure comes back to the writer in the article-save response, so naming the IP would let someone write internal hostnames and map the internal network from the reasons that come back. IPs go to the log only.
 """
 
 from __future__ import annotations
@@ -33,40 +33,40 @@ logger = logging.getLogger(__name__)
 
 IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
-# 取得を許すスキーム。file / gopher / ftp などは、リダイレクト先として指定されるだけでも到達しうるため毎ホップ検査する。
+# Schemes allowed for fetching. file / gopher / ftp and friends can be reached merely by being named as a redirect next hop, so this is checked on every hop.
 ALLOWED_SCHEMES: Final = ('http', 'https')
 _DEFAULT_PORTS: Final[dict[str, int]] = {'http': 80, 'https': 443}
 _REDIRECT_STATUS: Final = frozenset({301, 302, 303, 307, 308})
 _CHUNK_SIZE: Final = 65536
 _USER_AGENT: Final = 'instant-news/1.0 (+image ingest)'
-# 応答を伸長させない。画像は既に圧縮されており伸長の利得は無い一方、伸長を許すと圧縮爆弾の面が増える。ただしこのヘッダは希望を伝えるだけであり、対策として働くのは _request が伸長せずに読み、identity 以外の Content-Encoding を拒むことによる。
+# Ask for no compression. Images are already compressed so there is nothing to gain, while allowing it widens the compression-bomb attack surface. This header only states a wish, though: the measure that actually works is _request reading without decompressing and refusing any Content-Encoding other than identity.
 _REQUEST_HEADERS: Final[dict[str, str]] = {
     'User-Agent': _USER_AGENT,
     'Accept': 'image/*;q=0.9,*/*;q=0.1',
     'Accept-Encoding': 'identity',
 }
-# 内容の符号化として受け入れる値。空(ヘッダ自体が無い)か identity のみ。
+# Content-Encoding values accepted: empty (no header at all) or identity, nothing else.
 _ALLOWED_CONTENT_ENCODINGS: Final = frozenset({'', 'identity'})
 
 
 class FetchError(Exception):
-    """外部の URL から画像を取得できなかった。
+    """An image could not be fetched from an external URL.
 
-    文言は記事の保存の応答として執筆者へ返るため、執筆者が書いた URL について執筆者が既に知っていること(ホスト名・HTTP の状態コードなど)だけを含め、解決結果の IP のような内部の情報は含めない。
+    The wording comes back to the writer in the article-save response, so it carries only what the writer already knows about the URL they wrote (hostname, HTTP status code) and never internal information such as the resolved IP.
     """
 
 
 def _forbidden_reason(ip: IpAddress) -> str | None:
-    """到達を許さない範囲なら理由を返す。許す範囲なら None。
+    """Return the reason if the address is in a range we refuse to reach, or None if it is allowed.
 
-    最後の is_global は、上の個別の判定から漏れる範囲(共有アドレス空間 100.64.0.0/10 や文書用の範囲など)をまとめて塞ぐための網である。公開インターネットのアドレスは is_global が真であるため、正当な取得を妨げない。
+    The final is_global is the net that closes off, in one go, the ranges the individual checks above miss (the shared address space 100.64.0.0/10, the documentation ranges, and so on). Public-internet addresses have is_global true, so it costs no legitimate fetches.
     """
     if ip.is_unspecified:
         return '未指定'
     if ip.is_loopback:
         return 'ループバック'
     if ip.is_link_local:
-        # 169.254.169.254 はクラウドのメタデータ取得口であり、到達できると資格情報がそのまま漏れる。
+        # 169.254.169.254 is the cloud metadata endpoint: reach it and the credentials leak outright.
         return 'リンクローカル'
     if ip.is_multicast:
         return 'マルチキャスト'
@@ -80,9 +80,9 @@ def _forbidden_reason(ip: IpAddress) -> str | None:
 
 
 def _candidates(ip: IpAddress) -> Iterator[IpAddress]:
-    """検査すべきアドレスを列挙する。IPv6 に IPv4 が埋め込まれている場合は、埋め込まれた IPv4 も検査する。
+    """Enumerate the addresses to check. Where an IPv6 address embeds an IPv4 one, the embedded IPv4 is checked too.
 
-    ::ffff:127.0.0.1 のような IPv4 射影アドレスは、IPv6 として見ると各判定が偽になりうる一方、接続すると実際には 127.0.0.1 へ届く。6to4 と Teredo も同様に IPv4 を内包する。取り出して検査しないと、これらの表記でループバックやプライベートへ到達できる。
+    An IPv4-mapped address such as ::ffff:127.0.0.1 can make every check read false when judged as IPv6, yet connecting to it really does reach 127.0.0.1. 6to4 and Teredo embed IPv4 the same way. Without pulling those out and checking them, these notations reach loopback and private ranges.
     """
     yield ip
     if not isinstance(ip, ipaddress.IPv6Address):
@@ -98,7 +98,7 @@ def _candidates(ip: IpAddress) -> Iterator[IpAddress]:
 
 
 def _check_address(text: str, host: str) -> None:
-    """解決結果のアドレス 1 つを検査する。到達を許さない範囲なら FetchError。"""
+    """Check one resolved address. FetchError if it is in a range we refuse to reach."""
     try:
         ip = ipaddress.ip_address(text)
     except ValueError as exc:
@@ -111,13 +111,13 @@ def _check_address(text: str, host: str) -> None:
 
 
 async def _resolve_checked(host: str, port: int) -> list[str]:
-    """ホスト名を解決し、得られた全ての IP を検査して返す。1 つでも禁止範囲に当たれば取得しない。
+    """Resolve the hostname, check every IP it yields, and return them. If even one lands in a forbidden range, nothing is fetched.
 
-    複数の A レコードのうち 1 つでも内部を指すなら、接続に選ばれるのがどれかは運でしかない。全て安全である場合にだけ先へ進む。
+    If any one of several A records points inside, which one the connection picks is pure luck. Proceed only when all of them are safe.
     """
     loop = asyncio.get_running_loop()
     try:
-        # AI_ADDRCONFIG … 経路を持たないアドレス族(IPv4 のみの環境での AAAA など)を除く。固定した 1 つが到達不能で失敗する事態を減らす。
+        # AI_ADDRCONFIG drops address families with no route (AAAA on an IPv4-only host, say), which reduces failures where the one address we pinned turns out to be unreachable.
         infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM, flags=socket.AI_ADDRCONFIG)
     except socket.gaierror as exc:
         raise FetchError(f'ホスト名を解決できません: {host}') from exc
@@ -134,12 +134,12 @@ async def _resolve_checked(host: str, port: int) -> list[str]:
 
 
 def _split(url: str) -> tuple[str, str, int, str, str]:
-    """URL を (スキーム, ホスト, ポート, パス, クエリ)へ分解する。スキームが許可外・ホストが無い場合は FetchError。"""
+    """Split a URL into (scheme, host, port, path, query). FetchError if the scheme is not allowed or there is no host."""
     try:
         parts = urlsplit(url)
         port = parts.port
     except ValueError as exc:
-        # ポートが数値でない場合などに urlsplit.port が ValueError を投げる。
+        # urlsplit.port raises ValueError when the port is not numeric, among other cases.
         raise FetchError(f'URL として解釈できません: {url}') from exc
     scheme = parts.scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
@@ -151,16 +151,16 @@ def _split(url: str) -> tuple[str, str, int, str, str]:
 
 
 def _authority(address: str, port: int) -> str:
-    """接続先の authority を組み立てる。IPv6 はブラケットで囲む必要がある。"""
+    """Build the authority to connect to. IPv6 has to be wrapped in brackets."""
     if ':' in address:
         return f'[{address}]:{port}'
     return f'{address}:{port}'
 
 
 async def _request(target: str, headers: dict[str, str], sni_hostname: str, cfg: MediaFetchConfig) -> tuple[str | None, bytes | None]:
-    """検査済みの IP へ 1 回だけ要求を出す。リダイレクトなら (Location, None)、最終応答なら (None, 本体)。
+    """Issue exactly one request to a checked IP. Returns (Location, None) for a redirect, (None, body) for a final response.
 
-    extensions の sni_hostname は httpx(httpcore)が TLS の server_hostname に使う値であり、これによって「接続先は検査した IP、SNI と証明書の検証は元のホスト名」が両立する。この指定が無いと、IP へ接続した時点で証明書の検証が IP に対して行われ、正当なホストの取得が全て失敗する。
+    The sni_hostname extension is the value httpx (httpcore) uses as the TLS server_hostname, and it is what lets "connect to the checked IP, but do SNI and certificate validation against the original hostname" hold at once. Without it, connecting to an IP validates the certificate against that IP and every fetch of a legitimate host fails.
     """
     timeout = httpx.Timeout(cfg.timeout_seconds)
     try:
@@ -173,13 +173,13 @@ async def _request(target: str, headers: dict[str, str], sni_hostname: str, cfg:
                     return location, None
                 if response.status_code != httpx.codes.OK:
                     raise FetchError(f'取得できませんでした(HTTP {response.status_code})。')
-                # identity を要求している以上、それを無視して符号化を掛けてくる相手は壊れているか敵対的である。後段の再符号化(transcode)が要るのは画像のバイト列そのものであり、正当な画像配信が応答を更に圧縮することはないため、ここで拒んでも取得を妨げない。
+                # We asked for identity, so a peer that ignores that and encodes anyway is broken or hostile. What the later re-encoding (transcode) needs is the image bytes themselves, and legitimate image delivery does not compress the response on top, so refusing here costs no real fetches.
                 encoding = response.headers.get('Content-Encoding', '').strip().lower()
                 if encoding not in _ALLOWED_CONTENT_ENCODINGS:
                     raise FetchError(f'応答が {encoding} で符号化されているため取得できません。')
                 buffer = bytearray()
-                # Content-Length は見ない。宣言と実際の送信量が一致する保証はなく、小さいと偽って際限なく送りつけられる。実際に受け取った量だけを数える。
-                # aiter_bytes ではなく aiter_raw で読む。aiter_bytes は Content-Encoding を見て透過的に伸長するため、上限の検査は復号器が伸長を終えた後にしか働かず、約 1 MB の gzip 爆弾で 2 桁倍のメモリを確保させられる。aiter_raw は伸長を行わないため、この数はそのまま実通信バイト数になる。
+                # Content-Length is not consulted. Nothing guarantees the declaration matches what is sent, so a peer can understate it and then send endlessly. Only what actually arrives is counted.
+                # Read with aiter_raw, not aiter_bytes: aiter_bytes honours Content-Encoding and decompresses transparently, so the max check would only run once the decoder had finished expanding, and a ~1 MB gzip bomb would force tens of times that much memory to be allocated. aiter_raw does not decompress, so this count is the wire bytes as they are.
                 async for chunk in response.aiter_raw(_CHUNK_SIZE):
                     buffer.extend(chunk)
                     if len(buffer) > cfg.max_bytes:
@@ -188,17 +188,17 @@ async def _request(target: str, headers: dict[str, str], sni_hostname: str, cfg:
                     raise FetchError('応答が空です。')
                 return None, bytes(buffer)
     except (httpx.ConnectError, httpx.ConnectTimeout):
-        # 接続そのものの失敗は、別のアドレスを試す呼び出し元へ渡す。
+        # A failure of the connection itself passes through to the caller, which tries another address.
         raise
     except httpx.HTTPError as exc:
         raise FetchError(f'取得に失敗しました: {exc}') from exc
 
 
 async def _perform(url: str, cfg: MediaFetchConfig) -> tuple[str | None, bytes | None]:
-    """1 ホップ分の取得。名前解決・検査・接続先の固定をここで行う。"""
+    """One hop's fetch. Name resolution, checking and pinning the connection target all happen here."""
     scheme, host, port, path, query = _split(url)
     addresses = await _resolve_checked(host, port)
-    # Host ヘッダには元のホスト名を入れる。接続先を IP に差し替えても、相手のバーチャルホストの選択は元のホスト名で行われる必要がある。
+    # The Host header carries the original hostname: even though the connection target is swapped for an IP, the peer must still select its virtual host by the original hostname.
     headers = dict(_REQUEST_HEADERS)
     headers['Host'] = host if port == _DEFAULT_PORTS[scheme] else f'{host}:{port}'
     last_error: Exception | None = None
@@ -207,14 +207,14 @@ async def _perform(url: str, cfg: MediaFetchConfig) -> tuple[str | None, bytes |
         try:
             return await _request(target, headers, host, cfg)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-            # 解決結果は全て検査済みであるため、到達できないものを飛ばして次を試してよい。
+            # Every resolved address has already been checked, so skipping an unreachable one and trying the next is safe.
             last_error = exc
             continue
     raise FetchError(f'{host} へ接続できません: {last_error}')
 
 
 async def _fetch_following_redirects(url: str, cfg: MediaFetchConfig) -> bytes:
-    """リダイレクトを自前で追う。各ホップで scheme と宛先 IP を検査し直す。"""
+    """Follow redirects ourselves, re-checking the scheme and the destination IP on every hop."""
     current = url
     visited: list[str] = []
     for _hop in range(cfg.max_redirects + 1):
@@ -222,7 +222,7 @@ async def _fetch_following_redirects(url: str, cfg: MediaFetchConfig) -> bytes:
         if data is not None:
             return data
         visited.append(current)
-        # Location は相対でもよい。元のホスト名を持つ URL(接続先へ差し替える前の URL)を基準に解決する。
+        # Location may be relative, so it resolves against the URL that still holds the original hostname (the one from before the connection target was substituted in).
         current = urljoin(current, location)
         if current in visited:
             raise FetchError('リダイレクトが循環しています。')
@@ -230,11 +230,11 @@ async def _fetch_following_redirects(url: str, cfg: MediaFetchConfig) -> bytes:
 
 
 async def fetch_image(url: str, cfg: MediaFetchConfig) -> bytes:
-    """URL から画像のバイト列を取得する。取得できない場合は FetchError。
+    """Fetch an image's bytes from a URL. FetchError if it cannot be fetched.
 
-    timeout_seconds は 1 枚あたりの取得全体の締切として掛ける。httpx のタイムアウトは接続・読み取りといった操作ごとにしか効かないため、それだけでは「上限より僅かに短い間隔でバイトを送り続ける」相手に対して無限に待つことになる。
+    timeout_seconds applies as a deadline over the whole per-image fetch. httpx's own timeouts bound only individual operations such as connect and read, and on their own would wait forever on a peer that keeps sending bytes at just under that interval.
 
-    ここで返るのは未検証のバイト列に過ぎない。これが画像であることも、宣言された形式であることも保証しない。安全になるのは transcode で復号して再符号化した後である。
+    What comes back here is no more than unverified bytes: nothing guarantees it is an image, or that it is in the format it declares. It becomes safe only after transcode has decoded and re-encoded it.
     """
     try:
         async with asyncio.timeout(cfg.timeout_seconds):

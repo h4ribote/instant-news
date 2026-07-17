@@ -1,18 +1,18 @@
 /*
- * instant-news の API クライアント。各ページはこのモジュールを import して画面を API に結線する。
- * ビルド工程を持たないため、素の ES module として <script type="module"> から直接読み込む。
+ * instant-news API client. Every page imports this module to wire the UI to the API.
+ * There is no build step, so it loads directly from <script type="module"> as a plain ES module.
  *
- * JSON 応答に含まれる ID(DB の BIGINT・Discord のスノーフレーク)は、サーバーが必ず文字列で返す。
- * JavaScript の Number は 2^53 までしか正確に表せず、スノーフレークを数値として扱うと黙って下位桁が壊れる。
- * 受け取った ID は文字列のまま扱い、Number() や parseInt() に通さないこと。比較は文字列として行う。
+ * The server always returns the IDs in JSON responses (DB BIGINTs, Discord snowflakes) as strings.
+ * JavaScript's Number is exact only up to 2^53, so treating a snowflake as a number silently corrupts its low digits.
+ * Keep received IDs as strings, never pass them through Number() or parseInt(), and compare them as strings.
  */
 
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
-/** ネットワーク到達不能を表す擬似ステータス。呼び出し側が HTTP のエラーと同じ経路で扱えるようにするため、fetch 自体の失敗も ApiError に畳む。 */
+/** Pseudo-status for an unreachable network. A failure of fetch itself is folded into ApiError too, so callers can handle it by the same path as an HTTP error. */
 const STATUS_NETWORK_ERROR = 0;
 
-/** API がエラーを返した(あるいは到達できなかった)ことを表す例外。status に HTTP ステータス、body に解析済みの応答本体を持つ。 */
+/** Thrown when the API returned an error, or could not be reached. status holds the HTTP status, body the parsed response body. */
 export class ApiError extends Error {
   constructor(status, body) {
     super(buildErrorMessage(status, body));
@@ -22,7 +22,7 @@ export class ApiError extends Error {
   }
 }
 
-/** 例外のメッセージを組み立てる。サーバーがエラーの説明を返していればそれを使い、無ければステータスだけを示す。 */
+/** Build the exception message: the server's error description when it sent one, otherwise the status alone. */
 function buildErrorMessage(status, body) {
   if (typeof body === 'string' && body !== '') return `${status}: ${body}`;
   if (body && typeof body === 'object') {
@@ -33,7 +33,7 @@ function buildErrorMessage(status, body) {
   return `HTTP ${status}`;
 }
 
-/** 応答本体を解析する。204 と空の本体は null、JSON は解析済みのオブジェクト、それ以外は文字列として返す。 */
+/** Parse the response body: null for 204 and for an empty body, a parsed object for JSON, a string otherwise. */
 async function readBody(res) {
   if (res.status === 204) return null;
   const contentType = res.headers.get('Content-Type') || '';
@@ -49,10 +49,9 @@ async function readBody(res) {
 }
 
 /**
- * fetch の薄いラッパ。セッション Cookie を送るため credentials は same-origin に固定する。
- * options.body にプレーンなオブジェクトを渡すと JSON として送る。FormData / Blob / 文字列 / URLSearchParams はそのまま送る
- * (特に multipart は境界文字列をブラウザに決めさせる必要があるため、Content-Type を自分で付けてはならない)。
- * 2xx 以外、および fetch 自体の失敗では ApiError を throw する。
+ * Thin wrapper around fetch. credentials is pinned to same-origin so the session cookie is sent.
+ * A plain object in options.body is sent as JSON. FormData / Blob / string / URLSearchParams are sent as-is, and Content-Type must not be set by hand for them: multipart in particular needs the browser to pick the boundary string.
+ * Throws ApiError on any non-2xx response, and on a failure of fetch itself.
  */
 export async function api(path, options = {}) {
   const { body, headers, ...rest } = options;
@@ -90,8 +89,8 @@ export const patch = (path, body) => api(path, { method: 'PATCH', body });
 export const del = (path) => api(path, { method: 'DELETE' });
 
 /**
- * 画像をアップロードする。応答は {id, url, ...}(id は文字列、url は配信 URL)。
- * isPublic はカバー・広告・ロゴ・アイコンのように認証なしで配信してよい画像にのみ立てる。本文中の画像は非公開のまま取り込み、記事の閲覧範囲と同じ判定を受けさせる。
+ * Upload an image. The response is {id, url, ...}, where id is a string and url is the delivery URL.
+ * Set isPublic only for images that may be served without authentication, such as cover images, ads, logos and icons. Images inside an article body are ingested non-public so that they get the same visibility check as the article.
  */
 export async function upload(file, { isPublic = false } = {}) {
   const form = new FormData();
@@ -99,7 +98,7 @@ export async function upload(file, { isPublic = false } = {}) {
   return await api('/api/media' + qs({ is_public: isPublic ? 'true' : 'false' }), { method: 'POST', body: form });
 }
 
-/** 現在のログイン利用者を返す。未ログインなら null(401 を握って null にするのは、ヘッダのログイン導線の出し分けが例外処理を強いられないようにするため)。401 以外のエラーはそのまま throw する。 */
+/** Return the logged-in user, or null when not logged in. Swallowing the 401 into null is what keeps the header from having to wrap its login entry point in exception handling. Any error other than 401 is rethrown. */
 export async function me() {
   try {
     return await get('/api/me');
@@ -109,20 +108,20 @@ export async function me() {
   }
 }
 
-/** 画像の配信 URL。内容アドレスであり、内容が変われば hash も変わるため、この URL は永久にキャッシュしてよい。 */
+/** Delivery URL for an image. It is content-addressed, and the hash changes whenever the content does, so this URL may be cached forever. */
 export function mediaUrl(hash, variant = 'orig') {
   return `/media/${encodeURIComponent(hash)}/${encodeURIComponent(variant)}.webp`;
 }
 
-/* 取り込み済みの画像を指す URL の形。service.media_url が組み立てるものと同じ(/media/{64 桁の 16 進}/{変種}.webp)。ハッシュの桁と字種まで見るのは、この形に当たらないものを一切書き換えないためである。 */
+/* Shape of a URL pointing at an already-ingested image, the same one service.media_url builds (/media/{64 hex digits}/{variant}.webp). It matches the hash's digit count and character set as well, so that nothing outside this shape is ever rewritten. */
 const MEDIA_URL_PATTERN = /^\/media\/([0-9a-f]{64})\/[^/]+\.webp$/;
 
 /**
- * 取り込み済みの画像の URL を、指定した変種の URL へ読み替える。一覧やカードのように小さく出す場所で使う。
+ * Rewrite an already-ingested image URL to the given variant. Used where the image is shown small, such as in a listing or a card.
  *
- * **この形に当たらない URL はそのまま返す。**カバー・報道社のロゴ・タグのアイコンは自由書式の列であり、取り込みを経ない外部ホストの絶対 URL がそのまま入る(カバーは API から任意の URL を入れられ、ロゴとアイコンは管理画面で手入力する)。外部の URL に /400w.webp を継ぎ足せば、当然そこには何も無い。
+ * **A URL outside that shape is returned unchanged.** Cover images, publisher logos and tag icons are free-form columns that can hold an absolute URL on an external host with no ingest involved: a cover image can be given any URL through the API, and logos and icons are typed in by hand on the admin screen. Appending /400w.webp to an external URL would of course point at nothing.
  *
- * 変種が実在しなくてよい。原寸より広い変種は生成されず、アニメーションは orig しか持たないが、配信側が変種を見つけられなければ orig を返す(server/app/routers/media.py の _read_variant)。したがって「400w を要求する」は「400px 以下で足りる。あるならそれをくれ」を意味し、無い場合に壊れることはない。
+ * The variant need not exist. No variant wider than the original size is produced, and animations only ever have orig, but when the serving side cannot find the variant it falls back to orig (_read_variant in server/app/routers/media.py). So asking for 400w means only that 400px is enough and it should be served if it exists; a missing variant does not break anything.
  */
 export function mediaVariant(url, variant) {
   if (!url) return url;
@@ -130,15 +129,15 @@ export function mediaVariant(url, variant) {
   return m ? mediaUrl(m[1], variant) : url;
 }
 
-/** 記事ページの URL。 */
+/** URL of an article page. */
 export function articleUrl(slug) {
   return `/articles/${encodeURIComponent(slug)}`;
 }
 
 /**
- * ISO 8601(UTC)の日時を閲覧者のローカル時刻の「2026-07-15 15:04:32」形式へ整形する。
- * 秒まで出すのは、同じ分内に複数の記事や改版が並んだときに前後関係が読めなくなるため。報道では公開・訂正の時刻そのものが記録であり、丸めてはならない。
- * 解析できない値では空文字を返す(日時が欠けている行で「Invalid Date」と表示させない)。
+ * Format an ISO 8601 (UTC) timestamp as 2026-07-15 15:04:32 in the viewer's local time.
+ * Seconds are shown because several articles or revisions can fall in the same minute, and without them their order becomes unreadable. In news reporting the publication and correction times are themselves the record, and must not be rounded.
+ * An unparseable value yields an empty string, so that a row with a missing timestamp does not render as Invalid Date.
  */
 export function formatDateTime(iso) {
   if (!iso) return '';
@@ -148,13 +147,13 @@ export function formatDateTime(iso) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-/** HTML の特殊文字をエスケープする。innerHTML に値を差し込む箇所では必ず通すこと。null / undefined は空文字にする。 */
+/** Escape HTML special characters. Anything interpolated into innerHTML must be passed through this. null / undefined become an empty string. */
 export function escapeHtml(s) {
   if (s === null || s === undefined) return '';
   return String(s).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }
 
-/** オブジェクトをクエリ文字列にする。null / undefined / 空文字は落とす(未指定の絞り込みを「空文字で絞り込む」意味にしないため)。0 と false は意味のある値として残す。先頭の ? を含めて返し、要素が無ければ空文字を返すので、パスへそのまま連結できる。 */
+/** Turn an object into a query string. null / undefined / empty string are dropped, so that an unset filter does not become a filter on the empty string; 0 and false are kept as meaningful values. The result includes the leading ? and is an empty string when there are no entries, so it can be concatenated onto a path directly. */
 export function qs(params) {
   const sp = new URLSearchParams();
   for (const [key, value] of Object.entries(params || {})) {
@@ -166,12 +165,12 @@ export function qs(params) {
 }
 
 /**
- * 広告枠を描画する。候補が無ければ({ad: null})枠そのものを取り除く(中身の無い枠だけが「広告」ラベルを付けて残ると、何も無い箱を広告として見せることになる)。
+ * Render an ad slot. With no candidate ({ad: null}) the slot element itself is removed: an empty slot left in place still carries the Sponsored label, which would present an empty box as an ad.
  *
- * 「広告」ラベルは css/style.css の .adslot::after が CSS で描画する。api.js が差し込むのは枠の中身だけであり、ラベルは中身の HTML には存在しないため、広告主も外部の広告管理アプリもクリエイティブ側からラベルを消せない。
- * この構造を守るため、ここでは .adslot クラスを外さず、むしろ付いていなければ付け直す。複数の報道社が加盟するニュースプラットフォームにおいて、広告が見出しと見分けられない状態は記事の信頼性を直接損なう。ラベルは装飾ではなく要件である。
+ * The Sponsored label is drawn by CSS, by .adslot::after in css/style.css. api.js injects only the slot's contents and the label is not part of that HTML, so neither the advertiser nor an external ad-management app can remove it from the creative side.
+ * To preserve that structure the .adslot class is never taken off here, and is re-added when missing. On a news platform with several member publishers, an ad that cannot be told apart from a headline directly damages the articles' credibility. The label is a requirement, not decoration.
  *
- * リンクは /ads/{id}/click を経由させてクリックを計測し、そこから広告主の URL へ転送する。target="_blank" を付ける以上 rel="noopener" は必須(遷移先が window.opener からこのページを操作できてしまう)。参照元も渡さないため noreferrer も添える。
+ * The link goes through /ads/{id}/click to track the click and forwards from there to the advertiser's URL. Given target="_blank", rel="noopener" is mandatory, or the opened page could manipulate this one through window.opener. noreferrer is added as well so the referrer is not passed either.
  */
 export async function renderAdSlot(el, slug) {
   if (!el) return;
@@ -199,7 +198,7 @@ export async function renderAdSlot(el, slug) {
 
   const img = document.createElement('img');
   img.src = ad.image_url;
-  // 代替テキストが未設定の広告でも、リンクの中身が画像だけである以上 alt を空にはできない(読み上げでリンクの行き先が分からなくなる)。広告主名へ退避する。
+  // Even for an ad with no alt text set, alt cannot be left empty when the link's only content is the image: a screen reader would not convey where the link goes. Fall back to the advertiser name.
   img.alt = ad.alt_text || ad.advertiser_name || '広告';
   link.appendChild(img);
 

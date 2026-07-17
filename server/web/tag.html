@@ -48,15 +48,15 @@
     </div>
 
     <!--
-      タグページ。国のような話題はタグで表すため、このページがそのまま話題のプロフィールになる。
-      説明文とアイコン(国旗にもなる)は tags.description / tags.icon_url が持つ。
+      Tag page. Topics such as countries are expressed as tags, so this page doubles as the topic's profile.
+      The description and the icon (which may be a flag) come from tags.description / tags.icon_url.
     -->
     <section class="card">
       <div class="tag-hero" data-hero></div>
       <div class="pub-stats" data-stats></div>
     </section>
 
-    <!-- タグの年表。タグで絞った記事を古い順に並べ、話題の履歴を時系列で辿れるようにする。 -->
+    <!-- The tag's timeline. Articles filtered by the tag, oldest first, so the topic's history reads as a chronology. -->
     <section class="card" data-timeline-card hidden>
       <div class="section-head">
         <h2>年表</h2>
@@ -112,28 +112,28 @@
 import { api, get, del, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError, mediaVariant } from '/static/js/api.js';
 import { mountChrome, cssUrl, listOf, pubLogoHtml, tagIconHtml, loginUrl } from '/static/js/chrome.js';
 
-/* このページの経路は /tags/{slug} で固定されているため、対象のタグは URL から取り出す。 */
+/* This page's route is fixed at /tags/{slug}, so the target tag is taken from the URL. */
 const SLUG = decodeURIComponent((location.pathname.match(/\/tags\/([^/]+)\/?$/) || [])[1] || '');
 
-/* 一覧の 1 ページの件数。 */
+/* Items per page of a listing. */
 const PER_PAGE = 20;
 
-/* サイドバーの集計(関連タグ・よく報じる社)の標本にする記事の件数。集計はこのタグの新しい方から標本を取った近似であり、全期間の網羅ではない。 */
+/* Number of articles sampled for the sidebar aggregates (related tags, the publishers that report on this tag most). The aggregate is an approximation over a sample of this tag's newest articles, not an exhaustive count over all time. */
 const SAMPLE_SIZE = 100;
 
-/* ログイン中の利用者(未ログインなら null)。 */
+/* The logged-in user; null when not logged in. */
 let viewer = null;
 
-/* このタグを購読しているか。購読は個人単位の DM であり、タグのチャンネル通知とは別の仕組み。 */
+/* Whether the viewer subscribes to this tag. A subscription is a per-person DM, a different mechanism from the tag's channel notification. */
 let subscribed = false;
 
-/* 年表で直前に描いた項目の年。年が変わる境目にだけ年を出すため、描画をまたいで覚えておく。 */
+/* Year of the timeline item rendered just before. The year is printed only at the boundary where it changes, so it must be remembered across renders. */
 let timelineYear = null;
 
 let articlePage = 0;
 let timelinePage = 0;
 
-/** まだ次のページがあるか。応答がページ情報を持たない場合は、空になるまで「ある」とみなす。 */
+/** Whether a next page of results exists. When the response carries no pagination info, assume there is one until a page comes back empty. */
 function hasMore(data, items) {
   if (data && typeof data.has_more === 'boolean') return data.has_more;
   if (data && Number.isFinite(data.total) && Number.isFinite(data.page) && Number.isFinite(data.per_page)) {
@@ -142,7 +142,7 @@ function hasMore(data, items) {
   return items.length > 0;
 }
 
-/** 記事に添えるバッジ。記事広告の開示と速報は必ず出す(開示は装飾ではなく要件であり、一覧でも落としてはならない)。閲覧範囲は public 以外のときだけ出す(既定を明示しても情報は増えない)。 */
+/** Badges attached to an article. The sponsored-article disclosure and breaking news are always rendered: a disclosure is a requirement, not decoration, and must not be dropped even in a listing. Visibility is rendered only when it is not public, since spelling out the default adds no information. */
 function badgesHtml(a) {
   const out = [];
   if (a.is_breaking) out.push('<span class="badge breaking">速報</span>');
@@ -155,7 +155,7 @@ function badgesHtml(a) {
   return out;
 }
 
-/** 記事一覧の 1 行。タグページでは「どの社が報じたか」が読みどころになるため、メタ行の先頭に報道社を置く。 */
+/** One row of the article listing. On the tag page "which publisher reported it" is the point of interest, so the publisher leads the meta line. */
 function articleRowHtml(a) {
   const meta = [];
   const pub = a.publisher;
@@ -179,7 +179,7 @@ function articleRowHtml(a) {
     `</div></a></li>`;
 }
 
-/** 年表の日付。年が変わる境目にだけ年を出す。話題の履歴は年をまたぐため、月日だけでは何年の出来事か読めなくなる。 */
+/** A timeline date. The year is printed only at the boundary where it changes. A topic's history spans years, so month and day alone leave the reader unable to tell which year an event belongs to. */
 function timelineDateHtml(iso) {
   const d = new Date(iso);
   if (!iso || Number.isNaN(d.getTime())) return '<time class="t-date"></time>';
@@ -189,7 +189,7 @@ function timelineDateHtml(iso) {
   return `<time class="t-date" datetime="${escapeHtml(iso)}" title="${escapeHtml(formatDateTime(iso))}">${head}${d.getMonth() + 1}月${d.getDate()}日</time>`;
 }
 
-/** 年表の 1 項目。速報として出された記事を節目(major)として強調する。 */
+/** One timeline item. Articles published as breaking news are emphasized as milestones (major). */
 function timelineItemHtml(a) {
   const meta = [];
   if (a.publisher) meta.push(escapeHtml(a.publisher.name));
@@ -201,12 +201,12 @@ function timelineItemHtml(a) {
     `<div class="t-meta">${meta.join(' ・ ')}</div></div></li>`;
 }
 
-/** 数の表示。値を持たない項目に 0 を出すと「0 件である」と読めてしまうため、分からないものは — にする。 */
+/** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as —. */
 function statValue(v) {
   return v == null ? '—' : escapeHtml(v);
 }
 
-/** タグの見出し・説明・統計を描く。 */
+/** Renders the tag's heading, description and stats. */
 function renderTag(tag, stats) {
   const label = `#${tag.name}`;
   document.title = `${label} | instant-news`;
@@ -222,8 +222,7 @@ function renderTag(tag, stats) {
     `<div><h1>${escapeHtml(label)}</h1><p class="desc">${escapeHtml(tag.description || '')}</p></div>` +
     subscribeHtml();
 
-  /* 統計は 4 列で固定されているため、4 つを必ず埋める。チャンネル通知の有無をここに出すのは、
-     購読(個人宛ての DM)と通知先チャンネルが別の仕組みであることを、同じ面で読み取れるようにするため。 */
+  /* The stats grid is fixed at 4 columns, so all 4 are always filled. Whether a channel notification exists is shown here so a reader can see in one place that subscription (a DM addressed to the individual) and the notify channel are separate mechanisms. */
   document.querySelector('[data-stats]').innerHTML =
     `<div><b>${statValue(stats.article_count)}</b><span>記事</span></div>` +
     `<div><b>▲ ${statValue(stats.up_count)}</b><span>賛成</span></div>` +
@@ -233,7 +232,7 @@ function renderTag(tag, stats) {
   wireSubscribe();
 }
 
-/** 購読ボタン。ボタンの文言そのもので「新着が DM で個人宛てに届く」ことを示す。チャンネル通知はタグに設定された宛先へ流れるものであり、こちらとは別に動く。 */
+/** The subscribe button. Its label itself states that latest articles arrive as a DM addressed to you personally. Channel notifications flow to the destination configured on the tag and run independently of this. */
 function subscribeHtml() {
   const title = 'このタグの記事が公開されると、あなた個人宛てに Discord の DM が届きます。タグに設定されたチャンネルへの通知とは別の仕組みで、購読はあなただけに効きます。';
   if (!viewer) {
@@ -245,7 +244,7 @@ function subscribeHtml() {
   return `<button class="btn primary subscribe" type="button" data-subscribe title="${escapeHtml(title)}">🔔 新着を DM で受け取る</button>`;
 }
 
-/** 購読ボタンの操作を結ぶ。押されたら購読状態を反転し、ボタンを描き直す。 */
+/** Wires up the subscribe button: a press flips the subscription state and re-renders the button. */
 function wireSubscribe() {
   const btn = document.querySelector('[data-subscribe]');
   if (!btn) return;
@@ -259,7 +258,7 @@ function wireSubscribe() {
       btn.outerHTML = subscribeHtml();
       wireSubscribe();
     } catch (e) {
-      /* セッションが切れていた場合はログインへ送る。それ以外はボタンを戻して再操作できるようにする。 */
+      /* An expired session sends the user to login; anything else re-enables the button so it can be pressed again. */
       if (e instanceof ApiError && e.status === 401) {
         location.href = loginUrl();
         return;
@@ -270,7 +269,7 @@ function wireSubscribe() {
   });
 }
 
-/** タグの本体を読む。 */
+/** Loads the tag itself. */
 async function loadTag() {
   let data;
   try {
@@ -289,7 +288,7 @@ async function loadTag() {
   return true;
 }
 
-/** 記事一覧を 1 ページ読み、末尾に足す。 */
+/** Loads one page of the article listing and appends it to the end. */
 async function loadArticles() {
   const link = document.querySelector('[data-more-articles]');
   let data;
@@ -314,7 +313,7 @@ async function loadArticles() {
   link.hidden = !hasMore(data, items);
 }
 
-/** 年表を 1 ページ読み、末尾に足す。並びは古い順で、話題の履歴をそのまま辿れる。 */
+/** Loads one page of the timeline and appends it to the end. The order is oldest first, so the topic's history reads straight through. */
 async function loadTimeline() {
   const link = document.querySelector('[data-more-timeline]');
   let data;
@@ -336,8 +335,8 @@ async function loadTimeline() {
 }
 
 /**
- * サイドバーの集計を描く。関連タグとよく報じる社は、このタグの記事から数えて出す。
- * 標本は新しい方から SAMPLE_SIZE 件であり、全期間を数え上げたものではない。
+ * Renders the sidebar aggregates. Related tags and the publishers that report on it most are counted from this tag's articles.
+ * The sample is the newest SAMPLE_SIZE articles, not a count over the whole period.
  */
 async function loadAggregates() {
   let items;
@@ -347,7 +346,7 @@ async function loadAggregates() {
     return;
   }
 
-  /* 関連タグ。このタグと同じ記事に付いたタグを、件数の多い順に出す。 */
+  /* Related tags: tags that appear on the same articles as this one, most frequent first. */
   const related = new Map();
   for (const a of items) {
     for (const t of a.tags || []) {
@@ -365,7 +364,7 @@ async function loadAggregates() {
     document.querySelector('[data-related-card]').hidden = false;
   }
 
-  /* よく報じる社。記事数の多い順に出す。賛成とコメントは、この標本の中の合計。 */
+  /* The publishers that report on it most, ordered by article count. Up-votes and comments are totals within this sample. */
   const pubs = new Map();
   for (const a of items) {
     const p = a.publisher;
@@ -388,7 +387,7 @@ async function loadAggregates() {
   }
 }
 
-/** サイドバーのタグ一覧。タグは数が可変でナビに並べられないため、話題を辿る入口をここに置く。 */
+/** The sidebar tag list. Tags vary in number and so cannot be laid out in the nav; the entry point for browsing topics goes here instead. */
 async function loadTagCloud() {
   let tags;
   try {
@@ -404,7 +403,7 @@ async function loadTagCloud() {
   document.querySelector('[data-tagcloud-card]').hidden = false;
 }
 
-/** 「もっと読む」を結ぶ。一覧の続きはこの場に足していく。 */
+/** Wires up the "read more" link. Further pages of the listing are appended in place. */
 function wireMore(selector, loader) {
   const link = document.querySelector(selector);
   link.addEventListener('click', (ev) => {

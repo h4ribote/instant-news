@@ -1,10 +1,10 @@
-"""GFM 相当の Markdown のレンダリングと、本文中の画像 URL の抽出・差し替え。
+"""Render GFM-equivalent Markdown, and extract and rewrite the image URLs in a body.
 
-本文の権威は Markdown のソース(articles.body_md)であり、HTML(articles.body_html)は再生成できるキャッシュに過ぎない。ここでの入力は執筆者が書いた任意のテキストであって、信用してよいものは何も無い。
+The Markdown source (articles.body_md) is authoritative; the HTML (articles.body_html) is only a cache that can be regenerated. The input here is arbitrary text a writer typed, and none of it may be trusted.
 
-レンダリングは 2 段構えにする。markdown-it-py が Markdown を HTML へ変換し、nh3 がその HTML を許可した要素だけへ削り込む。Markdown は生の HTML をそのまま通す仕様であり、変換器だけでは <script> も onerror も素通りする。サニタイズを外すと、記事を 1 本書ける者が全閲覧者のセッションを取れる。
+Rendering is two stages: markdown-it-py converts Markdown to HTML, then nh3 cuts that HTML down to the allowed elements. Markdown passes raw HTML through by spec, so the converter alone lets <script> and onerror straight through. Remove the sanitizer and anyone who can write a single article can take every viewer's session.
 
-抽出と差し替えは markdown-it のトークンを通して行う。同じ本文を正規表現で舐めると、コードブロックやインラインコードの中に書かれた記法まで拾ってしまう。「![](...) と書けば画像になります」と説明した記事が、説明のつもりで書いた URL を実際に取得されることになる。
+Extraction and rewriting go through markdown-it tokens. Scanning the same body with a regex would also pick up notation written inside code blocks and inline code, so an article explaining "write ![](...) to get an image" would have the URL it wrote as an explanation actually fetched.
 """
 
 from __future__ import annotations
@@ -19,25 +19,23 @@ import nh3
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-# --------------------------------------------------------------------------
-# レンダリングの構成
-# --------------------------------------------------------------------------
+# Rendering setup
 
 
 def _build_markdown() -> MarkdownIt:
-    """GFM 相当の Markdown パーサを組み立てる。
+    """Build the GFM-equivalent Markdown parser.
 
-    commonmark を土台に、表・打ち消し線・裸の URL の自動リンクを足す。生の HTML は通す(commonmark の既定)。執筆者が <img> や <div> で組んだ図版が消えないようにするためであり、危険な要素は後段の nh3 が落とす。ここで HTML を止めてしまうと、抽出が拾うべき生の <img src> がトークンとして現れなくなる。
+    commonmark as the base, plus tables, strikethrough and autolinking of bare URLs. Raw HTML is passed through (the commonmark default) so that a figure a writer built out of <img> or <div> does not disappear; nh3 downstream drops the dangerous elements. Blocking HTML here would also stop the raw <img src> that extraction has to find from ever appearing as a token.
     """
     md = MarkdownIt('commonmark', {'linkify': True})
     md.enable(['table', 'strikethrough', 'linkify'])
     return md
 
 
-# パーサもサニタイザも状態を持たないため、要求ごとに作らず使い回す。
+# Parser and sanitizer are both stateless, so they are reused instead of built per request.
 _MD: Final = _build_markdown()
 
-# 許可する要素。見出し・段落・強調・リスト・表・コード・引用・リンク・画像・水平線・打ち消し。ここに無い要素は開始タグと終了タグが外され、中の文字だけが残る。
+# Allowed elements: headings, paragraphs, emphasis, lists, tables, code, blockquotes, links, images, horizontal rules, strikethrough. An element not listed here loses its start and end tags; only the text inside survives.
 _ALLOWED_TAGS: Final[set[str]] = {
     'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
     'p', 'br', 'hr',
@@ -49,19 +47,19 @@ _ALLOWED_TAGS: Final[set[str]] = {
     'a', 'img',
 }
 
-# 許可する属性。ここに挙げた組み合わせ以外の属性は、要素が残っても全て落ちる(nh3 は既定の一覧を置き換える)。style と class を通さないため、表の桁揃えとコードの言語指定は表示に反映されない。属性を 1 つ許すたびに、その属性を経由した注入を検討する必要がある。
+# Allowed attributes. Any attribute outside these pairs is dropped even when the element survives (nh3 replaces its default list rather than adding to it). style and class are not allowed, so table column alignment and code language hints do not reach the rendered page. Every additional attribute allowed here demands a fresh look at injection through that attribute.
 _ALLOWED_ATTRIBUTES: Final[dict[str, set[str]]] = {
     'a': {'href', 'title'},
     'img': {'src', 'alt', 'title'},
 }
 
-# href と src で許すスキーム。javascript: と data: をここで落とす。nh3 の既定は tel: や magnet: を含む広い一覧であるため、明示的に絞る。
+# Schemes allowed in href and src: this is where javascript: and data: are dropped. nh3's default list is a wide one that includes tel: and magnet:, so narrow it explicitly.
 _ALLOWED_URL_SCHEMES: Final[set[str]] = {'http', 'https', 'mailto'}
 
-# 外部リンクへ付ける rel。nofollow は本文に貼られた宣伝リンクへ検索順位を渡さないため、noopener は開いた先から window.opener 経由で元のページを操作されないために要る。
+# rel for outbound links. nofollow so a promotional link pasted into a body passes no search ranking; noopener so the opened page cannot drive the original through window.opener.
 _LINK_REL: Final = 'nofollow noopener'
 
-# リンクは別のタブで開く。読んでいる記事を外部サイトで置き換えない。
+# Open links in another tab: an external site must not replace the article being read.
 _SET_TAG_ATTRIBUTE_VALUES: Final[dict[str, dict[str, str]]] = {'a': {'target': '_blank'}}
 
 _CLEANER: Final = nh3.Cleaner(
@@ -73,16 +71,16 @@ _CLEANER: Final = nh3.Cleaner(
     strip_comments=True,
 )
 
-# 本文の構造を持たず、中身をそのまま文字として扱う要素。トークンを辿る際にここへ降りないことが、コードブロックの中の記法を拾わない仕組みそのものである。
+# Tokens with no body structure, whose content is literal text. Never descending into these while walking tokens is itself the mechanism that keeps notation inside a code block from being picked up.
 _BLOCK_CODE_TYPES: Final = frozenset({'fence', 'code_block'})
 _HTML_TYPES: Final = frozenset({'html_block', 'html_inline'})
 
 
 @dataclass(frozen=True)
 class ExtractedImage:
-    """本文から見つかった画像 1 つ。
+    """One image found in a body.
 
-    raw はその画像が書かれていた記法。生の HTML の <img> はソースの文字列そのものが入る。Markdown の ![alt](url) 記法の場合は、パーサが解釈した結果から組み直した正規形が入る(トークンには元の文字位置が残らないため、書かれたままの文字列は復元できない)。
+    raw is the notation the image was written as. For a raw HTML <img> it holds the source string itself. For Markdown ![alt](url) it holds a canonical form rebuilt from what the parser resolved, because tokens keep no source offsets and the text as written cannot be recovered.
     """
 
     url: str
@@ -90,17 +88,17 @@ class ExtractedImage:
 
 
 def render_markdown(body_md: str) -> str:
-    """Markdown を、そのまま記事面へ差し込める HTML へ変換する。
+    """Convert Markdown into HTML that can be dropped straight into the article page.
 
-    戻り値は必ずサニタイズ済みである。この関数を経由しない HTML を body_html へ入れてはならない。
+    The return value is always sanitized. HTML that did not pass through this function must never be put into body_html.
     """
     return _CLEANER.clean(_MD.render(body_md))
 
 
 def extract_image_urls(body_md: str) -> list[str]:
-    """本文が参照している画像の URL を、現れた順に重複を除いて返す。
+    """Return the URLs of the images the body references, in order of appearance, with duplicates removed.
 
-    Markdown の ![alt](url) と生の HTML の <img src="url"> の両方を拾う。コードブロックとインラインコードの中に書かれたものは拾わない。
+    Picks up both Markdown ![alt](url) and raw HTML <img src="url">. Anything written inside a code block or inline code is not picked up.
     """
     seen: set[str] = set()
     urls: list[str] = []
@@ -113,13 +111,13 @@ def extract_image_urls(body_md: str) -> list[str]:
 
 
 def rewrite_image_urls(body_md: str, mapping: Mapping[str, str]) -> str:
-    """本文中の画像 URL を差し替える。
+    """Rewrite the image URLs in a body.
 
-    mapping に載っている URL だけを差し替え、載っていない URL(取得に失敗したもの)は元のまま残す。コードブロックとインラインコードの中身は書き換えない。手順の説明としてコード中に書かれた URL は、記事の内容であって参照ではない。
+    Only URLs present in mapping are rewritten; the ones that are not (those that failed to fetch) stay as they were. The contents of code blocks and inline code are never rewritten: a URL written inside code to explain a procedure is article content, not a reference.
     """
     if not body_md or not mapping:
         return body_md
-    # 長い URL から順に照合する。ある URL が別の URL の接頭辞である場合(クエリ文字列の有無など)に短い方を先に当てると、差し替えた後ろに元の URL の断片が残る。
+    # Match longest URL first. When one URL is a prefix of another (differing by a query string, say), matching the shorter one first leaves a snippet of the original URL trailing the replacement.
     keys = sorted((key for key in mapping if key), key=len, reverse=True)
     if not keys:
         return body_md
@@ -131,7 +129,7 @@ def rewrite_image_urls(body_md: str, mapping: Mapping[str, str]) -> str:
     while index < length:
         skip_to = _protecting_end(protected, starts, index)
         if skip_to is not None:
-            # 保護区間へ入った。中は 1 文字も触らずに書き写す。
+            # Entered a protected span: copy it through without touching a single character.
             pieces.append(body_md[index:skip_to])
             index = skip_to
             continue
@@ -140,7 +138,7 @@ def rewrite_image_urls(body_md: str, mapping: Mapping[str, str]) -> str:
                 continue
             end = index + len(key)
             if _crosses_protected(protected, starts, index, end):
-                # 一致が保護区間へ食い込んでいる。差し替えるとコードの中身を削ることになる。
+                # The match crosses into a protected span; rewriting it would cut into the code's content.
                 continue
             pieces.append(mapping[key])
             index = end
@@ -151,19 +149,17 @@ def rewrite_image_urls(body_md: str, mapping: Mapping[str, str]) -> str:
     return ''.join(pieces)
 
 
-# --------------------------------------------------------------------------
-# 画像の抽出
-# --------------------------------------------------------------------------
+# Image extraction
 
 
 class _ImgSrcCollector(HTMLParser):
-    """生の HTML の断片から <img> の src を、書かれた順に集める。
+    """Collect the src of every <img> in a raw HTML snippet, in written order.
 
-    生の HTML を正規表現で舐めない。属性の引用符の有無・大文字小文字・タグ内の改行・複数の src らしき文字列といった揺れを、正規表現は必ずどこかで取り違える。
+    Raw HTML is not scanned with a regex. Quoted or unquoted attributes, case, newlines inside a tag, several src-looking strings: a regex gets one of those variations wrong sooner or later.
     """
 
     def __init__(self) -> None:
-        # 実体参照は解決する。&amp; を含む URL を、書かれた通りの &amp; のまま取得しに行かないようにする。
+        # Resolve character references, so a URL containing &amp; is not fetched with the literal &amp; still in it.
         super().__init__(convert_charrefs=True)
         self.found: list[ExtractedImage] = []
 
@@ -176,34 +172,34 @@ class _ImgSrcCollector(HTMLParser):
                 return
 
     def take(self) -> list[ExtractedImage]:
-        """今までに集めた分を取り出し、内部の控えを空にする。"""
+        """Take everything collected so far and empty the internal buffer."""
         found = self.found
         self.found = []
         return found
 
 
 def _extract_images(body_md: str) -> list[ExtractedImage]:
-    """本文が参照している画像を、現れた順に(重複も含めて)返す。"""
+    """Return the images the body references, in order of appearance, duplicates included."""
     images: list[ExtractedImage] = []
     collector = _ImgSrcCollector()
     _collect_images(_MD.parse(body_md), collector, images)
-    # 閉じられていないタグが最後のトークンに残っている場合、close() で吐き出される。
+    # If an unclosed tag is left over in the last token, close() flushes it out.
     collector.close()
     images.extend(collector.take())
     return images
 
 
 def _collect_images(tokens: Sequence[Token], collector: _ImgSrcCollector, images: list[ExtractedImage]) -> None:
-    """トークンを書かれた順に辿り、画像を積む。
+    """Walk the tokens in written order and collect the images.
 
-    コードのトークン(fence / code_block / code_inline)は子を持たないため、辿った先に現れない。中に書かれた記法を拾わないのは、この構造による当然の帰結であって、後から除いた結果ではない。
+    Code tokens (fence / code_block / code_inline) have no children, so the walk never reaches inside them. Not picking up notation written inside them is a plain consequence of that structure, not something filtered out afterwards.
     """
     for token in tokens:
         if token.type == 'image':
             src = token.attrGet('src')
             if src:
                 images.append(ExtractedImage(url=str(src), raw=_markdown_image_raw(token)))
-            # 代替テキストの中に入れ子の画像を書ける。
+            # An image can be nested inside the alt text.
             if token.children:
                 _collect_images(token.children, collector, images)
             continue
@@ -216,7 +212,7 @@ def _collect_images(tokens: Sequence[Token], collector: _ImgSrcCollector, images
 
 
 def _markdown_image_raw(token: Token) -> str:
-    """image トークンから ![alt](url) 記法を組み直す。"""
+    """Rebuild the ![alt](url) notation from an image token."""
     src = token.attrGet('src') or ''
     title = token.attrGet('title')
     if title:
@@ -224,15 +220,13 @@ def _markdown_image_raw(token: Token) -> str:
     return f'![{token.content}]({src})'
 
 
-# --------------------------------------------------------------------------
-# 差し替えで触ってはならない範囲
-# --------------------------------------------------------------------------
+# Ranges that rewriting must not touch
 
 
 def _protected_spans(text: str) -> list[tuple[int, int]]:
-    """書き換えてはならない文字範囲を、重なりを解消して昇順で返す。
+    """Return the character ranges that must not be rewritten, overlaps merged, in ascending order.
 
-    対象はコードブロック(fence / code_block)とインラインコード。前者はトークンが行範囲を持つため正確に求まる。後者は行範囲を持たないため、パーサが見つけたコードスパンの記法を、その行範囲の中から順に探して位置を定める。
+    The ranges are code blocks (fence / code_block) and inline code. Block-code tokens carry a line range, so they resolve exactly. Inline code carries none, so each code span the parser found is located by searching for its notation within that line range, in order.
     """
     offsets = _line_offsets(text)
     spans: list[tuple[int, int]] = []
@@ -255,14 +249,14 @@ def _collect_protected(tokens: Sequence[Token], text: str, offsets: Sequence[int
 
 
 def _collect_inline_code(inline: Token, text: str, region: tuple[int, int], spans: list[tuple[int, int]]) -> None:
-    """inline トークンの行範囲の中から、コードスパンの位置を順に求めて積む。"""
+    """Locate each code span within the inline token's line range, in order, and collect it."""
     cursor = region[0]
     for child in inline.children or []:
         if child.type != 'code_inline':
             continue
         span = _find_code_span(text, cursor, region[1], child)
         if span is None:
-            # 記法を特定できなかった(内容に改行を含むコードスパンなど。コードスパンは改行を空白へ畳むため、トークンの内容とソースの文字列が一致しない)。取り違えて書き換えるより、この行範囲を丸ごと保護する方が害が小さい。差し替えが 1 つ効かないだけで済み、コードは壊れない。
+            # The notation could not be located, e.g. a code span whose content contains a newline: code spans collapse newlines into spaces, so the token content no longer matches the source text. Protecting this whole line range does less harm than rewriting the wrong text: one rewrite fails to take effect, and the code stays intact.
             spans.append(region)
             return
         spans.append(span)
@@ -270,9 +264,9 @@ def _collect_inline_code(inline: Token, text: str, region: tuple[int, int], span
 
 
 def _find_code_span(text: str, start: int, limit: int, token: Token) -> tuple[int, int] | None:
-    """コードスパン 1 つの文字範囲を求める。見つからなければ None。
+    """Return the character range of one code span, or None if it cannot be found.
 
-    token.markup はバッククォートの並び、token.content は中身。CommonMark は中身の前後に空白が 1 つずつある場合だけ、その 1 つを取り除くため、候補は 2 通りある。
+    token.markup is the run of backticks and token.content is the content. CommonMark strips one space from each side only when the content has exactly one space on both sides, which is why there are two candidates to try.
     """
     markup = token.markup
     if not markup:
@@ -285,7 +279,7 @@ def _find_code_span(text: str, start: int, limit: int, token: Token) -> tuple[in
 
 
 def _line_offsets(text: str) -> list[int]:
-    """各行の先頭の文字位置。offsets[i] が i 行目の先頭。"""
+    """Character position of the start of each line; offsets[i] is the start of line i."""
     offsets = [0]
     position = text.find('\n')
     while position != -1:
@@ -295,7 +289,7 @@ def _line_offsets(text: str) -> list[int]:
 
 
 def _line_span(token_map: Sequence[int], offsets: Sequence[int], text_length: int) -> tuple[int, int]:
-    """トークンの行範囲 [開始行, 終了行) を文字範囲へ直す。終了行は含まない。"""
+    """Convert a token's line range [start_line, end_line) into a character range; the end line is not included."""
     start_line, end_line = token_map[0], token_map[1]
     start = offsets[start_line] if start_line < len(offsets) else text_length
     end = offsets[end_line] if end_line < len(offsets) else text_length
@@ -303,9 +297,9 @@ def _line_span(token_map: Sequence[int], offsets: Sequence[int], text_length: in
 
 
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """範囲を昇順に整列し、重なり合うものを 1 つに畳む。
+    """Sort the spans ascending and collapse overlapping ones into one.
 
-    以降の探索は範囲が重ならないことを前提に二分探索するため、ここで正規化しておく。
+    Normalized here because the later lookups binary-search on the assumption that spans do not overlap.
     """
     if not spans:
         return []
@@ -321,7 +315,7 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 def _protecting_end(spans: Sequence[tuple[int, int]], starts: Sequence[int], index: int) -> int | None:
-    """index を含む保護区間があれば、その終端を返す。無ければ None。"""
+    """Return the end of the protected span containing index, or None if there is none."""
     position = bisect.bisect_right(starts, index) - 1
     if position < 0:
         return None
@@ -330,6 +324,6 @@ def _protecting_end(spans: Sequence[tuple[int, int]], starts: Sequence[int], ind
 
 
 def _crosses_protected(spans: Sequence[tuple[int, int]], starts: Sequence[int], start: int, end: int) -> bool:
-    """[start, end) が、start より後ろから始まる保護区間へ食い込むかを返す。"""
+    """Whether [start, end) crosses into a protected span that begins after start."""
     position = bisect.bisect_right(starts, start)
     return position < len(spans) and spans[position][0] < end

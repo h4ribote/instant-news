@@ -1,18 +1,18 @@
-"""config.yaml を読み込み、凍結した設定オブジェクトへ写す。
+"""Load config.yaml and copy it into frozen config objects.
 
-本ファイルが扱う設定は 2 種類ある。
+This file handles two kinds of settings.
 
-常に config.yaml が真実である値は、server・database と、画像の保存先(storage_dir)だけである。前の 2 つは設定を DB から読むために先に要る(DB へ繋ぐ前に DB の設定は読めない)。storage_dir は名前付きボリュームのマウント先と一体であり、コンテナの外で決まる。マウントを変えずにこの値だけを変えても画像は見つからず、変えた瞬間に既存の全画像が参照できなくなるため、画面から触らせる意味がない。これらは必須である。
+config.yaml is always the source of truth for exactly three values: server, database, and the image storage directory (storage_dir). The first two are needed before settings can be read from the DB (the DB's own config cannot be read out of the DB). storage_dir is inseparable from the named volume's mount point and is decided outside the container: change only this value without moving the mount and no images are found, and every existing image becomes unreachable the moment it changes, so there is no point letting the UI touch it. These three are required.
 
-それ以外(discord / admin / articles / media の各上限)は初回起動時に settings 表へ写す初期値でしかなく、以後は参照されない。真実は DB 側にあり、管理者はフロントエンドから変更する。詳細は settings.py を参照。
+Everything else (the discord / admin / articles / media limits) is only a seed value copied into the settings table on first boot and never read again. The source of truth is the DB, and admins change it from the frontend. See settings.py.
 
-初期値の節は**任意**である。書かれていないキーは登録簿(settings.py の REGISTRY)の既定値で埋まる。任意にしているのは 2 つの理由による。第 1 に、初期値が投入された後の config.yaml にそれらのキーが残っている必要はなく、必須にすると「以後は参照されない」という説明と実際の挙動が食い違う。第 2 に、必須にすると設定を 1 つ増やすたびに既存のデプロイが config.yaml を編集するまで起動しなくなる。既定値を持てない設定(guild の ID や資格情報のように、その環境でしか決まらない値)だけは初回起動時に与える必要があり、欠けていれば settings.py の bootstrap がどのキーが足りないのかを挙げて落とす。
+The seed-value sections are **optional**. Keys left out fall back to the registry's defaults (REGISTRY in settings.py). They are optional for two reasons. First, once the seed values are in, those keys need not stay in config.yaml, and requiring them would contradict the "never read again" description. Second, requiring them would mean every added setting stops existing deployments from booting until their config.yaml is edited. Only settings that can have no default (values determined solely by the environment, such as the guild ID or credentials) must be supplied at first boot; if one is missing, settings.py's bootstrap fails and lists which keys are missing.
 
-必須キーの欠落・型不正・値域外は起動時に ValueError で落とし、既定値で黙って埋めない。設定の誤りを既定値で補うと「なぜか通知が飛ばない」「なぜか誰も管理者にならない」といった、起動には成功するが挙動だけが静かに間違っている状態になり、原因の特定が難しくなる。
+A missing required key, a wrong type, or an out-of-range value raises ValueError at startup instead of being silently filled in with a default. Papering over a config mistake with a default yields "for some reason notifications never fire" or "for some reason nobody becomes an admin": startup succeeds while behaviour alone is quietly wrong, and the cause is hard to track down.
 
-初期値の型と値域の検証は登録簿の coerce_value が行う。設定ファイルからの投入と API からの変更で検証が食い違わないよう、関門を 1 つにしている。
+The registry's coerce_value validates the type and range of seed values, keeping a single gate so that seeding from the config file and changes from the API cannot validate differently.
 
-ID(guild_id / role_ids / channel_id)は YAML では文字列として書かせる。YAML の整数として書かせると、64bit の ID を扱う経路のどこかで精度を落とす余地が残る。
+IDs (guild_id / role_ids / channel_id) must be written as strings in YAML. Written as YAML integers, a 64-bit ID risks losing precision somewhere along the paths that handle it.
 """
 
 from __future__ import annotations
@@ -28,33 +28,33 @@ import yaml
 
 from .settings import DEFS_BY_KEY, MediaFetchConfig, RuntimeSettings, coerce_value
 
-# 設定ファイルの探索は、引数 → 環境変数 → リポジトリルートの config.yaml の順。
+# Config file lookup order: argument, then environment variable, then config.yaml at the repo root.
 CONFIG_ENV_VAR: Final = 'INSTANT_NEWS_CONFIG'
 DEFAULT_CONFIG_FILENAME: Final = 'config.yaml'
 _REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 _ROOT_LABEL: Final = '(トップレベル)'
 
-# 最上位に置ける節。
+# Sections allowed at the top level.
 _TOP_LEVEL: Final = ('server', 'database', 'discord', 'admin', 'articles', 'media')
-# 初期値を書ける節。ここに現れる葉は、media.storage_dir を除いてすべて登録簿のキーでなければならない。
+# Sections that may carry seed values. Every leaf appearing here must be a registry key, except media.storage_dir.
 _BOOTSTRAP_SECTIONS: Final = ('discord', 'admin', 'articles', 'media')
-# media の節だけは実行環境の値(storage_dir)と初期値(取り込みの上限)が同居する。
+# The media section is the only one where a runtime-environment value (storage_dir) sits alongside seed values (the ingest limits).
 _MEDIA_RUNTIME_KEY: Final = 'media.storage_dir'
 
 
 @dataclass(frozen=True)
 class ServerConfig:
-    """HTTP サーバーの待ち受けと、外部から到達可能な公開 URL。"""
+    """Where the HTTP server listens, and the externally reachable public URL."""
 
     host: str
     port: int
-    # 記事 URL・画像 URL・OAuth2 の認可後に戻る URL の組み立てに使う。末尾の / は読み込み時に落とすため、base_url + '/path' で連結してよい。
+    # Used to build article URLs, image URLs, and the redirect_uri Discord returns to after OAuth2 authorization. A trailing / is stripped at load time, so base_url + '/path' is safe to concatenate.
     base_url: str
 
 
 @dataclass(frozen=True)
 class DatabaseConfig:
-    """MySQL の接続先。"""
+    """The MySQL connection target."""
 
     host: str
     port: int
@@ -65,9 +65,9 @@ class DatabaseConfig:
 
 @dataclass(frozen=True)
 class MediaConfig:
-    """画像の取り込みが実際に使う設定。保存先は config.yaml、上限は settings 表と、出どころが異なる値を 1 つに束ねたもの。
+    """The values image ingest actually uses: the storage directory from config.yaml and the limits from the settings table, bundled into one despite the differing origins.
 
-    出どころが違うことを画像の各モジュールへ持ち込まないために、effective_media_config() がここへ畳んでから渡す。
+    effective_media_config() folds them together here so the media modules never have to care that the values come from two places.
     """
 
     storage_dir: Path
@@ -78,18 +78,18 @@ class MediaConfig:
 
 @dataclass(frozen=True)
 class Config:
-    """config.yaml の内容。"""
+    """The contents of config.yaml."""
 
     server: ServerConfig
     database: DatabaseConfig
-    # 画像の実体を置くディレクトリ。名前付きボリュームのマウント先と一致させること。
+    # Directory holding the image blobs. Must match the named volume's mount point.
     storage_dir: Path
-    # 初回起動時に settings 表へ写す初期値。登録簿のキーで引ける平坦な辞書で、config.yaml に書かれたものだけを含む(書かれていないキーは登録簿の既定値で埋まる)。既に値のあるキーは上書きしないため、2 回目以降の起動では何も起きない。
+    # Seed values copied into the settings table on first boot. A flat dict keyed by registry key, holding only what config.yaml wrote (keys it omits fall back to the registry's defaults). Keys that already have a value are not overwritten, so later boots do nothing.
     bootstrap: Mapping[str, Any]
 
 
 def effective_media_config(config: Config, settings: RuntimeSettings) -> MediaConfig:
-    """画像のモジュールへ渡す実効設定を組み立てる。保存先は config.yaml、上限は settings 表から取る。"""
+    """Assemble the effective config handed to the media modules: storage directory from config.yaml, limits from the settings table."""
     return MediaConfig(
         storage_dir=config.storage_dir,
         fetch=settings.media.fetch,
@@ -98,9 +98,7 @@ def effective_media_config(config: Config, settings: RuntimeSettings) -> MediaCo
     )
 
 
-# --------------------------------------------------------------------------
-# 読み込みの補助。いずれも「どのキーが」「なぜ」不正なのかを含む ValueError を投げる。
-# --------------------------------------------------------------------------
+# Loader helpers. Each raises a ValueError naming which key is wrong and why.
 
 
 def _child(path: str, key: str) -> str:
@@ -123,7 +121,7 @@ def _get(node: Mapping[str, Any], key: str, path: str) -> tuple[Any, str]:
 
 
 def _reject_unknown(node: Mapping[str, Any], allowed: tuple[str, ...], path: str) -> None:
-    """config.example.yaml に無いキーを拒否する。綴りの誤りや階層の取り違えが「無視されて既定のまま動く」形で潜伏するのを防ぐ。"""
+    """Reject keys config.example.yaml does not have, so that a misspelling or a misplaced nesting level cannot lurk as a silently ignored key that leaves the default in force."""
     unknown = sorted(str(key) for key in node if key not in allowed)
     if unknown:
         raise ValueError(f'設定 {_label(path)}: 未知のキーがあります: {", ".join(unknown)}。指定できるのは {", ".join(allowed)} です。')
@@ -146,7 +144,7 @@ def _str(node: Mapping[str, Any], key: str, path: str) -> str:
 
 
 def _url(node: Mapping[str, Any], key: str, path: str) -> str:
-    """http または https の絶対 URL を読む。末尾の / は落とす(base_url + '/path' の連結で // にならないようにするため)。"""
+    """Read an absolute http or https URL. A trailing / is stripped so that base_url + '/path' does not concatenate into //."""
     value = _str(node, key, path).strip()
     full = _child(path, key)
     parsed = urlsplit(value)
@@ -159,7 +157,7 @@ def _url(node: Mapping[str, Any], key: str, path: str) -> str:
 
 def _int(node: Mapping[str, Any], key: str, path: str, *, minimum: int | None = None, maximum: int | None = None) -> int:
     value, full = _get(node, key, path)
-    # bool は int の派生であるため、先に弾かないと true が 1 として通ってしまう。
+    # bool derives from int, so unless it is rejected first, true would pass as 1.
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f'設定 {full}: 整数である必要があります(実際は {_type_name(value)})。')
     if minimum is not None and value < minimum:
@@ -169,9 +167,7 @@ def _int(node: Mapping[str, Any], key: str, path: str, *, minimum: int | None = 
     return value
 
 
-# --------------------------------------------------------------------------
-# 各節の組み立て
-# --------------------------------------------------------------------------
+# Building each config section.
 
 
 def _build_server(parent: Mapping[str, Any], key: str, path: str) -> ServerConfig:
@@ -199,7 +195,7 @@ def _build_database(parent: Mapping[str, Any], key: str, path: str) -> DatabaseC
 
 
 def _walk_leaves(node: Mapping[str, Any], prefix: str) -> Iterator[tuple[str, Any]]:
-    """マッピングを辿り、葉(マッピング以外)の値をドット区切りのパスとともに返す。ID の配列は葉として扱う。"""
+    """Walk a mapping and yield each leaf (non-mapping) value with its dotted path. A list of IDs counts as a leaf."""
     for key, value in node.items():
         path = _child(prefix, str(key))
         if isinstance(value, Mapping):
@@ -209,9 +205,9 @@ def _walk_leaves(node: Mapping[str, Any], prefix: str) -> Iterator[tuple[str, An
 
 
 def _collect_bootstrap(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """初期値の節から、登録簿のキーで引ける平坦な辞書を作る。
+    """Build a flat dict keyed by registry key out of the seed-value sections.
 
-    書かれているキーだけを拾う。欠けているキーの既定値は登録簿が持つため、ここでは埋めない。値の検証は登録簿の coerce_value に委ね、設定ファイルからの投入と API からの変更で関門を 1 つにする。
+    Only keys actually written are picked up; the registry holds the defaults for missing keys, so nothing is filled in here. Value validation is delegated to the registry's coerce_value, keeping one gate for both seeding from the config file and changes from the API.
     """
     found: dict[str, Any] = {}
     for section in _BOOTSTRAP_SECTIONS:
@@ -221,7 +217,7 @@ def _collect_bootstrap(raw: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(node, Mapping):
             raise ValueError(f'設定 {section}: マッピングである必要があります(実際は {_type_name(node)})。')
         for path, value in _walk_leaves(node, section):
-            # media の節にだけは実行環境の値が同居する。これは初期値ではない。
+            # The media section is the only one carrying a runtime-environment value alongside seed values; this one is not a seed value.
             if path == _MEDIA_RUNTIME_KEY:
                 continue
             defn = DEFS_BY_KEY.get(path)
@@ -232,7 +228,7 @@ def _collect_bootstrap(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _coerce_bootstrap_value(key: str, value: Any) -> Any:
-    """初期値 1 つを検証して正規化する。登録簿の検証をそのまま使い、ID は文字列で書かせる方針の案内を添える。"""
+    """Validate and normalize a single seed value. Reuses the registry's validation as-is, adding a pointer to the policy that IDs are written as strings."""
     defn = DEFS_BY_KEY[key]
     try:
         return coerce_value(defn, value)
@@ -267,7 +263,7 @@ def _read_raw(path: str | Path | None) -> tuple[Path, Mapping[str, Any]]:
     if not resolved.is_file():
         raise FileNotFoundError(f'設定ファイルが見つかりません: {resolved}。config.example.yaml をコピーして作成してください({CONFIG_ENV_VAR} で場所を指定することもできます)。')
     with resolved.open('r', encoding='utf-8') as stream:
-        # 任意の Python オブジェクトを構築させないため safe_load を使う。
+        # safe_load, so the file cannot have arbitrary Python objects constructed from it.
         raw = yaml.safe_load(stream)
     if raw is None:
         raise ValueError(f'設定ファイルが空です: {resolved}')
@@ -277,9 +273,9 @@ def _read_raw(path: str | Path | None) -> tuple[Path, Mapping[str, Any]]:
 
 
 def load_config(path: str | Path | None = None) -> Config:
-    """設定ファイルを読み込む。探索順は 引数 → 環境変数 INSTANT_NEWS_CONFIG → リポジトリルートの config.yaml。
+    """Load the config file. Lookup order: argument, then the INSTANT_NEWS_CONFIG environment variable, then config.yaml at the repo root.
 
-    ファイルが見つからない場合は FileNotFoundError、内容が不正な場合は ValueError を送出する。
+    Raises FileNotFoundError if the file is missing, ValueError if its contents are invalid.
     """
     resolved, raw = _read_raw(path)
     try:
@@ -289,9 +285,9 @@ def load_config(path: str | Path | None = None) -> Config:
 
 
 def load_database_config(path: str | Path | None = None) -> DatabaseConfig:
-    """設定ファイルから database 節だけを読む。
+    """Read only the database section of the config file.
 
-    CLI のためにある。CLI は設定を画面から誤って変更して締め出された場合の唯一の復旧手段であり、その復旧手段が「設定ファイルの他の節が最新であること」に依存してはならない。DB へ繋げれば仕事ができる以上、要求するのも接続先だけにする。探索と検証は load_config と同じものを使い、受け付ける設定ファイルが両者で食い違わないようにする。
+    This exists for the CLI. The CLI is the only recovery path once a setting changed from the UI by mistake has locked you out, and that recovery path must not depend on the config file's other sections being up to date. Since reaching the DB is all it takes to do the job, the connection target is all this requires. Lookup and validation are load_config's, so the two cannot disagree about which config files are acceptable.
     """
     resolved, raw = _read_raw(path)
     try:

@@ -1,8 +1,8 @@
-"""広告の管理用 API(ads:admin)。
+"""Ad administration API (ads:admin).
 
-このルーターが要求するスコープは ads:admin ただ 1 つである。管理者が発行できるスコープを 1 つに束ねてはならない。広告管理アプリに渡すのは ads:admin だけであり、記事の署名を偽造する力(articles:write:any)を混ぜて渡すと、広告の入稿を任せた相手が任意の記者の名前で記事を出せることになる。
+This router requires exactly one scope: ads:admin. Never bundle the scopes an admin can issue into one. Hand the ad-management app ads:admin and nothing else: mix in the power to forge an article's byline (articles:write:any) and whoever you trusted with ad submission can publish articles under any reporter's name.
 
-広告枠(ad_slots)を作る API は持たない。枠はフロントエンドのテンプレートが slug で参照する固定の集合であり、移行で投入される。API から枠を増やせるようにしても、それを描画するテンプレートが無ければ何も起きず、「作れるのに出ない枠」という説明のつかない状態が増えるだけである。
+There is no API for creating ad slots (ad_slots). Slots are a fixed set that the frontend templates reference by slug, seeded by the migration. Letting the API add slots would achieve nothing without a template to render them, and would only accumulate inexplicable slots that can be created but never appear.
 """
 
 from __future__ import annotations
@@ -27,22 +27,22 @@ from ..media.transcode import TranscodeError
 from ..principals import Principal
 from ..schemas import AdOut, AdSlotOut, AdStatDay, AdStatsOut, AdWrite
 
-# 依存性を 1 つの物として持つ。ルーター全体へ課したうえで、主体そのものを要る経路が同じ物を参照することで、FastAPI の依存性キャッシュが 1 要求につき 1 回だけ評価する。
+# Held as a single object: imposed on the whole router, and referenced by the routes that need the principal itself, so FastAPI's dependency cache evaluates it only once per request.
 _ads_admin: Final = require_scope('ads:admin')
 
-# 経路ごとの宣言ではなくルーターへ課す。新しい経路を足したときに検査を書き忘れても、素通りする経路が生まれない。
+# Imposed on the router rather than declared per route: forgetting the check when adding a route cannot create a route that passes straight through.
 router = APIRouter(tags=['admin:ads'], dependencies=[Depends(_ads_admin)])
 
-# 広告のクリエイティブは必ず自分で配信する。/media/{hash}/{variant}.webp は media.service が返す配信 URL の形。
+# Ad creatives are always served by us. /media/{hash}/{variant}.webp is the shape of the delivery URL media.service returns.
 _MEDIA_URL_PREFIX: Final = '/media/'
 _MEDIA_URL_PATTERN: Final = re.compile(r'^/media/(?P<hash>[0-9a-f]{64})/(?P<variant>[^/]+)\.webp$')
 
 _LINK_SCHEMES: Final = ('http', 'https')
 
-# 作成に必須の項目。AdWrite は部分更新にも使うため全ての項目が省略可能であり、作成時の必須はここで検査する。
+# Required on create. AdWrite doubles as the partial-update body, so every field is optional on the model and the create-time requirement is checked here.
 _REQUIRED_ON_CREATE: Final = ('slot_id', 'advertiser_name', 'image_url', 'link_url')
 
-# NOT NULL の列。部分更新で明示的な null を指定されたら弾く(null が入らないことは DB が守るが、そこで落とすと制約違反の 500 になり、何が悪いのか伝わらない)。
+# NOT NULL columns. Reject an explicit null in a partial update: the DB does keep nulls out, but failing there is a constraint-violation 500 that says nothing about what was wrong.
 _NOT_NULLABLE: Final = ('slot_id', 'advertiser_name', 'image_url', 'link_url', 'weight', 'is_active')
 
 _AD_SELECT: Final = """
@@ -80,7 +80,7 @@ def _ad_out(row: dict[str, Any]) -> AdOut:
 
 
 def _parse_ad_id(value: str) -> int:
-    """パスの ID を 64bit の整数へ。解釈できない値は、存在しない ID と区別する意味が無いため「無い」として扱う。"""
+    """Parse a path ID into a 64-bit integer. An unparseable value is reported as not found: there is no point distinguishing it from an ID that does not exist."""
     try:
         return to_snowflake(value)
     except ValueError as exc:
@@ -100,9 +100,9 @@ async def _require_slot(db: Database, slot_id: int) -> None:
 
 
 def _validated_link_url(link_url: str) -> str:
-    """遷移先が http / https の絶対 URL であることを確かめる。
+    """Check that the click destination is an absolute http / https URL.
 
-    この値はクリックの計測を経て転送先になり、フロントエンドではリンクとして描画される。スキームを検査しないと javascript: のような URL を仕込めてしまい、広告の入稿がそのままスクリプトの実行になる。
+    The value becomes the click destination once click tracking has run, and the frontend renders it as a link. Without a scheme check a javascript: URL could be planted, and submitting an ad would amount to executing a script.
     """
     parsed = urlsplit(link_url)
     if parsed.scheme.lower() not in _LINK_SCHEMES or not parsed.netloc:
@@ -111,15 +111,15 @@ def _validated_link_url(link_url: str) -> str:
 
 
 def _validate_period(starts_at: datetime | None, ends_at: datetime | None) -> None:
-    """掲載期間の前後を検査する。starts_at が ends_at より後の広告はどの時点でも候補に入らず、入稿したのに一度も出ないまま掲載期間だけが過ぎる。"""
+    """Check the ordering of the run period. An ad whose starts_at is after its ends_at is a candidate at no instant at all: it is submitted, never runs once, and the run period simply passes."""
     if starts_at is not None and ends_at is not None and starts_at > ends_at:
         raise BadRequest('ends_at は starts_at 以降である必要があります。')
 
 
 async def _require_public_media(db: Database, image_url: str) -> None:
-    """既に取り込まれた画像を指す URL について、実在し、かつ公開扱いであることを確かめる。
+    """For a URL that points at an already-ingested image, check that it really exists and is public.
 
-    広告は未ログインの読者にも配信するため、非公開の画像を指定されると読者の側では枠が壊れる。ここで media.is_public を 1 へ書き換えて解決してはならない。非公開の画像は閲覧制限のある記事の図版でありうるため、広告に指定するだけでその図版が全読者へ配られることになる。
+    Ads are served to logged-out readers too, so a non-public image leaves the slot broken on the reader's side. Do not resolve that by rewriting media.is_public to 1 here: a non-public image may be a figure from an access-restricted article, so merely naming it in an ad would hand that figure to every reader.
     """
     matched = _MEDIA_URL_PATTERN.match(image_url)
     if matched is None:
@@ -135,9 +135,9 @@ async def _require_public_media(db: Database, image_url: str) -> None:
 
 
 async def _resolve_image_url(db: Database, media: MediaConfig, principal: Principal, image_url: str) -> str:
-    """クリエイティブの URL を、必ず自分で配信する /media/ の URL へ解決する。
+    """Resolve a creative's URL to a /media/ URL that we always serve ourselves.
 
-    外部ホストの URL をそのまま保存してはならない。その画像が消えた時点で枠が壊れたまま配信され続け、しかも壊れたことに気付く手立てが無い。入稿の時点で取り込んでしまえば、以後の配信は外部のホストに依存しない。取り込みは公開(is_public=1)として行う。広告は未ログインの読者へも配信する必要がある。
+    Never store a remote host's URL as-is: the moment that image disappears the slot goes on being served broken, and there is no way to notice it broke. Ingest at submission time and every later delivery is independent of the remote host. Ingest as public (is_public=1), because ads have to be served to logged-out readers too.
     """
     if image_url.startswith(_MEDIA_URL_PREFIX):
         await _require_public_media(db, image_url)
@@ -145,21 +145,21 @@ async def _resolve_image_url(db: Database, media: MediaConfig, principal: Princi
     try:
         result = await ingest_url(db, media, image_url, uploaded_by=principal.user_id, via_token_id=principal.token_id, is_public=True)
     except (FetchError, TranscodeError) as exc:
-        # 取得・変換の失敗は入稿した URL に起因する。要求の誤りとして返さないと、外部ホストの不調が自分の障害として報告される。
+        # A fetch or transcode failure originates in the submitted URL. Return it as a bad request, or a remote host's trouble gets reported as our own outage.
         raise MediaError(f'広告のクリエイティブを取り込めませんでした: {exc}') from exc
     return result.url
 
 
 @router.get('/api/admin/ad-slots')
 async def list_ad_slots(db: Annotated[Database, Depends(get_db)]) -> list[AdSlotOut]:
-    """広告枠の一覧。推奨寸法を返すのは、外部の管理アプリが入稿前に見え方を自前で再現できるようにするため(コアはプレビュー用のエンドポイントを持たない)。"""
+    """The ad slot listing. Recommended dimensions are returned so that an external management app can reproduce the appearance itself before submission — the core has no preview endpoint."""
     rows = await db.fetch_all('SELECT id, slug, name, description, recommended_width, recommended_height FROM ad_slots ORDER BY id')
     return [AdSlotOut.model_validate(row) for row in rows]
 
 
 @router.get('/api/admin/ads')
 async def list_ads(db: Annotated[Database, Depends(get_db)]) -> list[AdOut]:
-    """広告の一覧。掲載を止めた広告(is_active=0)も含める。実績を追うには止めたものが見え続ける必要がある。"""
+    """The ad listing. Ads that were stopped (is_active=0) are included too: following performance stats requires the stopped ones to stay visible."""
     rows = await db.fetch_all(f'{_AD_SELECT} ORDER BY a.created_at DESC, a.id DESC')
     return [_ad_out(row) for row in rows]
 
@@ -171,7 +171,7 @@ async def create_ad(
     db: Annotated[Database, Depends(get_db)],
     media: Annotated[MediaConfig, Depends(get_media_config)],
 ) -> AdOut:
-    """広告を入稿する。"""
+    """Submit an ad."""
     missing = [name for name in _REQUIRED_ON_CREATE if getattr(payload, name) is None]
     if missing:
         raise BadRequest(f'広告の作成には次の項目が必要です: {", ".join(missing)}')
@@ -208,9 +208,9 @@ async def update_ad(
     db: Annotated[Database, Depends(get_db)],
     media: Annotated[MediaConfig, Depends(get_media_config)],
 ) -> AdOut:
-    """広告を部分更新する。省略された項目は現在の値のまま残す。
+    """Partially update an ad. Omitted fields keep their current value.
 
-    「省略された」と「明示的に null を指定した」は別物として扱う(pydantic の model_fields_set で区別する)。alt_text・starts_at・ends_at への null は、代替テキストを外す・掲載開始を即時にする・掲載終了を無期限にする、という意味のある指定である。
+    Omitted and explicitly set to null are treated as different things, told apart by pydantic's model_fields_set. A null for alt_text, starts_at or ends_at is a meaningful instruction: drop the alt text, start the run immediately, leave the end of the run open.
     """
     identifier = _parse_ad_id(ad_id)
     current = await _fetch_ad(db, identifier)
@@ -218,12 +218,12 @@ async def update_ad(
     for name in _NOT_NULLABLE:
         if name in fields and getattr(payload, name) is None:
             raise BadRequest(f'{name} には null を指定できません。')
-    # 期間は、指定されなかった側を現在の値で補って検査する。片方だけの更新で前後が逆転した広告が生まれるのを防ぐ。
+    # Validate the period with the unspecified side filled in from the current value, so that updating only one end cannot produce an ad whose period runs backwards.
     _validate_period(
         payload.starts_at if 'starts_at' in fields else current['starts_at'],
         payload.ends_at if 'ends_at' in fields else current['ends_at'],
     )
-    # 代入する断片はここに書かれた固定の文字列だけであり、値は全て %s で渡す。要求の内容が SQL の構造に触れることはない。
+    # The assignment fragments are only the fixed strings written here; every value goes through %s. Nothing from the request touches the structure of the SQL.
     assignments: list[str] = []
     args: list[Any] = []
     if 'slot_id' in fields:
@@ -264,11 +264,11 @@ async def update_ad(
 
 @router.delete('/api/admin/ads/{ad_id}')
 async def deactivate_ad(ad_id: str, db: Annotated[Database, Depends(get_db)]) -> AdOut:
-    """広告の掲載を止める。行は消さず is_active=0 にする。
+    """Stop an ad from running. The row is kept and is_active set to 0.
 
-    物理削除にしてはならない。ad_stats_daily は ads を CASCADE で参照しているため、行を消すとその広告が何回表示され何回押されたかの実績ごと消える。掲載の終わった広告こそ、実績を突き合わせる相手である。
+    This must never be a hard delete: ad_stats_daily references ads with CASCADE, so dropping the row takes the performance stats with it — how many times that ad was shown and how many times it was clicked. An ad whose run has ended is precisely the one you reconcile performance stats against.
 
-    応答は更新後の広告そのものを返す。DELETE が「消滅」ではなく「停止」であることが、応答の is_active=false としてその場で分かる。
+    The response is the updated ad itself, so is_active=false shows on the spot that DELETE means stopped, not gone.
     """
     identifier = _parse_ad_id(ad_id)
     await _fetch_ad(db, identifier)
@@ -283,13 +283,13 @@ async def get_ad_stats(
     from_date: Annotated[date | None, Query(alias='from', description='集計の開始日(この日を含む)。省略すると下限を設けない。')] = None,
     to_date: Annotated[date | None, Query(alias='to', description='集計の終了日(この日を含む)。省略すると上限を設けない。')] = None,
 ) -> AdStatsOut:
-    """広告の日次実績。合計は返した範囲の合計であり、日ごとの値と必ず一致する。
+    """An ad's daily performance stats. The totals are over the range returned, and always agree with the per-day values.
 
-    実績の無い日は行を持たない(表示が 0 の日に 0 の行を作らない)。日付の穴は、その日の表示が無かったことを意味する。
+    A day with no stats has no row: no zero row is written for a day with 0 impressions. A gap in the dates means there were no impressions that day.
     """
     identifier = _parse_ad_id(ad_id)
     if await db.fetch_val('SELECT id FROM ads WHERE id = %s', identifier) is None:
-        # 存在しない広告の実績を空の成功として返すと、ID を打ち間違えたことが「実績ゼロ」と見分けられない。
+        # Returning an empty success for an ad that does not exist would make a mistyped ID indistinguishable from genuinely zero stats.
         raise NotFound('広告がありません。')
     if from_date is not None and to_date is not None and from_date > to_date:
         raise BadRequest('from は to 以前の日付である必要があります。')

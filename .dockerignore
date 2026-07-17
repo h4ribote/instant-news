@@ -1,26 +1,26 @@
-# ビルドコンテキストはリポジトリのルートである(server と bot が common/ を共有するため、コンテキストを各サービスのディレクトリに絞ると common/ をコピーできない)。ルートを丸ごと送ることになるため、イメージに入れてはならないものをここで落とす。
+# The build context is the repository root: server and bot share common/, so narrowing the context to each service's directory would put common/ out of reach of COPY. That means the whole root is sent, so anything that must not end up in the image is dropped here.
 
-# .gitignore 対象のローカル限定のメモ。イメージへ入れる理由が無い。
+# Local-only notes, already gitignored. No reason to ship them in the image.
 local/
 
-# 履歴。イメージには要らず、コンテキストの転送量だけが増える。過去のコミットに含まれる資格情報ごと配ることにもなる。
+# History. Not needed in the image, inflates the context transfer, and would hand over any credentials contained in past commits.
 .git/
 .gitignore
 
-# 設定は実行時にマウントで渡すため、イメージへ焼き込まない。焼き込むと DB のパスワード・Discord の bot トークン・OAuth2 のクライアントシークレットがイメージの層に残り、イメージを配布した相手に資格情報ごと渡ることになる(層は削除しても履歴から取り出せる)。
+# Config is mounted at runtime, never baked into the image. Baking it in would leave the DB password, the Discord bot token and the OAuth2 client secret in an image layer, so distributing the image distributes the credentials with it; deleting the layer does not help, because the credentials stay recoverable from the image history.
 config.yaml
 
-# docker compose が読む変数ファイル。DB のパスワードを置く場所であり、config.yaml と同じ理由でイメージへ入れない。
+# The environment-variable file docker compose reads. It holds the DB password, so it is excluded for the same reason as config.yaml.
 .env
 
-# ホスト側で生成された Python の中間生成物。コンテナの Python とはバージョンが異なりうるため、持ち込むと壊れた .pyc を掴む。
+# Python bytecode built on the host. The container's Python may be a different version from the host's, so carrying the bytecode in means the container loads broken .pyc files.
 __pycache__/
 *.py[cod]
 
-# ホスト側の仮想環境。コンテナの依存はイメージのビルド時に requirements.txt から入れる。
+# Host virtualenv. Container dependencies are installed from requirements.txt when the image is built.
 .venv/
 venv/
 
-# 実行時の生成物。
+# Runtime artifacts.
 *.log
 *.db

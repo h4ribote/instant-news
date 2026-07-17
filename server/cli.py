@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""API キーとプラットフォーム設定の管理 CLI。
+"""CLI for managing API keys and platform settings.
 
     python -m server.cli issue-token --discord-user-id <id> --name <name> --scope <scope> [--scope <scope>...] [--expires-days <n>]
     python -m server.cli list-tokens [--discord-user-id <id>]
@@ -8,15 +8,15 @@
     python -m server.cli get-setting <key>
     python -m server.cli set-setting <key> <json-value>
 
-キーの発行は、Web UI が無い段階でも API を使えるようにするための手段。設定ファイルにキーを書く方式は採らない。生値がファイルに残ってしまい、DB には SHA-256 しか保存しないという方針と矛盾するうえ、失効も一覧もできなくなる。
+Issuing keys here is what makes the API usable even before a Web UI exists. Writing keys into the config file is deliberately not an option: the raw value would sit in a file, contradicting the rule that the DB stores only the SHA-256, and such a key could be neither revoked nor listed.
 
-キーは必ず既存のユーザーへ紐づける。機械のための独立したアカウントを作らず、人間の権限を機械が借りる形にすることで、責任の所在が必ず人間に残る。権限は発行時に凍結せず、要求のたびに現在のロールから判定するため、ここでの検査は「今この人が発行してよいか」の確認である。
+A key is always tied to an existing user. There is no standalone account for a machine — the machine borrows a human's permissions — so responsibility always stays with a human. Permissions are not frozen at issue time but decided from the current roles on every request, so the check here only confirms that this person may issue right now.
 
-設定の操作(list-settings / get-setting / set-setting)は、**管理画面から締め出された場合の唯一の復旧手段**である。設定の真実は settings 表にあり、通常はフロントエンドの管理画面から変更する。しかし管理ロール(admin.role_ids)を誤って設定すると、誰も管理者資格を満たさなくなり、管理画面にも設定 API にも到達できなくなる。要求のたびに管理者資格を再検査する設計である以上、この状態を HTTP の側から解く方法は無い。設定ファイルを書き換えても、初期値は初回起動時にしか読まれないため元へ戻らない。したがって DB へ直接到達できる経路が要る。
+The settings commands (list-settings / get-setting / set-setting) are **the only recovery path once you are locked out of the admin screen**. The source of truth for settings is the settings table, normally edited from the frontend's admin screen. But mis-set admin roles (admin.role_ids) leave nobody meeting admin eligibility, putting both the admin screen and the settings API out of reach. Since admin eligibility is re-checked on every request, nothing on the HTTP side can undo that state. Editing the config file does not undo it either, because seed values are read only at first boot. Hence a path that reaches the DB directly is required.
 
-この CLI は Web の API より強い。API が課す 2 つの制限を、ここでは意図的に課さない。秘密の設定の生値を表示し(get-setting)、変更できない設定も変更できる(set-setting)。どちらも「画面を開ける者」に渡してはならないという理由で API 側に設けた制限であり、DB へ到達できる者を縛るためのものではない。DB へ到達できる者は、そもそも settings 表を直接読み書きできる。
+This CLI is stronger than the Web API, deliberately dropping two restrictions the API imposes: it prints the raw value of secret settings (get-setting) and writes settings that are not editable (set-setting). Both restrictions exist on the API side because that data must not reach everyone who can open the UI; they were never meant to bind someone who can reach the DB, who can already read and write the settings table directly.
 
-この CLI が設定ファイルに求めるのは database 節だけである。他の節を読まないのは、復旧の最後の手段が、復旧しに来た対象そのものの健全さを前提にしてはならないためである。設定ファイルの残りの節は初回起動時に settings 表へ写す初期値であり、その真実は既に表の側にある。そこに不備があるだけで CLI までもが起動を拒むと、まさに設定を直しに来た運用者が手段を失う。
+The only config section this CLI needs is database. It ignores the others because a last-resort recovery tool must not presuppose the health of the very thing it came to repair. The remaining config sections are seed values copied into the settings table at first boot, and the source of truth for them already lives in the table. If a flaw there made even the CLI refuse to start, the operator who came to fix the settings would be left with no means.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Final
 
 
-# 設定ファイル全体を読む load_config ではなく database 節だけを読む load_database_config を使う。この CLI が要るのは DB の接続先だけであり、他の節の不備で復旧手段を失ってはならないためである。
+# load_database_config reads only the database config section, unlike load_config which reads the whole file: this CLI needs nothing but the DB connection target, and a flaw in another config section must not cost us the recovery path.
 from common.config import DatabaseConfig, load_database_config
 from common.db import Database
 from common.settings import (
@@ -48,18 +48,18 @@ from common.snowflake import to_snowflake
 from .app.auth import create_api_token
 from .app.principals import ADMIN_SCOPES, Principal, is_admin
 
-# api_token_scopes.scope の ENUM と同じ集合。値の真実は migrations/0001_initial.sql にある。
+# Same set as the api_token_scopes.scope ENUM. The source of truth for the values is migrations/0001_initial.sql.
 SCOPES: Final = ('articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin')
 
-# キーの生成(接頭辞・生値の長さ・SHA-256 による要約・行の書き込み)は app.auth.create_api_token が担う。ここで同じ手順を書き直すと、片方だけを直したときに、Web UI から出したキーと CLI から出したキーの形が食い違う。発行の資格を誰に問うかだけがこの 2 つの経路で異なり、その判定はここに書く。
+# Key generation — prefix, raw-value length, SHA-256 digest, row insert — belongs to app.auth.create_api_token. Rewriting the same steps here would mean that fixing only one side makes keys issued from the Web UI and keys issued from the CLI differ in shape. The two paths differ only in whom eligibility to issue is checked against, and that check is what lives here.
 
 
 class CliError(Exception):
-    """利用者の指定の誤りや、前提を満たさない状態。異常終了の文言として stderr へ出す。"""
+    """A mistake in what the user specified, or a state that fails a precondition. Printed to stderr as the message for an abnormal exit."""
 
 
 async def _load_user(db: Database, discord_user_id: int) -> dict[str, Any]:
-    """対象のユーザーを引く。居なければ発行しない(存在しない相手のキーを作っても、要求のたびの権限判定が必ず落ちるだけである)。"""
+    """Look the target user up. No user, no key: a key for someone who does not exist would only fail the per-request permission check every time."""
     user = await db.fetch_one(
         'SELECT id, discord_user_id, username, global_name, is_guild_member, is_guild_owner FROM users WHERE discord_user_id = %s',
         discord_user_id,
@@ -70,7 +70,7 @@ async def _load_user(db: Database, discord_user_id: int) -> dict[str, Any]:
 
 
 async def _principal_for(db: Database, user: dict[str, Any]) -> Principal:
-    """対象ユーザーの現在の資格を組み立てる。API キー経由ではないため token_id と token_scopes は空。"""
+    """Build the target user's current eligibility. Not via an API key, so token_id and token_scopes are empty."""
     rows = await db.fetch_all('SELECT role_id FROM user_roles WHERE user_id = %s', user['id'])
     return Principal(
         user_id=int(user['id']),
@@ -94,13 +94,13 @@ async def _issue_token(db: Database, settings: RuntimeSettings, *, discord_user_
     if requested_admin and not await is_admin(db, settings, principal):
         raise CliError(f'{_display_name(user)}({discord_user_id})は管理者ではないため、{", ".join(requested_admin)} を発行できません。guild のオーナー、Administrator 権限を持つロールの保有者、または設定 admin.role_ids に列挙したロールの保有者だけが発行できます。')
     if 'settings:admin' in requested_admin:
-        # settings:admin は admin.role_ids を書き換えられる、すなわち管理者の資格そのものを配れるため、他のどのスコープよりも強い。他の管理者スコープのように「広告だけ」「分類だけ」と対象を限ることができず、これを渡すのは実質的に管理者権限の委譲である。
+        # settings:admin can rewrite admin.role_ids, i.e. hand out admin eligibility itself, which makes it stronger than any other scope. Unlike the other admin scopes it cannot be narrowed to ads only or taxonomy only, so granting it is effectively delegating admin permissions.
         print('警告: settings:admin はプラットフォームの設定を変更でき、その中には管理ロール(admin.role_ids)が含まれます。このキーの持ち主は自分自身や任意の相手へ管理者資格を与えられるため、実質的に管理者権限を委譲することになります。', file=sys.stderr)
     if not user['is_guild_member']:
-        # 発行自体は妨げない(再参加すればそのまま使える)。ただし現状ではどの要求も 401 になるため、黙って渡すと使えない理由が分からない。
+        # Issuing is not blocked — the key works as-is once they rejoin. But every request 401s until then, so handing the key over silently would leave the reason it does not work unexplained.
         print(f'警告: {_display_name(user)}({discord_user_id})は現在 guild のメンバーではありません。メンバーに戻るまで、このキーによる要求は認証されません。', file=sys.stderr)
 
-    # 生成と書き込みは Web UI からの発行と同じ手順を通す。生値が存在するのはこの戻り値だけで、DB には SHA-256 しか残らない。
+    # Generation and insert go through the same steps as issuance from the Web UI. The raw value exists only in this return value; the DB keeps nothing but the SHA-256.
     raw, row = await create_api_token(db, user_id=int(user['id']), name=name, scopes=scopes, expires_days=expires_days)
     token_id = row['id']
 
@@ -117,7 +117,7 @@ async def _issue_token(db: Database, settings: RuntimeSettings, *, discord_user_
 async def _list_tokens(db: Database, *, discord_user_id: int | None) -> int:
     sql = (
         'SELECT t.id, t.token_prefix, t.name, t.created_at, t.last_used_at, t.expires_at, t.revoked_at,'
-        # 期限切れかどうかは DB の時計で判定する。CLI を動かすホストの時計と DB の時計がずれていると、一覧の表示と実際の認証の可否が食い違う。
+        # Expiry is judged by the DB's clock: if the clock on the host running the CLI drifts from the DB's, the listing would disagree with what authentication actually accepts.
         ' (t.expires_at IS NOT NULL AND t.expires_at <= NOW()) AS is_expired,'
         ' u.discord_user_id, u.username, u.global_name,'
         " GROUP_CONCAT(s.scope ORDER BY s.scope SEPARATOR ',') AS scopes"
@@ -135,7 +135,7 @@ async def _list_tokens(db: Database, *, discord_user_id: int | None) -> int:
         print('該当する API キーはありません。')
         return 0
     for row in rows:
-        # 生値は DB に無いため出せない。token_prefix は一覧でキーを見分けるためだけの平文である。
+        # The raw value is not in the DB, so it cannot be shown. token_prefix is plaintext kept solely to tell keys apart in the listing.
         print(f'id={row["id"]} {row["token_prefix"]}… [{_token_state(row)}] {row["name"]}')
         print(f'  所有者: {_display_name(row)}({row["discord_user_id"]})')
         print(f'  スコープ: {row["scopes"] or "(なし)"}')
@@ -144,7 +144,7 @@ async def _list_tokens(db: Database, *, discord_user_id: int | None) -> int:
 
 
 def _token_state(row: dict[str, Any]) -> str:
-    """一覧に出すキーの状態。失効と期限切れは、取るべき対処(何もしない / 発行し直す)が異なるため区別する。"""
+    """The key state shown in the listing. Revoked and expired are kept distinct because the remedy differs: do nothing, versus issue a new key."""
     if row['revoked_at'] is not None:
         return f'失効 {row["revoked_at"]}'
     if row['is_expired']:
@@ -157,7 +157,7 @@ async def _revoke_token(db: Database, *, token_id: int) -> int:
     if affected:
         print(f'API キー id={token_id} を失効しました。')
         return 0
-    # 更新できなかった理由を区別して伝える。既に失効済みなら目的は達成されているため、異常終了にはしない。
+    # Report which of the two reasons the update hit. Already revoked means the goal is met, so it is not an abnormal exit.
     existing = await db.fetch_one('SELECT revoked_at FROM api_tokens WHERE id = %s', token_id)
     if existing is None:
         raise CliError(f'API キー id={token_id} は存在しません。')
@@ -165,15 +165,13 @@ async def _revoke_token(db: Database, *, token_id: int) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------
-# プラットフォームの設定
-# --------------------------------------------------------------------------
+# Platform settings
 
-# 設定の読み書きに SettingsStore.raw_values / describe を通さないのは 2 つの理由による。1 つは、この CLI が復旧の最後の手段であり、登録簿のキーが 1 つでも欠けていれば送出する raw_values に依ると、キーを 1 つ足した直後(まだどのプロセスも初期値を投入していない状態)に一覧も取得も変更もできなくなること。もう 1 つは、秘密の生値を出す必要があり、生値を伏せる describe では復旧の役に立たないこと。書き込みも set_many を通さない(set_many は変更できない設定を拒むが、その拒否は画面に対する制限であってここには当てはまらない)。検証だけは登録簿の coerce_value を共有し、画面から入れた値と CLI から入れた値の形が食い違わないようにする。
+# Settings reads and writes bypass SettingsStore.raw_values / describe for two reasons. First, raw_values raises if even one registry key is missing, so this last-resort recovery tool would lose list, get and set alike right after a key is added to the registry, while no process has seeded it yet. Second, recovery needs secret raw values printed, and describe hides them. Writes bypass set_many too: set_many refuses settings that are not editable, but that refusal is a restriction on the UI and does not apply here. Only validation is shared — the registry's coerce_value — so a value entered from the UI and one entered from the CLI cannot end up in different shapes.
 
 
 async def _load_setting_rows(db: Database) -> dict[str, dict[str, Any]]:
-    """settings 表の行をキーで引ける形で読む。更新者は表示のために名前まで引く。"""
+    """Read the settings rows in a form that can be looked up by key. The updater is joined down to a name so it can be displayed."""
     rows = await db.fetch_all(
         'SELECT s.setting_key, s.value, s.updated_at, s.updated_by, u.username, u.global_name'
         ' FROM settings s LEFT JOIN users u ON u.id = s.updated_by'
@@ -182,7 +180,7 @@ async def _load_setting_rows(db: Database) -> dict[str, dict[str, Any]]:
 
 
 def _decode_stored(row: dict[str, Any]) -> Any:
-    """JSON 列の値を Python の値へ。aiomysql は JSON 列を文字列で返すため、ここで解く。"""
+    """Turn a JSON column value into a Python value. aiomysql returns JSON columns as strings, so decode here."""
     raw = row['value']
     if isinstance(raw, (str, bytes, bytearray)):
         return json.loads(raw)
@@ -190,18 +188,18 @@ def _decode_stored(row: dict[str, Any]) -> Any:
 
 
 def _stored_text(row: dict[str, Any] | None) -> str:
-    """保存されている値を JSON の表記で返す。そのまま set-setting へ渡し直せる形である。
+    """Return the stored value in JSON notation, in the exact form you can hand straight back to set-setting.
 
-    登録簿の coerce_value を通さずに表示するのは、値の下限を後から厳しくした場合など、登録簿がもはや受け付けない値が保存されている状態こそ、この CLI で直したい状態だからである。読むだけの操作が検証で落ちてはならない。
+    It is shown without going through the registry's coerce_value because a stored value the registry no longer accepts — after a minimum was tightened, say — is precisely the state this CLI is here to fix. A read-only operation must not fail validation.
     """
     if row is None:
-        # 登録簿にはあるが表に無いキー。初期値の投入(server または bot の起動)がまだ済んでいない。
+        # A key in the registry but not in the table: seeding (a server or bot start) has not run yet.
         return '(未登録)'
     return json.dumps(_decode_stored(row), ensure_ascii=False)
 
 
 def _require_setting(key: str) -> SettingDef:
-    """登録簿から設定の定義を引く。無いキーは書かせない(表に書けても、登録簿に無いキーは誰も読まない)。"""
+    """Look the setting definition up in the registry. Unknown keys are not written: a key absent from the registry can be put in the table, but nothing ever reads it."""
     defn = DEFS_BY_KEY.get(key)
     if defn is None:
         raise CliError(f'未知の設定です: {key}。指定できるキーは list-settings で確認できます(設定の定義はコード側の登録簿にあり、settings 表に無いキーは読み書きしません)。')
@@ -209,7 +207,7 @@ def _require_setting(key: str) -> SettingDef:
 
 
 def _flags_text(defn: SettingDef) -> str:
-    """設定の性質のうち、値だけを見ても分からないもの。"""
+    """The properties of a setting that its value alone does not reveal."""
     flags: list[str] = []
     if not defn.editable:
         flags.append('変更不可')
@@ -224,7 +222,7 @@ def _updated_text(row: dict[str, Any] | None) -> str:
     if row is None:
         return '未登録'
     if row['updated_by'] is None:
-        # 初期値の投入か、この CLI からの変更。どちらもプラットフォームの利用者による変更ではない。
+        # Either seeding or a change from this CLI. Neither is a change made by a platform user.
         who = '初期値の投入または CLI'
     else:
         who = f'{_display_name(row)}(id={row["updated_by"]})'
@@ -232,7 +230,7 @@ def _updated_text(row: dict[str, Any] | None) -> str:
 
 
 async def _list_settings(db: Database) -> int:
-    """設定を一覧する。秘密の値は伏せる(一覧に生値を並べる必要は無い。要るなら get-setting で 1 つだけ出す)。"""
+    """List the settings, hiding secret values: there is no need to line raw values up in a listing, and get-setting prints a single one when it is needed."""
     stored = await _load_setting_rows(db)
     for defn in REGISTRY:
         row = stored.get(defn.key)
@@ -247,9 +245,9 @@ async def _list_settings(db: Database) -> int:
 
 
 async def _get_setting(db: Database, *, key: str) -> int:
-    """設定を 1 つ取得する。秘密の設定も生値を出す。
+    """Get one setting, printing the raw value even for a secret setting.
 
-    生値を出すのは、この CLI を実行できるのは DB へ到達できる者だけであり、その者は settings 表を直接読める以上、伏せても何も守れないためである。API 側で伏せるのは、そちらの読み手が「画面を開ける者すべて」だからであって、秘密の設定は誰にも見せないという意味ではない。
+    The raw value is printed because only someone who can reach the DB can run this CLI, and that person can read the settings table directly, so hiding it would protect nothing. The API hides it because its readers are everyone who can open the UI — not because a secret setting must never be shown to anyone.
     """
     defn = _require_setting(key)
     stored = await _load_setting_rows(db)
@@ -267,9 +265,9 @@ async def _get_setting(db: Database, *, key: str) -> int:
 
 
 def _parse_value(defn: SettingDef, text: str) -> Any:
-    """コマンドラインの値を、その設定の値として読む。
+    """Read a command-line value as that setting's value.
 
-    JSON として解釈する。配列(["111","222"])・数値(60)・文字列("文字列")のいずれも 1 つの記法で書けるためである。JSON として解釈できない文字列は素の文字列として扱う(トークンや URL を毎回引用符で囲ませる意味は無い)。この結果、数字だけの文字列(OAuth のクライアント ID など)は数値として読まれるため、引用符で囲む必要がある。誤りは検証で必ず落ちるため、黙って別の型で保存されることはない。
+    It is parsed as JSON, so one notation covers arrays (["111","222"]), numbers (60) and strings ("text") alike. Text that does not parse as JSON is taken as a plain string — there is no point making every token or URL be quoted. As a consequence an all-digit string, such as an OAuth client ID, is read as a number and has to be quoted. A mistake always fails validation, so nothing is ever silently stored under a different type.
     """
     try:
         raw: Any = json.loads(text)
@@ -282,9 +280,9 @@ def _parse_value(defn: SettingDef, text: str) -> Any:
 
 
 async def _set_setting(db: Database, *, key: str, text: str) -> int:
-    """設定を 1 つ変更する。変更できない設定も変更できる。
+    """Set one setting, including settings that are not editable.
 
-    editable=False は画面から書き換えさせないための印であって、DB へ到達できる者を縛るものではない。対象の guild を移すような、再デプロイに相当する操作を行う唯一の正規手段がここである。締め出すべきは画面の利用者であって、復旧に来た運用者ではない。ただし黙って通しはしない。
+    editable=False is a flag that stops the UI from rewriting a setting; it does not bind someone who can reach the DB. This is the only sanctioned way to perform an operation amounting to a redeploy, such as moving to a different target guild. The people to lock out are the UI's users, not the operator who came to recover. It is not let through silently, though.
     """
     defn = _require_setting(key)
     value = _parse_value(defn, text)
@@ -295,8 +293,8 @@ async def _set_setting(db: Database, *, key: str, text: str) -> int:
         print(f'警告: {defn.description}', file=sys.stderr)
         print('警告: これは設定の変更ではなく再デプロイに相当する操作です。既存のデータの意味が変わることを理解したうえで行ってください。', file=sys.stderr)
     payload = json.dumps(to_json_value(defn, value), ensure_ascii=False)
-    # 更新者は必ず NULL にする。この CLI を実行したのは DB へ到達できる者であり、プラットフォームの利用者として特定できない。前の更新者を残すと、その人が最後に変更したように見える。
-    # 行が無い場合も書けるようにする(登録簿へ設定を足した直後など)。復旧の手段が「先に起動して初期値を投入せよ」を前提にしてはならない。
+    # updated_by is always NULL: whoever ran this CLI is someone who can reach the DB and cannot be identified as a platform user. Leaving the previous updater in place would make it look as though that person made the last change.
+    # Writable even when no row exists yet, e.g. right after a setting is added to the registry. A recovery path must not presuppose that you boot first to get the seed values in.
     await db.execute(
         'INSERT INTO settings (setting_key, value, updated_by) VALUES (%s, %s, NULL) AS new '
         'ON DUPLICATE KEY UPDATE value = new.value, updated_by = NULL',
@@ -313,17 +311,15 @@ async def _set_setting(db: Database, *, key: str, text: str) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------
-# 起動
-# --------------------------------------------------------------------------
+# Entry point
 
 
 def _load_database_config(path: str | Path | None) -> DatabaseConfig:
-    """設定ファイルから database 節だけを読む。
+    """Read only the database section of the config file.
 
-    設定ファイル全体を検証しないのは、この CLI が要るのが MySQL の接続先だけだからである。全体を通すと、初期値の節(discord / admin / articles / media の各上限)にキーが 1 つ欠けているだけで、その値を一切使わないこの CLI までもが起動を拒む。それらの値の真実は既に settings 表にあり、この CLI はその表を直しに来ている。管理画面から締め出された運用者にとっての最後の手段が、初期値の節が最新であることを前提にしてはならない。
+    The whole file is not validated because all this CLI needs is the MySQL connection target. Validating everything would let a flaw in a seed-value section (discord / admin / articles / media and their max settings) — an unknown key, a wrong type, an out-of-range value — stop even this CLI from starting, though it uses none of those values. The source of truth for them is already the settings table — the very table this CLI came to fix. The last resort for an operator locked out of the admin screen must not presuppose that the seed-value sections are up to date.
 
-    探索と検証は common.config が持つものをそのまま使う(明示した引数 → 環境変数 → リポジトリルートの config.yaml)。読む設定ファイルや受け付ける内容が server・bot と食い違うと、直したはずの接続先で別の DB を見に行くことになる。
+    Discovery and validation reuse common.config as-is: explicit argument, then the environment variable, then config.yaml at the repository root. If the config file read or the content accepted diverged from server and bot, a connection target you thought you had fixed would point at a different DB.
     """
     try:
         return load_database_config(path)
@@ -332,7 +328,7 @@ def _load_database_config(path: str | Path | None) -> DatabaseConfig:
 
 
 def _snowflake_arg(value: str) -> int:
-    """コマンドライン引数の ID を 64bit の ID として読む。"""
+    """Read an ID given as a command-line argument as a 64-bit ID."""
     try:
         return to_snowflake(value)
     except ValueError as exc:
@@ -380,9 +376,9 @@ async def _run(args: argparse.Namespace) -> int:
                 raise CliError('--expires-days は 1 以上を指定してください(無期限にする場合は指定しないでください)。')
             if args.name.strip() == '':
                 raise CliError('--name を空にはできません。')
-            # 重複を畳む。api_token_scopes の主キーは (token_id, scope) であり、同じスコープを 2 度渡すと重複キーになる。
+            # Collapse duplicates: api_token_scopes has primary key (token_id, scope), so passing the same scope twice would be a duplicate key.
             scopes = list(dict.fromkeys(args.scopes))
-            # 管理者かどうかの判定は管理ロールを見る。その真実は settings 表にあるため、config ではなくここから読む。
+            # The admin check looks at the admin roles, whose source of truth is the settings table — so read them from there, not from config.
             settings = await SettingsStore(db).snapshot()
             return await _issue_token(db, settings, discord_user_id=args.discord_user_id, name=args.name, scopes=scopes, expires_days=args.expires_days)
         if args.command == 'list-tokens':
@@ -404,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         return asyncio.run(_run(args))
-    # MissingSettingsError は初期値の投入が済んでいないことを、どのキーが欠けているかとともに伝える。想定内の状態であるため、traceback ではなく文言として出す。
+    # MissingSettingsError reports that seeding has not run, naming the keys that are missing. It is an expected state, so print it as a message rather than a traceback.
     except (CliError, FileNotFoundError, ValueError, MissingSettingsError) as exc:
         print(f'エラー: {exc}', file=sys.stderr)
         return 1

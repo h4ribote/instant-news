@@ -1,10 +1,10 @@
-"""通知・DM の送信ループ。
+"""Notification post and DM delivery loop.
 
-server は記事を公開した時点で、宛先チャンネルごとに article_discord_posts へ message_id = NULL の行を、タグの購読者ごとに article_subscription_notices へ sent_at = NULL の行を積む。このループはその 2 つの待ち行列を拾って送り、送信できたものに印を付ける。送信できなかった行は印が付かないまま残り、次の周回で再び拾われる。
+When server publishes an article it enqueues one article_discord_posts row with message_id = NULL per destination channel, and one article_subscription_notices row with sent_at = NULL per subscriber of the article's tags. This loop drains those two queues, sends, and marks what it managed to send. A row that could not be sent stays unmarked and is picked up again on the next pass.
 
-ここでは記事を公開してよいかどうかを判断しない。行が積まれていることが「server が公開を確定させた」という事実であり、bot はそれを送るだけである。状態を見て送信を取りやめる判断を bot に持たせると、公開の権威が 2 箇所に分かれる。
+Nothing here decides whether an article may be published. The enqueued row *is* the fact that server committed the publication, and the bot only sends it. Letting the bot inspect state and call off a send would split the authority over publishing across two places.
 
-送信の間隔・スレッドを開き直す対象の日数・速報の mention 先は settings 表から周回のたびに読み直す。いずれも管理者が画面から変更でき、変更のたびに bot の再起動を要求しないため。記事 URL とカバー画像の絶対 URL に使う base_url だけは実行環境と一体であるため Config から取る。
+The send interval, the day window for reopening threads and the breaking-news mention target are re-read from the settings table on every pass, because an admin can change each of them from the admin screen and no change may require a bot restart. Only base_url — used for the article URL and the absolute cover image URL — comes from Config, since it is bound to the runtime environment.
 """
 
 from __future__ import annotations
@@ -25,14 +25,14 @@ from .embeds import ArticleView, OutgoingMessage, build_channel_message, build_s
 
 logger = logging.getLogger(__name__)
 
-# 1 周回で処理する行数の上限。1 回の周回を短く保ち、大量の滞留があっても他方の待ち行列やループ全体を待たせないための区切りであって、処理しきれなかった行は次の周回で続きから拾われる。
+# Max rows handled in one pass. The cut keeps a single pass short so a large backlog cannot make the other queue, or the loop as a whole, wait; rows left over are picked up where they stopped on the next pass.
 POST_BATCH_LIMIT: Final = 50
 DM_BATCH_LIMIT: Final = 100
 
-# スレッドが自動アーカイブされるまでの分数。7 日は Discord が許す最長で、コメントの受け皿である以上できるだけ開けておく(アーカイブされても履歴は読めるが、新たなコメントは付かなくなる)。
+# Minutes until a thread auto-archives. 7 days is the longest Discord allows, and since the thread is what catches comments it should stay open as long as possible (an archived thread can still be read, but takes no new comments).
 THREAD_AUTO_ARCHIVE_MINUTES: Final = 10080
 
-# 設定そのものを読み取れなかったときに次の周回まで待つ秒数。本来の間隔は設定の中にあるため、それが読めない間は本来の間隔を知る術がない。DB の瞬断や初期値の未投入で読めない状態は復旧しうるので、短めの一定間隔で読み直す。
+# Seconds to wait for the next pass when the settings themselves could not be read. The real interval lives in the settings, so while they cannot be read there is no way to know it. A DB blip or seed values not yet bootstrapped are recoverable states, so re-read at a short fixed interval.
 SETTINGS_RETRY_SECONDS: Final = 30
 
 _ARTICLE_SQL: Final = """
@@ -75,7 +75,7 @@ _SET_THREAD_SQL: Final = 'UPDATE article_discord_posts SET thread_id = %s WHERE 
 
 _MARK_SEEDED_SQL: Final = 'UPDATE article_discord_posts SET reactions_seeded_at = NOW() WHERE id = %s'
 
-# 送信は済んだが投票用の絵文字を付け損ねた行。付け損ねたままだと、読者はその記事にだけ絵文字パレットから投票することになる。スレッドの作り直しと同じく、送信済みの行は未送信の待ち行列に現れないため、ここで拾い直さないと永久に付かない。
+# Rows that were sent but where the vote reactions failed to go on. Left that way, readers have to reach for the emoji picker to vote on that one article. As with retrying thread creation, a sent row never shows up in the unsent queue, so unless it is picked up here the reactions are never added.
 _PENDING_REACTIONS_SQL: Final = """
     SELECT id, channel_id, message_id
       FROM article_discord_posts
@@ -86,7 +86,7 @@ _PENDING_REACTIONS_SQL: Final = """
      LIMIT %s
 """
 
-# 送信は済んだがスレッドの作成だけが失敗した行。message_id が埋まった行は未送信の待ち行列に現れないため、ここで拾い直さないとコメント欄が永久に開かない。投票とコメントを照合する期間を過ぎた行は対象から外す(いつまでも開こうとし続けないための打ち切りであり、その頃には記事も読まれていない)。
+# Rows that were sent but where only thread creation failed. A row with message_id filled in never shows up in the unsent queue, so unless it is picked up here the comment thread never opens. Rows past the window over which votes and comments are reconciled are excluded: a cutoff so the bot does not keep trying to open threads forever, and by then nobody is reading the article either.
 _PENDING_THREADS_SQL: Final = """
     SELECT id, article_id, channel_id, message_id
       FROM article_discord_posts
@@ -97,7 +97,7 @@ _PENDING_THREADS_SQL: Final = """
      LIMIT %s
 """
 
-# 未送信の購読 DM。どのタグの購読で届いたのかを本文に書くため、記事のタグと購読者の購読タグの交わりを併せて引く。
+# Unsent subscription DMs. The body states which tag subscription delivered it, so the intersection of the article's tags and the subscriber's subscribed tags is fetched alongside.
 _PENDING_NOTICES_SQL: Final = """
     SELECT n.article_id, n.user_id, u.discord_user_id,
            MIN(n.enqueued_at) AS first_enqueued_at,
@@ -121,9 +121,9 @@ _MARK_NOTICE_SENT_SQL: Final = """
 
 
 async def run_delivery_loop(client: discord.Client, db: Database, config: Config, store: SettingsStore) -> None:
-    """publish_poll_interval_seconds ごとに 2 つの待ち行列を掃き出す。
+    """Drain the two queues every publish_poll_interval_seconds.
 
-    設定は周回のたびに読み直す。例外はここで握り潰して次の周回へ進む。設定を読めなかっただけでこのループが死ぬと、以降どの記事の通知も DM も二度と送られない(server は公開を続けるため、待ち行列だけが伸び続ける)。
+    Settings are re-read on every pass. Exceptions are swallowed here and the loop moves on to the next pass: if it died merely because the settings could not be read, no notification post and no DM would ever be sent again for any article (server keeps publishing, so the queues would only grow).
     """
     await client.wait_until_ready()
     while True:
@@ -142,8 +142,8 @@ async def run_delivery_loop(client: discord.Client, db: Database, config: Config
 
 
 async def deliver_pending(client: discord.Client, db: Database, config: Config, settings: RuntimeSettings) -> None:
-    """未送信の通知・スレッド・購読 DM を 1 周回分だけ処理する。"""
-    # 1 つの記事が複数のチャンネルへ通知されるため、同じ周回では記事を引き直さない。
+    """Handle one pass worth of unsent notification posts, threads and subscription DMs."""
+    # One article is notified to several channels, so within a pass an article is never fetched twice.
     cache: dict[int, ArticleView | None] = {}
     await _post_pending_notifications(client, db, config, settings, cache)
     await _open_pending_threads(client, db, settings, cache)
@@ -166,9 +166,9 @@ async def _article(db: Database, cache: dict[int, ArticleView | None], article_i
 
 
 async def _text_channel(client: discord.Client, channel_id: int) -> discord.TextChannel | None:
-    """通知の宛先として使えるテキストチャンネルを引く。
+    """Look up a text channel usable as a notification destination.
 
-    通知メッセージにはコメント用のスレッドを開くため、メッセージを送れるだけでなくメッセージからスレッドを作れる種類でなければならない。アナウンスチャンネルもここに含まれる。
+    A comment thread is opened on every notification post, so the channel must not only accept messages but be of a kind that can create a thread from one. Announcement channels qualify too.
     """
     channel = await resolve_channel(client, channel_id)
     if channel is None:
@@ -198,7 +198,7 @@ async def _post_one(client: discord.Client, db: Database, config: Config, settin
         return
 
     message = await channel.send(**_send_kwargs(build_channel_message(config, settings, article)))
-    # 送信の直後に message_id を確定させる。スレッドの作成や絵文字の付与を待ってから書くと、その間に落ちた場合に次の周回で同じ記事をもう一度送ってしまう。読者にとって二重投稿は取り返しがつかないが、スレッドが開かれない・絵文字が付かない状態はいずれも次の周回で回復できる。ここから下で例外が出ても送信済みの記録は残る、という順序に意味がある。
+    # Commit message_id immediately after sending. Writing it only after the thread is created and the reactions are added would, if the bot died in between, send the same article again on the next pass. A double post is irreversible for readers, whereas a thread that never opened and reactions that never went on both recover on the next pass. The ordering is the point: an exception below this line still leaves the sent record behind.
     updated = await db.execute(_MARK_POSTED_SQL, message.id, row['id'])
     if updated == 0:
         logger.error('記事 %s のチャンネル %s への通知を送信しましたが、既に送信済みとして記録されていました。メッセージ %s が重複している可能性があります。', row['article_id'], row['channel_id'], message.id)
@@ -209,23 +209,23 @@ async def _post_one(client: discord.Client, db: Database, config: Config, settin
 
 
 def _send_kwargs(message: OutgoingMessage) -> dict[str, Any]:
-    """OutgoingMessage を discord.py の送信引数へ写す。mention の許可は常に明示して渡す。"""
+    """Map an OutgoingMessage onto discord.py's send arguments. allowed_mentions is always passed explicitly."""
     return {'content': message.content, 'embed': message.embed, 'allowed_mentions': message.allowed_mentions}
 
 
 async def _seed_votes(db: Database, message: discord.Message, post_id: int) -> None:
-    """通知メッセージへ投票用の絵文字を付け、付け終えたことを記録する。
+    """Add the vote reactions to a notification post and record that they went on.
 
-    付けられなければ記録しないまま戻る。その行は待ち行列に残り、次の周回で拾い直される。絵文字が無くても読者は自分で付けられるため、ここで失敗しても通知そのものは成立する。
+    If they cannot be added, return without recording; the row stays in the queue and is picked up again on the next pass. Readers can add the reactions themselves, so a failure here still leaves the notification post itself valid.
     """
     if await votes.seed(message):
         await db.execute(_MARK_SEEDED_SQL, post_id)
 
 
 async def _open_thread(db: Database, message: discord.Message, article: ArticleView, post_id: int) -> None:
-    """通知メッセージにコメント用のスレッドを開き、thread_id を記録する。
+    """Open the comment thread on a notification post and record thread_id.
 
-    コメントは Discord のスレッドで受け、DB が持つのはその写しであるため、ここで開かないとその記事にコメントする場所が無くなる。既にスレッドが付いているメッセージには作り直さず、そのスレッドを記録する(前の周回でスレッドの作成には成功し、記録の前に落ちた場合に二重に開くのを避ける)。
+    Comments are taken in the Discord thread and the DB holds only a mirror of them, so unless the thread is opened here the article has nowhere to be commented on. A message that already carries a thread is not given a second one; its existing thread is recorded instead, which avoids opening a duplicate when an earlier pass created the thread but died before recording it.
     """
     thread = message.thread
     if thread is None:
@@ -258,7 +258,7 @@ async def _open_thread_for_posted(client: discord.Client, db: Database, cache: d
 
 
 async def _seed_pending_votes(client: discord.Client, db: Database, settings: RuntimeSettings) -> None:
-    """投票用の絵文字を付け損ねた通知を拾い直す。"""
+    """Pick up notification posts whose vote reactions failed to go on."""
     rows = await db.fetch_all(_PENDING_REACTIONS_SQL, settings.discord.bot.count_reconcile_window_days, POST_BATCH_LIMIT)
     for row in rows:
         try:
@@ -268,7 +268,7 @@ async def _seed_pending_votes(client: discord.Client, db: Database, settings: Ru
             try:
                 message = await channel.fetch_message(int(row['message_id']))
             except discord.NotFound:
-                # 通知そのものが消された。付ける先が無いため、この行を待ち行列から外す(次の周回で拾い直しても同じ結果になる)。
+                # The notification post itself was deleted. Nothing is left to react to, so drop the row from the queue; picking it up again on the next pass would only reach the same result.
                 await db.execute(_MARK_SEEDED_SQL, row['id'])
                 continue
             await _seed_votes(db, message, int(row['id']))
@@ -297,7 +297,7 @@ async def _send_one_dm(client: discord.Client, db: Database, config: Config, cac
         try:
             user = await client.fetch_user(discord_user_id)
         except discord.NotFound:
-            # 退会したアカウントは以後も取得できない。再試行しても永久に成功しないため送信済みとして畳む。
+            # A deleted account can never be fetched again, so a retry would never succeed; fold the row away as sent.
             logger.warning('Discord ユーザー %s が存在しないため、記事 %s の購読 DM を送信済みとして扱います。', discord_user_id, row['article_id'])
             await db.execute(_MARK_NOTICE_SENT_SQL, row['article_id'], row['user_id'])
             return
@@ -305,8 +305,8 @@ async def _send_one_dm(client: discord.Client, db: Database, config: Config, cac
     try:
         await user.send(**_send_kwargs(build_subscription_dm(config, article, row['matched_tags'])))
     except discord.Forbidden:
-        # DM を受け付けない設定・ブロック・共通のサーバーが無い場合。相手の設定である以上、待っても解消しない。
-        # ここで送信済みにしないと同じ相手へ永久に再試行し続け、待ち行列が詰まる。
+        # DMs are turned off, the bot is blocked, or there is no Discord server in common. That is the recipient's own setting, so waiting will not clear it.
+        # Not marking it sent here would retry the same recipient forever and clog the queue.
         logger.info('Discord ユーザー %s は DM を受け付けないため、記事 %s の購読 DM を送信済みとして扱います。', discord_user_id, row['article_id'])
     else:
         logger.info('記事 %s の購読 DM を Discord ユーザー %s へ送信しました。', row['article_id'], discord_user_id)

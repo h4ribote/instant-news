@@ -1,14 +1,14 @@
-"""Discord クライアントと、ゲートウェイのイベントの受け口。
+"""Discord client, and where every gateway event lands.
 
-この bot が Discord から受け取るものは、すべてここに集める。各リスナは自分では何も決めず、写しを保つ 2 つの部品(GuildMirror / CountMirror)へ渡すだけである。どのイベントを購読しているかが 1 箇所で読み取れないと、intents の不足で「例外も出ないのに何も届かない」状態を見つけられない。
+Everything this bot receives from Discord is collected here. A listener decides nothing on its own: it only hands the event to the two parts that keep the mirror (GuildMirror / CountMirror). Unless the set of subscribed events is readable in one place, a missing intent gives "no exception, yet nothing arrives" and there is no way to find it.
 
-起動するタスク:
-  delivery                    … 公開された記事の通知とタグ購読者への DM を送る(DB の待ち行列を周期的に見に行く)。
-  roles.reconcile             … ロール・メンバー・オーナーの照合。
-  counts.drain                … 印の付いた投稿の投票を数え直し、スレッドの履歴からコメントを補正する。
-  counts.reconcile            … 投票とコメントの照合。
+Tasks started here:
+  delivery          - posts notifications for published articles and DMs tag subscribers (polls the DB queue periodically).
+  roles.reconcile   - reconciles roles, members and the owner.
+  counts.drain      - recounts votes on marked posts and repairs comments from the thread history.
+  counts.reconcile  - reconciles votes and comments.
 
-delivery だけが周期的に「見に行く」作りなのは、それを駆動するイベントが Discord に無いためである。記事を公開したのは server であり、Discord はそれを知らない。残りはすべて Discord 側の出来事であり、イベントとして届く。
+Only delivery polls, because Discord has no event that would drive it: the server published the article and Discord does not know about it. Everything else happens on Discord's side and arrives as an event.
 """
 
 from __future__ import annotations
@@ -34,36 +34,36 @@ logger = logging.getLogger(__name__)
 
 
 def _naive(value: datetime | None) -> datetime | None:
-    """Discord の時刻を、DATETIME 列に合わせて UTC の naive へ落とす(規約は server/app/schemas.py と同じ)。"""
+    """Drop a Discord timestamp to UTC-naive to match the DATETIME columns (same convention as server/app/schemas.py)."""
     if value is None:
         return None
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 class NewsBot(discord.Client):
-    """送信ループとゲートウェイのイベントのリスナを抱える Discord クライアント。
+    """Discord client holding the delivery loop and the gateway event listeners.
 
-    DB と設定は起動側が用意して渡す。トークンは settings 表にあり、それを読むには Discord へ繋ぐ前から DB が要るため、DB の接続と後始末はこのクラスではなく起動側が持つ。
+    The DB and the settings are built by the caller and passed in. The bot token lives in the settings table, so reading it needs the DB before anything connects to Discord; connecting and tearing down the DB therefore belongs to the caller, not to this class.
     """
 
     def __init__(self, config: Config, db: Database, settings: SettingsStore) -> None:
-        # 必要な intents だけを有効にする。有効にしていないイベントは、例外も警告も無く、ただ届かない。
-        #   guilds         … ロールとチャンネルの解決、ロールの作成・更新・削除、guild の更新(オーナーの移譲)。
-        #   members        … メンバーの参加・離脱・更新と、その取り寄せ。特権 intent であり、Discord の開発者ポータルで有効にする必要がある。
-        #   guild_messages … スレッドの返信の投稿・編集・削除。
-        #   guild_reactions… リアクションの追加・削除・全消し。投票はこれで届く。
-        #   message_content… コメントの本文。2 つ目の特権 intent であり、開発者ポータルで有効にする必要がある。
-        # DM 側(dm_messages / dm_reactions)は有効にしない。通知もスレッドも guild の中にあり、購読 DM は送るだけで反応を数えない。
+        # Enable only the intents that are needed. An event whose intent is off simply never arrives - no exception, no warning.
+        #   guilds          - resolving roles and channels, role create/update/delete, guild update (owner transfer).
+        #   members         - member join/leave/update, and member chunking. A privileged intent: it must be enabled in Discord's developer portal.
+        #   guild_messages  - thread reply create/edit/delete.
+        #   guild_reactions - reaction add/remove/clear. Votes arrive through this.
+        #   message_content - the body of a comment. The second privileged intent, also enabled in the developer portal.
+        # The DM intents (dm_messages / dm_reactions) stay off: notifications and threads all live inside the guild, and subscription DMs are only sent - no reactions on them are counted.
         #
-        # 特権 intent は、要求しておいて開発者ポータルで有効にしていないと Discord がゲートウェイを切る。したがって設定漏れは起動時に PrivilegedIntentsRequired として必ず露見する(main.py がその案内を出す)。逆に、要求しなければ何も起きずに本文だけが空文字で届くため、本文が要るなら必ず要求する側に倒す。
+        # A privileged intent that is requested but left off in the developer portal makes Discord cut the gateway, so forgetting the portal switch always surfaces at startup as PrivilegedIntentsRequired (main.py prints the instructions). Not requesting one fails silently instead - the body just arrives as an empty string - so if the body is needed, always err on the side of requesting it.
         intents = discord.Intents.none()
         intents.guilds = True
         intents.members = True
         intents.guild_messages = True
         intents.guild_reactions = True
         intents.message_content = True
-        # メッセージのキャッシュを持たない。この bot はリアクションと削除を raw のイベントで受け、必要なメッセージはそのつど取得し直すため、キャッシュ上のメッセージを一度も読まない。既定では直近 1000 件を抱え続けることになり、使わないものにメモリを払うだけである。
-        # raw でないイベント(on_reaction_add など)はキャッシュに載っているメッセージでしか発火しない。この bot が追う通知は最大で count_reconcile_window_days 日前のものでありキャッシュに載っていないため、そもそも当てにできない。それらを使っていないことが、この指定で明示される。
+        # No message cache. This bot takes reactions and deletions as raw events and re-fetches any message it needs, so it never reads a cached one; the default would hold the last 1000 messages, paying memory for something unused.
+        # Non-raw events (on_reaction_add and friends) fire only for messages that are in the cache. The notification posts this bot follows can be up to count_reconcile_window_days days old and are never cached, so those events could not be relied on anyway - this setting makes it explicit that they are not used.
         super().__init__(intents=intents, max_messages=None)
         self.config = config
         self.db = db
@@ -74,11 +74,11 @@ class NewsBot(discord.Client):
         self._tasks: list[asyncio.Task[None]] = []
 
     async def setup_hook(self) -> None:
-        """接続の確立後、ゲートウェイの受信を始める前に呼ばれる。ここで常駐タスクを起動する。
+        """Called once the connection is up, before the gateway starts delivering events. The long-running tasks are started here.
 
-        照合をこの 4 本のうちの 1 つとして持つのは、イベントのリスナの中で照合を始めると、ゲートウェイが短時間に何度も張り直したときに照合が積み重なるためである。リスナは要求を出すだけで、走らせるのは常にこのタスクである。
+        Reconcile is one of these four tasks rather than something a listener runs, because starting a reconcile inside a listener would let reconciles pile up when the gateway re-establishes its session repeatedly in a short window. A listener only files a request; this task is always what runs it.
 
-        各タスクは設定を周回のたびに読み直すため、ここで渡すのは値ではなく SettingsStore である。
+        Each task re-reads the settings on every pass, so what is passed here is the SettingsStore, not values.
         """
         self._tasks = [
             asyncio.create_task(run_delivery_loop(self, self.db, self.config, self.settings), name='delivery'),
@@ -88,60 +88,56 @@ class NewsBot(discord.Client):
         ]
 
     async def close(self) -> None:
-        """常駐タスクを止め、Discord との接続を閉じる。DB を開いたのは起動側であるため、閉じるのも起動側が行う。"""
+        """Stop the long-running tasks and close the Discord connection. The caller opened the DB, so the caller closes it too."""
         for task in self._tasks:
             task.cancel()
         if self._tasks:
-            # キャンセルが行き渡るのを待つ。待たずに接続を閉じると、送信や照合の途中だったタスクが閉じたコネクションを掴んで無用な例外を出す。
+            # Wait for the cancellations to land. Closing the connection without waiting leaves a task that was mid-delivery or mid-reconcile holding a closed connection and raising pointless exceptions.
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
         await super().close()
 
     async def on_error(self, event_method: str, /, *args: Any, **kwargs: Any) -> None:
-        """リスナが送出した例外の後始末。
+        """Cleanup for an exception raised by a listener.
 
-        discord.py は例外を握り潰して次のイベントへ進み、Discord はそのイベントを再送しない。すなわち失敗した 1 件の変更は、放っておくと永久に写しへ入らない。ここで照合を促すことで、握り潰されたイベントが次の照合の間隔ではなく直ちに正される。DB が落ちている間は照合も失敗するが、要求は 1 回にまとまるため、復旧後の最初の照合で正される。
+        discord.py swallows it and moves on to the next event, and Discord never redelivers that event: left alone, the one change that failed would never reach the mirror. Requesting a reconcile here repairs the swallowed event immediately instead of at the next reconcile interval. While the DB is down the reconcile fails too, but the requests coalesce into one, so the first reconcile after recovery repairs it.
         """
         logger.exception('イベント %s の処理で例外が発生しました。取りこぼした変更を補正するため照合を要求します。', event_method)
         self.roles.request_reconcile(f'{event_method} の処理に失敗したため')
         self.counts.request_reconcile(f'{event_method} の処理に失敗したため')
 
-    # ------------------------------------------------------------------
-    # 接続
-    # ------------------------------------------------------------------
+    # Connection
 
     async def on_ready(self) -> None:
-        """ゲートウェイの新しいセッションが確立したときに呼ばれる。
+        """Called when a new gateway session has been established.
 
-        再接続のたびに呼ばれるわけではない。回線が一時的に切れただけなら discord.py は同じセッションを再開(RESUME)し、その間のイベントは Discord が再送するため、呼ばれるのは on_resumed であり補正は要らない。セッションを張り直した(再 IDENTIFY した)場合はその間のイベントが失われているため、ここで照合を要求する。bot が停止していた間の変更もこれで補正される。
+        Not called on every reconnect. If the link merely dropped for a moment, discord.py resumes the same session (RESUME) and Discord redelivers the events from the gap, so on_resumed fires instead and nothing needs repairing. When the session was re-established (a re-IDENTIFY), the events from the gap are gone, so a reconcile is requested here; that also repairs changes made while the bot was down.
 
-        1 つのプロセスで何度も呼ばれうる(Discord がセッションを無効にするたびに起こる)。照合は何度要求しても 1 回にまとまり、走らせるのは常に 1 本のタスクであるため、ここでは重複を気にしなくてよい。
+        This can fire many times in one process, every time Discord invalidates the session. Reconcile requests coalesce into one and a single task always runs it, so duplicates do not matter here.
         """
         logger.info('Discord へ接続しました: %s。', self.user)
         self.roles.request_reconcile('ゲートウェイの新しいセッションを確立したため')
         self.counts.request_reconcile('ゲートウェイの新しいセッションを確立したため')
 
     async def on_guild_available(self, guild: discord.Guild) -> None:
-        """Discord 側の障害などで見えなくなっていた guild が戻ったときに呼ばれる。
+        """Called when a guild that had gone invisible - during a Discord-side outage, say - comes back.
 
-        見えなかった間のイベントは届いていないが、セッションは張り直されないため on_ready は呼ばれない。ここで要求しないと、その間の変更が次の照合の間隔まで(あるいは再起動まで)残る。
+        Events from that window never arrived, but the session is not re-established, so on_ready does not fire. Without a request here, the changes from that window would sit unmirrored until the next reconcile interval, or until a restart.
         """
         self.roles.request_reconcile(f'guild {guild.id} が利用可能に戻ったため')
         self.counts.request_reconcile(f'guild {guild.id} が利用可能に戻ったため')
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
-        """bot が guild へ招待されたときに呼ばれる。対象の guild であれば、その時点の全ロール・全メンバーを写す。"""
+        """Called when the bot is invited to a guild. If it is the target guild, every role and member is mirrored as of that moment."""
         self.roles.request_reconcile(f'guild {guild.id} へ参加したため')
 
-    # ------------------------------------------------------------------
-    # ロール・メンバー・オーナー
-    # ------------------------------------------------------------------
+    # Roles, members, owner
 
     async def on_guild_role_create(self, role: discord.Role) -> None:
         await self.roles.apply_role_upsert(role)
 
     async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
-        # 権限(permissions)の変更もここで届く。ロールを持つ人が変わらなくても、そのロールが Administrator を得た・失った瞬間に、保有者全員の管理者資格が変わる。
+        # Permission changes arrive here too. Even with the same people holding the role, the moment it gains or loses Administrator every holder's admin eligibility changes.
         await self.roles.apply_role_upsert(after)
 
     async def on_guild_role_delete(self, role: discord.Role) -> None:
@@ -151,28 +147,25 @@ class NewsBot(discord.Client):
         await self.roles.apply_member_upsert(member)
 
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
-        # ロールの付与・剥奪はここで届く。イベントは変更後の全ロールを運ぶため、差分を自分で求めずに after をそのまま写す。
+        # Role grants and revokes arrive here. The event carries the full post-change role set, so mirror `after` as it is rather than working out a delta.
         await self.roles.apply_member_upsert(after)
 
     async def on_raw_member_remove(self, payload: discord.RawMemberRemoveEvent) -> None:
-        # 非 raw の on_member_remove はキャッシュに居るメンバーの離脱でしか呼ばれない。離脱は権限の剥奪そのものであり、キャッシュの状態に左右されてはならないため raw で受ける。
+        # The non-raw on_member_remove fires only for a member that is in the cache. Leaving the guild is a revocation of permission in itself and must not depend on cache state, so take the raw event.
         await self.roles.apply_member_remove(payload.user, payload.guild_id)
 
     async def on_user_update(self, before: discord.User, after: discord.User) -> None:
-        # 表示名・アバターの変更。記事の署名に使うため写す。
+        # Display name and avatar changes. Mirrored because the article byline uses them.
         await self.roles.apply_user_update(after)
 
     async def on_guild_update(self, before: discord.Guild, after: discord.Guild) -> None:
-        # オーナーの移譲だけを見る。guild の名前やアイコンは写していない。
+        # Only the owner transfer is watched; the guild's name and icon are not mirrored.
         if before.owner_id != after.owner_id:
             await self.roles.apply_owner_change(after)
 
-    # ------------------------------------------------------------------
-    # 投票とコメント
-    #
-    # どのリスナも印を付けるだけで、数を読み書きしない(理由は counts の docstring を参照)。
-    # 対象外の guild やスレッドの id が混ざっても、行を引く時点で落ちるだけであるため、ここでは選り分けない。
-    # ------------------------------------------------------------------
+    # Votes and comments.
+    # Every listener below only marks; none of them reads or writes a count (see the counts docstring for why).
+    # IDs from a guild or thread we do not track are not sorted out here: they simply match no row when the row is looked up.
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         self.counts.mark_message(payload.message_id)
@@ -181,32 +174,32 @@ class NewsBot(discord.Client):
         self.counts.mark_message(payload.message_id)
 
     async def on_raw_reaction_clear(self, payload: discord.RawReactionClearEvent) -> None:
-        # メッセージのリアクションが全て外された。
+        # Every reaction on the message was removed.
         self.counts.mark_message(payload.message_id)
 
     async def on_raw_reaction_clear_emoji(self, payload: discord.RawReactionClearEmojiEvent) -> None:
-        # ある絵文字のリアクションだけが全て外された。何件外れたかは運ばれないため、数え直すほかない。
+        # Every reaction of one emoji was removed. The event does not carry how many went, so there is nothing to do but recount.
         self.counts.mark_message(payload.message_id)
 
     async def on_message(self, message: discord.Message) -> None:
-        # スレッドへの投稿だけがコメントである。通知そのもの(親チャンネルのメッセージ)は開始メッセージであり、スレッドの中には現れない。
+        # Only a post inside a thread is a comment. The notification post itself (the message in the parent channel) is the thread's starter message and never appears inside the thread.
         if not await self.comments.apply_upsert(message):
             return
-        # 写せたということは記事のコメント欄への投稿である。読者が 1 押しで投票できるよう、ここで絵文字を付ける。
+        # Mirroring it means it is a post in an article's comment thread. Seed the vote reactions here so a reader can vote with one press.
         if await votes.seed(message):
             await self.comments.mark_seeded(message.id)
 
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
-        # コメントの編集。payload.message は discord.py が組み立てた Message であり、content は必ず str である(本文を運ばない部分的な更新であっても、この属性は空文字になるだけで欠けない)。写していない投稿の編集なら 0 行が更新されて終わる。
+        # A comment was edited. payload.message is a Message assembled by discord.py, and its content is always a str: a partial update that carries no body leaves the attribute as an empty string rather than dropping it. Editing a post we never mirrored just updates 0 rows.
         await self.comments.apply_edit(payload.message_id, payload.message.content, _naive(payload.message.edited_at))
 
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
-        # 消されたのが通知そのものか、コメントかは、ここでは区別しない。両方の可能性を伝え、どちらの行が該当するかは引く時点で決まる。
+        # Whether what was deleted is the notification post itself or a comment is not distinguished here. Both possibilities are passed on, and which row it was falls out when the row is looked up.
         await self.comments.apply_delete([payload.message_id])
         self.counts.mark_message(payload.message_id)
 
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
-        # まとめて削除された場合。1 件ずつの削除イベントは届かないため、これを購読しないと消えたコメントが残り続ける。
+        # A bulk delete. The individual delete events do not arrive, so without subscribing to this, deleted comments would stay in the mirror forever.
         await self.comments.apply_delete(list(payload.message_ids))
         for message_id in payload.message_ids:
             self.counts.mark_message(message_id)

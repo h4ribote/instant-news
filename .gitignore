@@ -4,7 +4,7 @@ __pycache__/
 
 local/
 config.yaml
-# compose へ渡す DB の資格情報。config.yaml と同じく秘密であり、追跡すると変更されないまま本番へ出る。
+# DB credentials passed to compose. Secret like config.yaml, and tracking it would ship the committed values to production unchanged.
 .env
 
 .venv/

@@ -1,45 +1,40 @@
 /*
- * instant-news の画面の共通部品。api.js が HTTP の層(fetch・JSON・ID の文字列化)を担うのに対し、
- * こちらは DOM の層を担う。ヘッダのアカウント欄・グローバルナビ・利用者やタグの見た目の断片など、
- * 複数のページが同じ見た目で描くものを 1 箇所に集める。
+ * Shared UI parts for instant-news. api.js owns the HTTP layer (fetch, JSON, stringifying IDs); this file owns the DOM layer.
+ * It collects in one place what several pages have to render identically: the header's account area, the global nav, and the presentational snippets for users and tags.
  *
- * ここに集約する前は、これらの関数が全ページへ写し取られていた。写し取られたものは食い違う。実際、利用者の
- * アバターを組み立てる avatarHtml は、admin / settings / tag / publisher では存在しない user.avatar_url を参照
- * していたために一度も実画像を出せず頭文字へ黙って落ちており、index / article / editor では avatar_hash から
- * URL を組み立てる正しい実装が、三者三様の書き方で並んでいた。同じものを 1 つ持てば、この種のずれは構造的に
- * 起こらない。
+ * Before this was centralized these functions were copied into every page, and copies drift. avatarHtml is the proof: on admin / settings / tag / publisher it read user.avatar_url, a field that does not exist, so it never once produced a real image and fell back to the initial silently, while index / article / editor each built the URL from avatar_hash correctly but in three different ways. Holding one copy makes that class of drift structurally impossible.
  *
- * api.js と同じく、ID は必ず文字列として扱う。数値化するとスノーフレークの下位桁が黙って壊れる。
+ * As in api.js, IDs are always handled as strings: converting one to a number silently corrupts the low digits of a snowflake.
  */
 
 import { get, post, me, qs, escapeHtml, mediaVariant } from '/static/js/api.js';
 
-// Discord がアバター未設定のアカウントへ割り当てる既定アバターの種類数。ハッシュを持たない利用者はこの剰余で絵が決まるが、その URL の組み立ては呼び出し側の関心ではないため、ここでは頭文字へ落とす(既定アバターは誰にとっても同じ数種類の絵であり、頭文字の方が誰であるかを表す)。
+// Discord gives an account with no avatar set one of a fixed number of default avatars, chosen by a modulus over that count. Building that URL is not the caller's concern here, so a user with no hash falls back to the initial instead: every default avatar is one of the same few pictures for everyone, whereas the initial says who the user is.
 
-/** ログインへの導線。認証を終えたら今見ているページへ戻す。戻り先は現在のパスとクエリ(ハッシュはサーバーへ送られないため含めない)。 */
+/** The login entry point. Once auth is done, return to the page being viewed: redirect_to is the current path and query (the fragment is never sent to the server, so it cannot be included). */
 export function loginUrl() {
   return '/auth/login' + qs({ redirect_to: location.pathname + location.search });
 }
 
 /**
- * CSS の url() の値そのもの。URL は記事・利用者・タグに由来するため、JSON.stringify で CSS 文字列としての引用符とバックスラッシュを潰す。
- * **要素の style プロパティへ直接代入する場合(el.style.backgroundImage = ...)はこちらを使う。**HTML を経由しない代入に cssUrl を使うと、エスケープした &quot; がそのまま CSS の文字列へ入り、値ごと無効になって画像が出ない。
+ * A bare CSS url() value. The URL comes from article, user or tag data, so JSON.stringify neutralizes quotes and backslashes for the CSS string.
+ * **Use this when assigning straight to an element's style property (el.style.backgroundImage = ...).** Using cssUrl for an assignment that never passes through HTML puts the escaped &quot; into the CSS string itself, invalidating the whole value so no image appears.
  */
 export function cssUrlRaw(url) {
   return `url(${JSON.stringify(String(url))})`;
 }
 
 /**
- * style 属性へ HTML として差し込む url()。**innerHTML で組み立てる断片にはこちらを使う。**
- * JSON.stringify が CSS 文字列としての引用符とバックスラッシュを潰し、escapeHtml が属性値としての引用符を潰す。二段で囲わないと、引用符を含む URL から style 属性の外へ抜け出せてしまう。
+ * A url() interpolated into a style attribute as HTML. **Use this for snippets built with innerHTML.**
+ * JSON.stringify neutralizes quotes and backslashes for the CSS string, and escapeHtml neutralizes quotes for the attribute value. Without both layers, a URL containing a quote can break out of the style attribute.
  */
 export function cssUrl(url) {
   return escapeHtml(cssUrlRaw(url));
 }
 
 /**
- * 文字列の ID から配色の連番(prefix1..prefixN)を決める。同じ相手には常に同じ色が付く。
- * ID は文字列のまま畳む(数値化するとスノーフレークの下位桁が壊れ、別人へ同じ色が付きうる)。
+ * Derives the palette number (prefix1..prefixN) from a string ID, so the same subject always gets the same colour.
+ * The ID is folded as a string: converting it to a number corrupts the low digits of a snowflake, which can give two different people the same colour.
  */
 export function paletteClass(prefix, count, key) {
   const s = String(key == null ? '' : key);
@@ -48,7 +43,7 @@ export function paletteClass(prefix, count, key) {
   return prefix + (n + 1);
 }
 
-/** 一覧の応答から配列を取り出す。応答が配列そのものでも、ページ情報を伴うオブジェクト({items|<key>: [...]})でも受け取れるようにする。 */
+/** Pulls the array out of a listing response, accepting either a bare array or an object carrying page info ({items|<key>: [...]}). */
 export function listOf(data, key) {
   if (Array.isArray(data)) return data;
   if (data && Array.isArray(data.items)) return data.items;
@@ -56,15 +51,15 @@ export function listOf(data, key) {
   return [];
 }
 
-/** 利用者の表示名。Discord の表示名があればそれを、無ければユーザー名を出す。 */
+/** A user's display name: Discord's display name when there is one, otherwise the username. */
 export function displayName(user) {
   if (!user) return '';
   return user.global_name || user.username || '';
 }
 
 /**
- * 利用者のアバター画像の URL。既定アバター(avatar_hash を持たない)の利用者には null を返し、呼び出し側が頭文字で代替する。
- * ハッシュが a_ で始まるものはアニメーション付きで拡張子が異なる。ID は文字列のまま URL へ入れる。
+ * URL of a user's avatar image. Returns null for a user on the default avatar (no avatar_hash) so the caller can substitute the initial.
+ * A hash starting with a_ is animated and takes a different extension. The ID goes into the URL as a string.
  */
 export function avatarUrl(user) {
   if (!user || !user.avatar_hash || !user.discord_user_id) return null;
@@ -73,8 +68,8 @@ export function avatarUrl(user) {
 }
 
 /**
- * 利用者のアバターの断片。画像があれば背景に、無ければ頭文字を出す。extraStyle を渡すと寸法などを重ねられる。
- * user は discord_user_id と avatar_hash(と表示名)を持つ形。id は色の決定に使うが、無ければ表示名から決める。
+ * A user's avatar snippet: the image as a background if there is one, otherwise the initial. Passing extraStyle layers on dimensions and the like.
+ * user is the shape holding discord_user_id and avatar_hash (and the display name). The id decides the colour, falling back to the display name when absent.
  */
 export function avatarHtml(user, extraStyle = '') {
   const name = displayName(user);
@@ -89,8 +84,8 @@ export function avatarHtml(user, extraStyle = '') {
 }
 
 /**
- * 報道社のロゴ。未設定なら社名の頭文字を出す。
- * ロゴが出る最大の枠は報道社ページの見出しの 72px であり、400w で足りる。取り込みを経ていない外部ホストの URL(管理画面で手入力できる)は mediaVariant がそのまま通す。
+ * A publisher's logo, falling back to the initial of the publisher name when unset.
+ * The largest box the logo appears in is the 72px heading on the publisher page, so 400w is enough. URLs on external hosts that never went through ingest (the admin screen allows typing one in by hand) are passed straight through by mediaVariant.
  */
 export function pubLogoHtml(pub) {
   if (!pub) return '';
@@ -99,22 +94,21 @@ export function pubLogoHtml(pub) {
   return `<span class="pub-logo ${paletteClass('p', 4, pub.slug || pub.id || pub.name)}">${initial}</span>`;
 }
 
-/** タグのアイコン。未設定なら何も出さない(意味の無い記号で埋めない)。14px の枠であり、原寸を落とす理由が無い。 */
+/** A tag's icon; nothing at all when unset (do not fill the space with a meaningless glyph). The box is 14px, so there is no reason to pull the original size. */
 export function tagIconHtml(tag) {
   if (!tag || !tag.icon_url) return '';
   return `<span class="tag-icon ph" style="background-image:${cssUrl(mediaVariant(tag.icon_url, '400w'))}"></span>`;
 }
 
 /**
- * サーバーが返したエラーの文言を取り出す。エラーの応答は {"error": {"code", "message"}} の形であり、
- * ApiError.message はこの形から文言を拾わない(本文の detail / message / error が文字列である場合だけを見る)ため、本文から直に読む。
- * どの操作がなぜ失敗したのかはサーバーが日本語で返す。これを握り潰して定型文だけを出すと、利用者は原因に辿り着けない。
+ * Pulls the message out of an error the server returned. Error responses have the shape {"error": {"code", "message"}}, and ApiError.message does not read a message out of that shape (it only looks at the response body's detail / message / error when they are strings), so read the body directly.
+ * The server states in Japanese which operation failed and why. Swallow that and print only a canned line, and the user cannot reach the cause.
  */
 export function errorMessage(e) {
   const body = e && e.body;
   const err = body && body.error;
   if (err && typeof err.message === 'string' && err.message !== '') return err.message;
-  // 入力の検証に落ちた要求は FastAPI が {"detail": [{loc, msg}, ...]} の形で返す。ApiError.message は detail が文字列のときしか拾わないため、配列はここで畳む。どの項目がなぜ弾かれたのかは、この配列にしか書かれていない。
+  // FastAPI returns a request that failed input validation as {"detail": [{loc, msg}, ...]}. ApiError.message picks detail up only when it is a string, so the array is collapsed here. Which item was rejected and why is written nowhere but this array.
   const detail = body && body.detail;
   if (Array.isArray(detail)) {
     const parts = detail.map((d) => (d && d.msg ? `${(d.loc || []).join('.')}: ${d.msg}` : JSON.stringify(d))).filter(Boolean);
@@ -124,14 +118,14 @@ export function errorMessage(e) {
 }
 
 /**
- * 機能系の導線(タグ・連載・管理・記事を書く)。カテゴリ以外でナビへ並ぶものはここが唯一の出どころであり、青帯とドロワーの双方をこの一覧から描く。
+ * The utility links (tags, series, admin, write an article). Everything that sits in the nav and is not a category originates here alone, and both the nav bar and the drawer are drawn from this list.
  *
- * 以前はこれらが各ページの HTML へ直書きされており、トップだけが タグ・連載・記事を書く の 3 つを持ち、残る 6 ページは 記事を書く だけを持っていた。同じ帯が同じ場所で違うものを出していたわけで、これは chrome.js が存在する理由そのものの再演である。描く先が 2 つ(青帯とドロワー)へ増える今、出どころを 1 つにしないと食い違いは倍に増える。
+ * These used to be hardcoded into each page's HTML: home carried three of them (tags, series, write an article) while the remaining six pages carried only write an article. The same bar was showing different things in the same place — a replay of the very reason chrome.js exists. Now that there are two places to draw them (the nav bar and the drawer), anything but a single origin doubles the divergence.
  *
- * 管理への導線は管理者にだけ出す。判定はサーバーが返す is_admin をそのまま使い、画面側でロールから組み立て直さない(管理者は guild のオーナー・Administrator 権限を持つロール・管理ロールのいずれかで決まり、その規則を画面へ写すと二重管理になる)。導線を出さないことは権限の代わりにはならない。/admin を直接開くことは妨げないが、設定の API が要求のたびに管理者資格を検査して拒否する。
+ * The admin link is shown to admins only. The check uses the is_admin the server returns as-is; the UI never reassembles it from roles, because an admin is the guild owner, or holds a role with the Administrator permission, or holds an admin role, and duplicating that rule in the UI means maintaining it in two places. Withholding the link is no substitute for permission: opening /admin directly is not prevented, but the settings API checks admin eligibility on every request and refuses.
  */
 function utilLinks(viewer) {
-  // タグ・連載はトップの中の節であり、他のページからは / を経由して辿る。トップに居るときだけ素の断片にするのは、?q= や ?series= で絞り込んだ状態を保ったまま節へ送るため(/#tags と書くとクエリが落ち、絞り込みが解ける)。
+  // tags and series are anchor sections inside home; every other page reaches them via /. The link is a bare fragment only while on home, so that a view narrowed by ?q= or ?series= keeps its filter when jumping to the section — writing /#tags would drop the query and clear the filter.
   const home = location.pathname === '/' ? '' : '/';
   const links = [
     { href: `${home}#tags`, label: 'タグ', kind: 'util' },
@@ -142,7 +136,7 @@ function utilLinks(viewer) {
   return links;
 }
 
-/** 機能系の導線を青帯の右側(spacer の後ろ)へ並べる。現在地は自分のパスで決める。 */
+/** Lays the utility links out on the right of the nav bar, after the spacer. The current location is decided from the page's own path. */
 function mountUtilLinks(viewer) {
   const nav = document.querySelector('[data-globalnav]');
   if (!nav) return;
@@ -154,8 +148,8 @@ function mountUtilLinks(viewer) {
 }
 
 /**
- * ヘッダのアカウント欄を描く。ログイン済みなら利用者名とログアウト、未ログインならログインの導線を出す。
- * acct を付けた要素はスマホで白帯から降り、ドロワーが同じものを引き取る(style.css の .masthead .actions .acct)。白帯にはロゴと 🔍 🌙 ☰ しか残らない。
+ * Renders the header's account area: the user name and logout when signed in, the login entry point when not.
+ * On phones the elements marked acct come out of the masthead and the drawer takes over the same ones (.masthead .actions .acct in style.css), leaving the masthead with nothing but the logo and 🔍 🌙 ☰.
  */
 function mountAccount(actions, viewer) {
   if (!actions) return;
@@ -164,7 +158,7 @@ function mountAccount(actions, viewer) {
     return;
   }
   const user = viewer.user || viewer;
-  // 利用者名は設定へ、その隣にログアウト。ログアウトの経路(POST /auth/logout)はどのページからも要るが、これまではトップにしか無かった。
+  // The user name links to settings, with logout beside it. The logout route (POST /auth/logout) is needed from every page, but until now existed only on home.
   actions.insertAdjacentHTML(
     'afterbegin',
     `<a class="publisher acct" href="/settings">${avatarHtml(user)}${escapeHtml(displayName(user))}</a>` +
@@ -173,14 +167,14 @@ function mountAccount(actions, viewer) {
   wireLogout(actions);
 }
 
-/** ログアウトの押下を結線する。白帯とドロワーの双方に同じ導線が居るため、両方から呼ぶ。 */
+/** Wires up presses of logout. The same entry point lives in both the masthead and the drawer, so this is called from both. */
 function wireLogout(root) {
   root.querySelectorAll('[data-logout]').forEach((el) => {
     el.addEventListener('click', async () => {
       try {
         await post('/auth/logout');
       } catch (e) {
-        // 失敗しても読み込み直す。状態はサーバーから取り直すため、破棄できていなければログイン済みのまま表示され、利用者に伝わる。
+        // Reload even on failure. The state is re-fetched from the server, so a session that was not destroyed still renders as signed in and the user is told as much.
         console.error('ログアウトに失敗しました', e);
       }
       location.reload();
@@ -189,10 +183,10 @@ function wireLogout(root) {
 }
 
 /**
- * グローバルナビへカテゴリ(記事の主分類)を position 順に足す。引けなくてもページ本体は読めるため、ナビだけを諦める。
+ * Appends the categories (an article's primary classification) to the global nav in position order. The page body still reads without them, so a failed fetch gives up on the nav alone.
  *
- * activeCategory にカテゴリの slug を渡すと、その欄を現在地として示し、併せてトップの現在地表示を降ろす(トップと欄の双方が現在地に見える状態を作らない)。渡された slug がどの欄にも当たらなければ何も動かさない。存在しない欄の URL を開いたときに、現在地がどこにも無いナビを出さないためである。
- * source には取得済みのカテゴリを渡せる(配列でも、まだ解決していない Promise でもよい)。記事一覧のために同じ一覧を既に引いているページが、二度目の要求を出さずに済むようにある。省けば自分で引く。
+ * Passing a category slug as activeCategory marks that section as the current location and clears the active marker from home, so home and the section are never both current. A slug matching no section moves nothing: opening the URL of a section that does not exist must not produce a nav whose current location is nowhere.
+ * source takes categories already fetched — an array, or a Promise not yet resolved — so a page that already pulled the same listing for its article list need not issue a second request. Omit it and this fetches them itself.
  */
 async function mountCategories(activeCategory, source) {
   const spacer = document.querySelector('[data-globalnav] .spacer');
@@ -215,10 +209,10 @@ async function mountCategories(activeCategory, source) {
 }
 
 /**
- * スマホのドロワー。青帯から降ろした機能系の導線と、白帯から降ろしたアカウント欄を引き取る。
+ * The phone drawer. It takes over the utility links dropped from the nav bar and the account area dropped from the masthead.
  *
- * 601px 以上では style.css が存在ごと消す(display: none)。閉じているだけにすると、広い画面で Tab を送った利用者が見えない導線の中へ潜り込む。
- * 中身は utilLinks から描くため、青帯と食い違わない。
+ * At 601px and up style.css removes it altogether (display: none). Merely leaving it closed would let a user tabbing on a wide viewport wander into links they cannot see.
+ * Its contents are drawn from utilLinks, so it cannot diverge from the nav bar.
  */
 function mountDrawer(viewer) {
   const actions = document.querySelector('[data-actions]');
@@ -232,7 +226,7 @@ function mountDrawer(viewer) {
     const active = l.href === location.pathname ? ' class="active"' : '';
     return `<a href="${escapeHtml(l.href)}"${active}>${escapeHtml(l.label)}</a>`;
   }).join('');
-  // 設定とログアウトはログイン済みのときだけ意味を持つ。未ログインでは上のログイン導線が同じ場所を占める。
+  // Settings and logout mean something only when signed in. When signed out, the login entry point above occupies the same place.
   const tail = user
     ? '<span class="sep"></span><a href="/settings">⚙ 設定</a><button class="logout" type="button" data-logout>ログアウト</button>'
     : '';
@@ -255,7 +249,7 @@ function mountDrawer(viewer) {
   actions.insertAdjacentHTML('beforeend', '<button class="icon-btn" type="button" data-drawer-toggle aria-label="メニューを開く" aria-expanded="false">☰</button>');
   const toggle = actions.querySelector('[data-drawer-toggle]');
 
-  // 開く前に焦点を持っていた要素。閉じたらここへ返す。返さないと、ドロワーを閉じた利用者の焦点が文書の先頭へ飛び、キーボードで辿っていた位置を失う。
+  // The element that held focus before opening; focus returns here on close. Without that, closing the drawer throws the user's focus to the top of the document and loses the position they had reached by keyboard.
   let restoreFocus = null;
 
   function open() {
@@ -263,7 +257,7 @@ function mountDrawer(viewer) {
     drawer.classList.add('open');
     overlay.classList.add('open');
     toggle.setAttribute('aria-expanded', 'true');
-    // 背後の記事が指の下で流れないようにする。ドロワーの中身が長ければドロワー自身が縦に流れる(.drawer の overflow-y)。
+    // Keeps the article behind from scrolling under the finger. If the drawer's contents are long, the drawer itself scrolls vertically (overflow-y on .drawer).
     document.body.style.overflow = 'hidden';
     const first = drawer.querySelector('[data-drawer-close]');
     if (first) first.focus();
@@ -289,7 +283,7 @@ function mountDrawer(viewer) {
       return;
     }
     if (e.key !== 'Tab') return;
-    // 焦点をドロワーの中へ閉じ込める。閉じ込めないと、開いたまま Tab を送った利用者の焦点が背後の記事へ抜け、どこを触っているのか分からなくなる。
+    // Trap focus inside the drawer. Without the trap, tabbing while it is open takes focus out into the article behind and the user can no longer tell what they are touching.
     const items = drawer.querySelectorAll('a[href], button:not([disabled])');
     if (items.length === 0) return;
     const first = items[0];
@@ -303,15 +297,15 @@ function mountDrawer(viewer) {
     }
   });
 
-  // 画面が広がったらドロワーを畳む。開いたまま 601px を跨ぐと、style.css がドロワーを消す一方で body の overflow: hidden だけが残り、閉じる手段が無いままページが縦に固まる。
+  // Close the drawer once the viewport widens. Crossing 601px while it is open leaves style.css hiding the drawer while body overflow: hidden survives on its own, freezing the page's vertical scroll with no way left to close it.
   window.addEventListener('resize', () => {
     if (window.innerWidth > 600 && drawer.classList.contains('open')) close();
   });
 }
 
 /**
- * スマホの検索の開閉。白帯はロゴとアカウント欄で埋まるため検索欄を常設できず、🔍 の押下まで畳んでおく。
- * 開いた検索欄は折り返してロゴの下に自分の行を取る(style.css の [data-search-open] .search)。
+ * The phone search toggle. The masthead is filled by the logo and the account area, leaving no room for a permanent search field, so it stays folded away until 🔍 is pressed.
+ * Once open, the search field wraps onto a row of its own below the logo ([data-search-open] .search in style.css).
  */
 function mountSearchToggle() {
   const masthead = document.querySelector('.masthead');
@@ -331,7 +325,7 @@ function mountSearchToggle() {
     }
   });
 
-  // 検索語を伴って開かれたページでは、初めから開いておく。畳んだままだと、「『◯◯』の検索結果」と出ているのに何で絞ったのかが読めず、直す手段も無い。
+  // Open from the start on a page opened with a search term. Left folded away, the page announces search results for a term the user can neither read back nor correct.
   const input = search.querySelector('input');
   if (input && input.value) {
     masthead.setAttribute('data-search-open', '');
@@ -341,15 +335,15 @@ function mountSearchToggle() {
 }
 
 /**
- * カテゴリの帯の端に、続きがあることを示すフェードを出す。
- * カテゴリはデプロイごとに数が異なり、狭幅では必ず溢れる。溢れていることが見えなければ、読者は最初の数欄しか無いものとして扱う。
- * 幅が足りているときはどちらの端も付けない(続きが無いのにあるように見せない)。
+ * Fades the ends of the category bar to show that it continues.
+ * The number of categories differs per deployment and always overflows at narrow widths. If the overflow is invisible, readers treat the first few sections as all there is.
+ * Neither end is faded when the width is sufficient, so nothing suggests more where there is none.
  */
 function mountNavFade() {
   const nav = document.querySelector('[data-globalnav]');
   if (!nav) return;
   const update = () => {
-    // 端ちょうどで 1px 未満の誤差が残る環境があるため、遊びを持たせて判定する。
+    // Some environments leave a sub-pixel error exactly at the end, so the check keeps 1px of slack.
     const max = nav.scrollWidth - nav.clientWidth;
     nav.classList.toggle('fade-start', nav.scrollLeft > 1);
     nav.classList.toggle('fade-end', nav.scrollLeft < max - 1);
@@ -357,7 +351,7 @@ function mountNavFade() {
   update();
   nav.addEventListener('scroll', update, { passive: true });
   window.addEventListener('resize', update);
-  // 現在地の欄が溢れた先に居ることがある(カテゴリが多い環境で末尾の欄を開いた場合)。開いた時点で見えていないと、どこに居るのか分からない。
+  // The current section can sit beyond the overflow (a trailing section opened where there are many categories). If it is not visible on load, the reader cannot tell where they are.
   const active = nav.querySelector('a.active');
   if (active) {
     active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -366,12 +360,12 @@ function mountNavFade() {
 }
 
 /**
- * ヘッダのアカウント欄・機能系の導線・グローバルナビのカテゴリ・スマホのドロワーと検索を結線する。
- * `data-actions`(ヘッダの操作群)と `data-globalnav`(青帯のナビ、中に `.spacer` を持つ)を備えたページで使う。
+ * Wires up the header's account area, the utility links, the global nav's categories, and the phone drawer and search.
+ * For pages carrying `data-actions` (the header's action group) and `data-globalnav` (the nav bar, holding a `.spacer`).
  *
- * viewer は呼び出し側が取得済みなら渡す(GET /api/me を二度引かないため)。渡されなければ自分で取得する。取得できないときはログインの導線を出す(ログイン済みだと誤って見せるより、もう一度ログインを促す方が害が無い)。
- * options.activeCategory は現在地として示す欄の slug、options.categories は取得済みのカテゴリ(配列または Promise)。どちらも mountCategories がそのまま受ける。
- * 戻り値は解決した viewer(未ログインなら null)。呼び出し側は続けて自分の画面を描くのにこれを使える。
+ * Pass viewer when the caller has already fetched it, so GET /api/me is not pulled twice; otherwise this fetches it. When it cannot be fetched, the login entry point is shown: prompting for a login again does less harm than wrongly showing someone as signed in.
+ * options.activeCategory is the slug of the section to mark as the current location; options.categories is already-fetched categories (array or Promise). mountCategories takes both as-is.
+ * Returns the resolved viewer (null when signed out), which the caller can use to go on and render its own page.
  */
 export async function mountChrome(viewer, { activeCategory = null, categories } = {}) {
   let resolved = viewer;
@@ -386,7 +380,7 @@ export async function mountChrome(viewer, { activeCategory = null, categories } 
   mountUtilLinks(resolved);
   mountSearchToggle();
   mountDrawer(resolved);
-  // カテゴリはネットワークを待つため最後に置く。帯の端のフェードは、カテゴリが並び終わって初めて正しい幅を測れる。
+  // Categories go last because they wait on the network. The fade at the ends of the bar can only measure the right width once the categories are laid out.
   await mountCategories(activeCategory, categories);
   mountNavFade();
   return resolved;

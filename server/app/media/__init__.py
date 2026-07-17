@@ -1,6 +1,7 @@
-"""画像の取り込み・変換・保存。
+"""Image ingest, conversion, and storage.
 
-責務を 4 つに分ける。store は内容アドレスでの実体の読み書き、fetch は外部からの取得(SSRF 対策)、transcode は復号と WebP への再符号化、service はそれらを繋ぐ取り込みの流れである。分けているのは、fetch と transcode がそれぞれ独立に「信用できない入力を扱う境界」であり、混ぜると何をどこで検査したのかが追えなくなるためである。
+Four responsibilities: store reads and writes blobs by content address, fetch retrieves bytes from remote hosts (SSRF defence), transcode decodes and re-encodes to WebP, and service is the ingest flow that ties them together.
+They stay separate because fetch and transcode are each independently a boundary handling untrusted input, and merging them loses track of what was checked where.
 """
 
 from __future__ import annotations

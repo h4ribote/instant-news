@@ -1,10 +1,10 @@
-"""HTTP API の要求・応答の pydantic モデル。
+"""pydantic models for the HTTP API's requests and responses.
 
-ID は必ず文字列で受け渡す。DB の BIGINT も Discord のスノーフレークも 64bit であり、JavaScript の Number は 2^53 までしか整数を正確に表せない。JSON に数値として載せると下位の桁が黙って書き換わり、壊れた ID はエラーにならず「存在しない記事」「別のユーザー」として振る舞う。応答に載る ID は IdOut、要求で受け取る ID は IdIn を使う。IdIn が数値を受け付けないのは、クライアント側で既に精度を失った値を、こちら側では検出できないためである。
+IDs always cross the wire as strings. A DB BIGINT and a Discord snowflake are both 64-bit, and JavaScript's Number represents integers exactly only up to 2^53: carried as a JSON number, the low digits are silently rewritten, and the corrupted ID does not raise an error but behaves as an article that does not exist or as a different user. Use IdOut for IDs in a response and IdIn for IDs in a request. IdIn refuses numbers because a value that already lost precision on the client cannot be detected here.
 
-日時は DB の DATETIME に合わせて UTC の naive として扱い、JSON では ISO 8601 の Z 付きで出す(UtcDateTime)。
+Datetimes are handled as naive UTC to match the DB's DATETIME and emitted in JSON as ISO 8601 with a trailing Z (UtcDateTime).
 
-*Write のモデルは作成(POST)と部分更新(PATCH)の両方で使うため、全ての項目を省略可能にしてある。「省略された」と「明示的に null を指定した」の区別は pydantic の model_fields_set で行う(payload.model_fields_set に項目名があれば指定されたということ)。作成時に必須となる項目の検査はサービス層が行う。
+The *Write models serve both creation (POST) and partial update (PATCH), so every field is optional. Telling "omitted" from "explicitly set to null" is done with pydantic's model_fields_set (the field name being in payload.model_fields_set means it was specified). The service layer checks the fields that creation requires.
 """
 
 from __future__ import annotations
@@ -18,20 +18,18 @@ from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Fie
 from common.settings import SettingKind, SettingRef
 from common.snowflake import to_snowflake
 
-# --------------------------------------------------------------------------
-# 共通の値の型
-# --------------------------------------------------------------------------
+# Shared value types
 
 
 def _validate_id_text(value: str) -> str:
-    """ID の文字列を検証し、10 進表記へ正規化する。"""
+    """Validate an ID string and normalize it to decimal notation."""
     return str(to_snowflake(value))
 
 
 def _coerce_id_text(value: Any) -> Any:
-    """応答へ載せる ID を文字列へ寄せる。
+    """Coerce an ID bound for a response into a string.
 
-    DB の行は ID を int で返すため、そのまま渡されても JSON には必ず文字列で出るようにする。文字列であることを型として強制するだけでは、int を渡した箇所が検証エラーになるだけで、数値が漏れる余地は残らない。ここで受け止めておけば「応答に数値の ID が載る」ことが構造的に起こらない。
+    DB rows hand back IDs as int, so absorb them here and make JSON always carry a string. Enforcing str as the type alone would merely turn every site that passes an int into a validation error, leaving no room for a number to leak; absorbing it here makes a numeric ID in a response structurally impossible.
     """
     if isinstance(value, bool):
         raise ValueError('ID に真偽値は使えません。')
@@ -40,41 +38,41 @@ def _coerce_id_text(value: Any) -> Any:
     return value
 
 
-# 要求で受け取る ID。文字列のみを受ける。
+# An ID received in a request. Strings only.
 IdIn = Annotated[str, AfterValidator(_validate_id_text)]
-# 応答へ出す ID。int も受けて必ず文字列へ正規化する。
+# An ID emitted in a response. Also accepts int and always normalizes to a string.
 IdOut = Annotated[str, BeforeValidator(_coerce_id_text), AfterValidator(_validate_id_text)]
 
-# 画面に何も描かない文字の Unicode カテゴリ。Cc は制御、Cf は書式(U+200B のゼロ幅空白・U+FEFF・双方向制御など)、Co は私用領域、Cs はサロゲートである。
+# Unicode categories of characters that draw nothing on screen. Cc is control, Cf is format (the U+200B zero-width space, U+FEFF, bidi controls and the like), Co is private use, Cs is surrogate.
 _INVISIBLE_CATEGORIES: Final[frozenset[str]] = frozenset({'Cc', 'Cf', 'Co', 'Cs'})
 
 
 def visible_text(value: str) -> str:
-    """表示可能な文字だけを残した形を返す。値が実質的に空かどうかの判定に使う。
+    """Return the value reduced to its displayable characters. Used to decide whether a value is effectively empty.
 
-    str.strip() では足りない。strip が落とすのは str.isspace() が真の文字だけであり、U+200B(ゼロ幅空白)や U+FEFF は isspace() が偽であるため、strip を通しても残って「空でない文字列」として振る舞う。一方これらは画面上に何も描かないため、開示や識別のために名前を要求する項目では、空白のみの値と区別する意味がない。
+    str.strip() is not enough. strip only removes characters for which str.isspace() is true, and U+200B (zero-width space) and U+FEFF are not isspace(), so they survive strip and masquerade as a non-empty string. Yet they draw nothing on screen, so for a field that requires a name for disclosure or identification there is no point telling them apart from a whitespace-only value.
 
-    NFKC で互換文字を畳んでから不可視のカテゴリを落とし、前後の空白を除いた結果を返す。空文字列が返るなら、その値は読み手にとって何も表示しない。
+    Folds compatibility characters with NFKC, drops the invisible categories, and strips surrounding whitespace. An empty result means the value shows the reader nothing.
     """
     normalized = unicodedata.normalize('NFKC', value)
     return ''.join(char for char in normalized if unicodedata.category(char) not in _INVISIBLE_CATEGORIES).strip()
 
 
 def _require_visible_text(value: str) -> str:
-    """表示可能な文字を 1 文字以上含むことを要求する。値そのものは書き換えない(表記は書いた側のものである)。"""
+    """Require at least one displayable character. The value itself is never rewritten (how it is spelled belongs to whoever wrote it)."""
     if not visible_text(value):
         raise ValueError('表示できる文字を 1 文字以上含めてください。空白やゼロ幅文字だけの値は指定できません。')
     return value
 
 
-# 表示可能な文字を 1 文字以上含む文字列。読み手に何かを示すことが要件である項目に使う。
+# A string holding at least one displayable character. For fields where showing the reader something is a requirement.
 VisibleStr = Annotated[str, AfterValidator(_require_visible_text)]
 
 
 def _as_naive_utc(value: datetime) -> datetime:
-    """タイムゾーン付きの値を UTC へ寄せ、tzinfo を落とす。
+    """Convert an aware value to UTC and drop its tzinfo.
 
-    MySQL の DATETIME はタイムゾーンを持たない。tz 付きの値をそのまま渡すと、ドライバが tzinfo を無視して壁時計の値を書き込み、時刻が静かにずれる。tzinfo が無い値は既に UTC とみなす。
+    MySQL's DATETIME carries no timezone. Passing an aware value straight through makes the driver ignore the tzinfo and write the wall-clock value, silently shifting the time. A value without tzinfo is already taken to be UTC.
     """
     if value.tzinfo is None:
         return value
@@ -82,39 +80,39 @@ def _as_naive_utc(value: datetime) -> datetime:
 
 
 def _isoformat_z(value: datetime) -> str:
-    """UTC の naive な値を ISO 8601(Z 付き)で表記する。"""
+    """Render a naive UTC value as ISO 8601 with a trailing Z."""
     aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
     return aware.isoformat(timespec='seconds').replace('+00:00', 'Z')
 
 
-# 日時。入力は UTC の naive へ寄せ、出力は必ず Z 付きの ISO 8601 にする。
+# A datetime. Input is coerced to naive UTC; output is always ISO 8601 with a trailing Z.
 UtcDateTime = Annotated[
     datetime,
     AfterValidator(_as_naive_utc),
     PlainSerializer(_isoformat_z, return_type=str, when_used='unless-none'),
 ]
 
-# 以下の Literal は DB の ENUM を写したもの。値の集合の真実は migrations/0001_initial.sql にある。
+# The Literals below mirror the DB's ENUMs. The source of truth for the value sets is migrations/0001_initial.sql.
 ArticleStatus = Literal['draft', 'in_review', 'scheduled', 'published', 'archived']
 Visibility = Literal['public', 'members', 'restricted']
 BylineMode = Literal['author', 'publisher']
 PublisherStance = Literal['independent', 'state']
 Scope = Literal['articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin']
 
-# slug は URL のパス断片としてそのまま出る。空白やパス・クエリの区切りに化ける文字を含めない。
+# A slug appears verbatim as a URL path segment, so it must hold no whitespace and no character that turns into a path or query separator.
 SLUG_PATTERN = r'^[^\s/?#&=%]+$'
 
 
 class _OutModel(BaseModel):
-    """応答本文の基底。DB の行(dict)や dataclass からそのまま組み立てられるようにする。"""
+    """Base for response bodies. Buildable directly from a DB row (dict) or a dataclass."""
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class _WriteModel(BaseModel):
-    """要求本文の基底。
+    """Base for request bodies.
 
-    未知のキーは黙って捨てず 422 で弾く。項目名を書き間違えた指定が「無視されて反映されない」形で通ると、送った側は成功したと解釈するため、誤りが発覚しない。
+    An unknown key is rejected with 422 rather than silently dropped. If a misspelled field name went through as ignored and unapplied, the sender would read that as success and the mistake would never surface.
     """
 
     model_config = ConfigDict(extra='forbid')
@@ -124,7 +122,7 @@ ItemT = TypeVar('ItemT')
 
 
 class Page(_OutModel, Generic[ItemT]):
-    """一覧の応答。total は絞り込み後の総件数。"""
+    """A listing response. total is the total count after filtering."""
 
     items: list[ItemT]
     page: int
@@ -133,13 +131,11 @@ class Page(_OutModel, Generic[ItemT]):
     has_next: bool
 
 
-# --------------------------------------------------------------------------
-# 利用者・ロール
-# --------------------------------------------------------------------------
+# Users and roles
 
 
 class UserBrief(_OutModel):
-    """記事の署名や所属記者の一覧に出す、利用者の最小限の表現。"""
+    """The minimal representation of a user, for an article's byline and for listings of a publisher's reporters."""
 
     id: IdOut
     discord_user_id: IdOut
@@ -149,14 +145,14 @@ class UserBrief(_OutModel):
 
 
 class UserOut(UserBrief):
-    """自分自身の情報。guild メンバーシップとオーナーかどうかは閲覧範囲と権限に直結するため見せる。"""
+    """Your own information. Guild membership and ownership are exposed because they bear directly on visibility and permissions."""
 
     is_guild_member: bool
     is_guild_owner: bool
 
 
 class RoleOut(_OutModel):
-    """Discord のロール。権限ビットフィールドは出さない(管理者かどうかは MeOut.is_admin として解決済みの形で渡す)。"""
+    """A Discord role. The permission bitfield is not exposed (whether you are an admin is handed over already resolved, as MeOut.is_admin)."""
 
     id: IdOut
     name: str
@@ -165,19 +161,17 @@ class RoleOut(_OutModel):
 
 
 class AdminRoleOut(RoleOut):
-    """管理画面が選択肢として並べる guild のロール。
+    """The guild roles the admin screen lists as choices.
 
-    is_administrator は discord_roles.permissions の Administrator ビットを解決した結果である。**権限ビットそのものは出さない。**画面がビットを解釈し始めると、管理者の定義が principals.is_admin と画面の 2 箇所に分かれ、必ずどちらかが取り残される(RoleOut が権限ビットを出さないのと同じ理由)。
+    is_administrator is the resolved Administrator bit of discord_roles.permissions. **The permission bits themselves are not exposed.** Once the UI starts interpreting bits, the definition of an admin splits between principals.is_admin and the UI, and one of the two is always left behind (the same reason RoleOut withholds the permission bits).
 
-    画面がこれを要るのは、管理ロール(admin.role_ids)の欄で「このロールは Administrator を持つため、ここへ入れなくても管理者として扱われる」ことを示すためである。それを示さないと、既に管理者であるロールを管理ロールへ足す無意味な操作を誘い、admin.role_ids が「なぜそこに居るのか分からないロール」で埋まる。
+    The UI needs this so the admin roles field (admin.role_ids) can show that a role holding Administrator is treated as an admin without being put there. Without that, adding an already-admin role to the admin roles looks like a useful thing to do, and admin.role_ids fills up with roles nobody can explain the presence of.
     """
 
     is_administrator: bool
 
 
-# --------------------------------------------------------------------------
-# 分類(カテゴリ・タグ・報道社・連載)
-# --------------------------------------------------------------------------
+# Taxonomy (categories, tags, publishers, series)
 
 
 class CategoryOut(_OutModel):
@@ -207,7 +201,7 @@ class TagOut(_OutModel):
 
 
 class TagDetailOut(TagOut):
-    """タグページに出す情報。"""
+    """The information shown on the tag page."""
 
     article_count: int
 
@@ -221,7 +215,7 @@ class TagWrite(_WriteModel):
 
 
 class PublisherOut(_OutModel):
-    """報道社。role_id は所属を表す Discord ロール。解散した報道社は role_id が NULL になる。"""
+    """A publisher. role_id is the Discord role that marks affiliation; a dissolved publisher has role_id NULL."""
 
     id: IdOut
     role_id: IdOut | None = None
@@ -242,7 +236,7 @@ class PublisherWrite(_WriteModel):
 
 
 class PublisherStats(_OutModel):
-    """報道社の実績。score はランキングの並び順そのものであり、算出の規則は PublisherRankingItem に述べたとおりである。"""
+    """A publisher's track record. score is the ranking order itself; the rule that computes it is stated on PublisherRankingItem."""
 
     article_count: int
     up_count: int
@@ -252,25 +246,25 @@ class PublisherStats(_OutModel):
 
 
 class PublisherDetailOut(PublisherOut):
-    """報道社のプロフィール・所属記者・実績。所属は role_id を保有する利用者から引く。"""
+    """A publisher's profile, reporters and track record. Affiliation is looked up from the users holding role_id."""
 
     members: list[UserBrief] = Field(default_factory=list)
     stats: PublisherStats
 
 
 class PublisherRankingItem(_OutModel):
-    """報道社ランキングの 1 行。
+    """One row of the publisher ranking.
 
-    score は記事ごとに次の規則で求めた値の合計である(賛成 up、反対 down、コメント数 c として)。
+    score is the sum of a value computed per article by the following rule (up-votes as up, down-votes as down, comment count as c).
 
-      ・2 × down ≥ up … その記事は叩かれている。score = up + c(反対は加えない)
-      ・2 × down < up  … 叩かれてはいない。score = up + (down ÷ 2 の切り捨て) + c(反対も関心の証として半分だけ加える)
+      - 2 × down ≥ up … the article is being piled on. score = up + c (down-votes are not added)
+      - 2 × down < up  … it is not being piled on. score = up + (down ÷ 2, floored) + c (down-votes are added at half weight, as evidence of interest)
 
-    反対が点数を引くことはない。反対は「読まれなかった」ことではなく「読まれたうえで反対された」ことの印であり、賛成に対して十分小さい限りは注目の大きさとして数える。一方で反対が賛成に迫るほど付いた記事は、その注目を実績として数えない。
+    Down-votes never subtract from the score. A down-vote marks "read, and disagreed with", not "not read", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record.
 
-    判定を記事ごとに行うのは、叩かれているかどうかが記事の性質だからである。報道社の合計に対して判定すると、1 本の炎上がその報道社の他の記事の評価まで一斉に変える。
+    The test runs per article because being piled on is a property of the article. Testing it against the publisher's totals would let a single pile-on change the rating of every other article of that publisher at once.
 
-    up_count / down_count / comment_count は期間内の素の合計であり、score の内訳ではない(score は記事ごとの判定を経ているため、この 3 つから再計算できない)。
+    up_count / down_count / comment_count are the raw totals over the period, not a breakdown of score (score passes through a per-article test, so it cannot be recomputed from these three).
     """
 
     publisher: PublisherOut
@@ -295,15 +289,13 @@ class SeriesOut(SeriesBrief):
     updated_at: UtcDateTime
 
 
-# --------------------------------------------------------------------------
-# 改版履歴
-# --------------------------------------------------------------------------
+# Revision history
 
 
 class RevisionListItem(_OutModel):
-    """改版の一覧に出す項目。
+    """An item in the revision listing.
 
-    editor は「誰の名前で書かれたか」、via_token_id は「どのキーが実際に投稿したか」であり、両者は別物である。articles:write:any が他人の署名で記事を出せる以上、後者が無いと説明責任が追えない。
+    editor is whose name it was written under; via_token_id is which key actually posted it. The two are different things. Since articles:write:any can publish an article under someone else's byline, accountability cannot be traced without the latter.
     """
 
     id: IdOut
@@ -318,28 +310,26 @@ class RevisionListItem(_OutModel):
 
 
 class RevisionOut(RevisionListItem):
-    """過去版そのもの。"""
+    """The past revision itself."""
 
     body_md: str
 
 
 class RevisionDiffOut(_OutModel):
-    """直前版との差分。diff は unified diff を行ごとに分けたもの。"""
+    """The diff against the immediately preceding revision. diff is a unified diff split into lines."""
 
     revision_number: int
     previous_revision_number: int | None = None
     diff: list[str]
 
 
-# --------------------------------------------------------------------------
-# 記事
-# --------------------------------------------------------------------------
+# Articles
 
 
 class ArticleListItem(_OutModel):
-    """一覧に出す記事。
+    """An article as it appears in a listing.
 
-    up_count / down_count / comment_count は当該記事の通知メッセージ全ての合計である(1 記事が複数のチャンネルへ通知されうるため)。score は up_count − down_count であり、負になりうる。読者へ見せる点数はこの差し引きであって、報道社ランキングの score とは別物である(そちらの規則は PublisherRankingItem を参照)。
+    up_count / down_count / comment_count are the totals across all of the article's notification posts (one article can be notified to several channels). score is up_count − down_count and may be negative. The score shown to readers is this subtraction, a different thing from the publisher ranking's score (for that rule see PublisherRankingItem).
     """
 
     id: IdOut
@@ -362,7 +352,7 @@ class ArticleListItem(_OutModel):
     view_count: int
     up_count: int
     down_count: int
-    # 読者へ見せる点数。up_count − down_count であり、負になりうる。
+    # The score shown to readers: up_count − down_count, and it may be negative.
     score: int
     comment_count: int
     published_at: UtcDateTime | None = None
@@ -371,28 +361,28 @@ class ArticleListItem(_OutModel):
 
 
 class DiscordPostOut(_OutModel):
-    """記事の通知メッセージ 1 件。1 記事が複数のチャンネルへ通知されうるため、記事詳細はこれを配列で持つ。
+    """One notification post for an article. One article can be notified to several channels, so the article detail holds an array of these.
 
-    thread_url を組み立てるのはサーバーである。Discord のスレッドの URL には対象 guild の ID が要り、それは設定(discord.guild_id)にしか無い。画面がこれを知る手段は無いため、URL を組み立てる責務を画面へ渡すことはできない。未送信(message_id が NULL)・スレッド未作成(thread_id が NULL)の行では null になる。
+    The server assembles thread_url. A Discord thread URL needs the target guild's ID, which exists only in the settings (discord.guild_id); the UI has no way to know it, so the job of assembling the URL cannot be handed to the UI. It is null on rows that are unsent (message_id NULL) or whose thread does not exist yet (thread_id NULL).
     """
 
     channel_id: IdOut
     message_id: IdOut | None = None
     thread_id: IdOut | None = None
-    # スレッドを開くための URL。thread_id が無ければ null(bot がまだスレッドを開いていない)。
+    # The URL for opening the thread. null when thread_id is absent (the bot has not opened the thread yet).
     thread_url: str | None = None
     up_count: int
     down_count: int
-    # この通知だけの点数(up_count − down_count)。負になりうる。
+    # The score for this notification post alone (up_count − down_count). May be negative.
     score: int
     comment_count: int
     posted_at: UtcDateTime | None = None
 
 
 class CommentAuthorOut(_OutModel):
-    """コメントの投稿者。
+    """The commenter.
 
-    users に居ない相手もいる(guild を抜けた利用者・他の bot・webhook)。その場合に返せるのは Discord のユーザー ID だけであり、username も avatar_hash も null になる。画面はその前提で組む必要がある。
+    Some are not in users (a user who left the guild, another bot, a webhook). For those, all that can be returned is the Discord user ID: username and avatar_hash are both null. The UI has to be built on that premise.
     """
 
     discord_user_id: IdOut
@@ -402,11 +392,11 @@ class CommentAuthorOut(_OutModel):
 
 
 class CommentOut(_OutModel):
-    """記事のコメント 1 件。実体は Discord スレッドの返信であり、これはその写しである。
+    """One comment on an article. The real comment is a reply in a Discord thread; this is a mirror of it.
 
-    body は Discord の本文をそのままの記法で持つ。サーバーは整形しない(Discord の記法をここで解釈し始めると、Discord 側の表示と食い違う二つ目の実装を抱えることになる)。画面は必ずエスケープして出す。
+    body holds the Discord message's content in Discord's own markup. The server does not format it (interpreting Discord's markup here would mean carrying a second implementation that disagrees with what Discord displays). The UI must always escape it before rendering.
 
-    score は up_count − down_count であり、負になりうる。
+    score is up_count − down_count and may be negative.
     """
 
     id: IdOut
@@ -421,9 +411,9 @@ class CommentOut(_OutModel):
 
 
 class CommentListOut(_OutModel):
-    """記事のコメントの一覧。
+    """The listing of an article's comments.
 
-    total は返した件数ではなく、その記事のコメントの総数である(画面が「もっと読む」を出すかどうかを決められるようにするため)。thread_url は Discord のスレッドへの入口であり、コメントを書く場所はそこしかない(この API は読み出しのみで、書き込みは受け付けない)。
+    total is not the number returned but the article's total comment count (so the UI can decide whether to offer a read-more control). thread_url is the entry point to the Discord thread, the only place a comment can be written (this API only reads, and accepts no writes).
     """
 
     items: list[CommentOut]
@@ -432,14 +422,14 @@ class CommentListOut(_OutModel):
 
 
 class ArticleOut(ArticleListItem):
-    """記事詳細。corrections は訂正として記録された改版の一覧で、記事面の冒頭に出す。"""
+    """An article's detail. corrections is the listing of revisions recorded as corrections, shown at the top of the article page."""
 
     body_md: str
     body_html: str | None = None
     visibility_role_ids: list[IdOut] = Field(default_factory=list)
     scheduled_at: UtcDateTime | None = None
     corrections: list[RevisionListItem] = Field(default_factory=list)
-    # 通知メッセージごとの参照。記事面が「スレッドを開く」導線と通知先の数を出すために使う。合計値である up_count / down_count / comment_count とは別に、内訳としてここに持つ。
+    # A reference per notification post. Used by the article page to render the open-thread entry point and the number of notification targets. Held here as the breakdown, separate from the totals up_count / down_count / comment_count.
     discord_posts: list[DiscordPostOut] = Field(default_factory=list)
 
 
@@ -448,11 +438,11 @@ class SeriesDetailOut(SeriesOut):
 
 
 class ArticleWrite(_WriteModel):
-    """記事の作成・更新の要求本文。
+    """Request body for creating or updating an article.
 
-    全ての項目が省略可能である。作成(POST)で必須となる title / body_md / category_id の検査、および指定してよいかどうかの判定(速報の権限、名乗れる報道社、他人を著者にできるか)はサービス層が行う。ここで表現できるのは形式だけであり、資格に依る規則は要求元の主体を知らないと判定できない。
+    Every field is optional. The service layer checks title / body_md / category_id, which creation (POST) requires, and decides what may be specified at all (permission to flag breaking news, which publisher may be published under, whether someone else can be made the author). Only format can be expressed here; a rule that turns on eligibility cannot be decided without knowing the principal the request came from.
 
-    tags はタグの slug の配列。ID ではなく slug で受けるのは、自動投稿するクライアントにとって安定して書ける識別子であるため。存在しない slug はサービス層がエラーにする(タグの新設は taxonomy:admin の管轄であり、記事の投稿で勝手に増やさない)。
+    tags is an array of tag slugs. Slugs rather than IDs, because a slug is an identifier an auto-posting client can write down stably. A slug that does not exist is turned into an error by the service layer (creating tags falls under taxonomy:admin; posting an article does not add them of its own accord).
     """
 
     title: str | None = Field(default=None, min_length=1, max_length=300)
@@ -469,29 +459,29 @@ class ArticleWrite(_WriteModel):
     byline_mode: BylineMode | None = None
     is_breaking: bool | None = None
     is_sponsored: bool | None = None
-    # 誰の広告かを読み手に示す値であるため、表示可能な文字を要求する。ゼロ幅文字だけの名前は「広告」ラベルだけを出して広告主を伏せることになり、開示の要件(is_sponsored=1 なら sponsor_name 必須)を形の上でだけ満たす。
+    # This value tells the reader whose ad it is, so it requires displayable characters. A name of nothing but zero-width characters would put out the Sponsored label alone while withholding the advertiser, meeting the disclosure requirement (is_sponsored=1 requires sponsor_name) in form only.
     sponsor_name: VisibleStr | None = Field(default=None, max_length=100)
     slug: str | None = Field(default=None, min_length=1, max_length=200, pattern=SLUG_PATTERN)
     status: ArticleStatus | None = None
     scheduled_at: UtcDateTime | None = None
     author_id: IdIn | None = None
-    # 改版に残すメモ。訂正の場合は何を訂正したかを書く。
+    # The note left on the revision. For a correction, write what was corrected.
     revision_note: str | None = Field(default=None, max_length=500)
     is_correction: bool | None = None
 
     @field_validator('tags', 'visibility_role_ids')
     @classmethod
     def _unique_items(cls, value: list[str] | None) -> list[str] | None:
-        """重複を畳む。article_tags / article_visibility_roles の主キーが (記事, 対象) であり、重複したまま挿入すると重複キーになる。"""
+        """Collapse duplicates. The primary key of article_tags / article_visibility_roles is (article, target), so inserting duplicates hits a duplicate key."""
         if value is None:
             return None
         return list(dict.fromkeys(value))
 
 
 class MediaFailure(_OutModel):
-    """記事の保存時に取り込めなかった画像。
+    """An image that could not be ingested while saving an article.
 
-    取り込めなかった URL は本文にそのまま残る(外部ホストの一時的な不調で記事が出せなくなってはならない)。残った以上、その URL はいずれ失効して画像が消えるため、黙って成功と扱わず必ず執筆者へ伝える。
+    A URL that failed to ingest stays in the body as it is (a temporary fault at a remote host must never stop an article going out). Since it stays, that URL will eventually expire and the image will vanish, so this is never silently treated as success: the writer is always told.
     """
 
     source_url: str
@@ -499,7 +489,7 @@ class MediaFailure(_OutModel):
 
 
 class ArticleSaveOut(_OutModel):
-    """記事の保存の応答。"""
+    """The response to saving an article."""
 
     article: ArticleOut
     media_failures: list[MediaFailure] = Field(default_factory=list)
@@ -508,13 +498,11 @@ class ArticleSaveOut(_OutModel):
 ArticleListOut: TypeAlias = Page[ArticleListItem]
 
 
-# --------------------------------------------------------------------------
-# 自分・API キー・購読
-# --------------------------------------------------------------------------
+# Me, API keys and subscriptions
 
 
 class MeOut(_OutModel):
-    """自分の情報。publishers は保有ロールから引ける所属報道社。"""
+    """Your own information. publishers are the publishers you are affiliated with, looked up from the roles you hold."""
 
     user: UserOut
     roles: list[RoleOut] = Field(default_factory=list)
@@ -524,7 +512,7 @@ class MeOut(_OutModel):
 
 
 class TokenOut(_OutModel):
-    """API キーの一覧に出す表現。生値は DB に無い(SHA-256 のみを保存する)ため返せない。"""
+    """The representation used in the API key listing. The raw value cannot be returned: it is not in the DB (only the SHA-256 is stored)."""
 
     id: IdOut
     token_prefix: str
@@ -537,51 +525,47 @@ class TokenOut(_OutModel):
 
 
 class TokenCreated(TokenOut):
-    """発行直後の応答。生値をこの応答でだけ返す。以後は二度と取り出せない。"""
+    """The response right after issuing a key. The raw value is returned in this response only; after that it can never be retrieved again."""
 
     token: str
 
 
 class TokenCreate(_WriteModel):
-    """API キーの発行要求。
+    """A request to issue an API key.
 
-    管理者スコープ(articles:write:any / ads:admin / taxonomy:admin / settings:admin)を発行できるのは、要求の時点で管理者資格を満たす者だけである。その検査はサービス層が行う。
+    Only someone who meets admin eligibility at the moment of the request may issue the admin scopes (articles:write:any / ads:admin / taxonomy:admin / settings:admin). The service layer performs that check.
 
-    settings:admin は管理ロール(admin.role_ids)を書き換えられる、すなわち管理者の資格そのものを配れるため、他のどのスコープよりも強い。これを与えたキーは実質的に管理者権限の委譲であり、他の管理者スコープのように「広告だけ」「分類だけ」と対象を限れない。
+    settings:admin can rewrite the admin roles (admin.role_ids), that is, hand out admin eligibility itself, which makes it stronger than any other scope. A key granted it is effectively a delegation of admin permissions, and its reach cannot be narrowed to ads only or taxonomy only the way the other admin scopes can.
     """
 
     name: str = Field(min_length=1, max_length=100)
     scopes: list[Scope] = Field(min_length=1)
-    # 期限は DATETIME の範囲を超える指定を弾くために上限を設ける。省略すると無期限。
+    # The expiry is capped so that a value beyond DATETIME's range is rejected. Omitted means no expiry.
     expires_days: int | None = Field(default=None, ge=1, le=3650)
 
     @field_validator('scopes')
     @classmethod
     def _unique_scopes(cls, value: list[Scope]) -> list[Scope]:
-        """重複を畳む。api_token_scopes の主キーが (token_id, scope) であり、重複したまま挿入すると重複キーになる。"""
+        """Collapse duplicates. The primary key of api_token_scopes is (token_id, scope), so inserting duplicates hits a duplicate key."""
         return list(dict.fromkeys(value))
 
 
-# --------------------------------------------------------------------------
-# 画像
-# --------------------------------------------------------------------------
+# Images
 
 
 class MediaOut(_OutModel):
-    """取り込んだ画像。url は配信 URL(/media/{hash}/{variant}.webp)。"""
+    """An ingested image. url is the delivery URL (/media/{hash}/{variant}.webp)."""
 
     id: IdOut
     content_hash: str
     url: str
 
 
-# --------------------------------------------------------------------------
-# 広告
-# --------------------------------------------------------------------------
+# Ads
 
 
 class AdSlotOut(_OutModel):
-    """広告枠。推奨寸法を返すのは、外部の管理アプリが入稿前に見え方を自前で再現できるようにするため。"""
+    """An ad slot. The recommended dimensions are returned so that an external management app can reproduce the appearance itself before submitting a creative."""
 
     id: IdOut
     slug: str
@@ -607,14 +591,14 @@ class AdOut(_OutModel):
 
 
 class AdWrite(_WriteModel):
-    """広告の入稿・更新。掲載を止めるのは is_active=false であり、行を消さない(実績を残すため)。"""
+    """Submitting or updating an ad. Stopping the run is is_active=false, not deleting the row (so the performance stats survive)."""
 
     slot_id: IdIn | None = None
     advertiser_name: str | None = Field(default=None, min_length=1, max_length=100)
     image_url: str | None = Field(default=None, min_length=1, max_length=1000)
     link_url: str | None = Field(default=None, min_length=1, max_length=1000)
     alt_text: str | None = Field(default=None, max_length=200)
-    # 重み付き抽選の重み。0 を許すと候補があるのに合計が 0 になる状態を作れてしまうため 1 以上とする(掲載を止めるなら is_active=false を使う)。
+    # The weight for the weighted random selection. Held at 1 or above because allowing 0 would let a state exist where candidates are present yet the weights total 0 (to stop the run, use is_active=false).
     weight: int | None = Field(default=None, ge=1)
     starts_at: UtcDateTime | None = None
     ends_at: UtcDateTime | None = None
@@ -622,7 +606,7 @@ class AdWrite(_WriteModel):
 
 
 class AdServed(_OutModel):
-    """配信された 1 件の広告。link_url ではなく click_url を返すのは、計測を挟むため。"""
+    """One served ad. click_url is returned rather than link_url so that click tracking can be interposed."""
 
     id: IdOut
     slot: str
@@ -633,7 +617,7 @@ class AdServed(_OutModel):
 
 
 class AdServeOut(_OutModel):
-    """枠に対する配信の応答。候補が無ければ ad は null。フロントはその場合に枠自体を消す。"""
+    """The serve response for a slot. ad is null when there is no candidate; the frontend then removes the slot itself."""
 
     ad: AdServed | None = None
 
@@ -651,64 +635,62 @@ class AdStatsOut(_OutModel):
     total_clicks: int
 
 
-# --------------------------------------------------------------------------
-# プラットフォームの設定
-# --------------------------------------------------------------------------
+# Platform settings
 
 
 class SettingOut(_OutModel):
-    """設定 1 つの定義と現在値。組み立てるのは common.settings の SettingsStore.describe である。
+    """One setting's definition and current value. Assembled by SettingsStore.describe in common.settings.
 
-    画面はこの応答から入力欄を生成する。定義(型・ラベル・説明・変更の可否)を値と一緒に返すのは、画面にキーを直書きさせないためである。直書きすると、設定を 1 つ足すたびに登録簿と画面の両方を直すことになり、片方を忘れた分だけが「設定できるのに画面に出ない」あるいは「画面に出るのに保存できない」状態で残る。
+    The UI generates its input fields from this response. The definition (kind, label, description, whether it is editable) is returned together with the value so that the UI never hardcodes keys. Hardcoded, every added setting would have to be fixed in both the registry and the UI, and whichever side was forgotten would be left settable but absent from the UI, or present in the UI but unsavable.
 
-    value は kind に応じた JSON の値であり、id は文字列、id_list は文字列の配列である。**secret が真の設定は value を必ず null にし、設定済みかどうかを is_set だけで示す。**生値を返した時点で、画面を開ける者すべてに bot のトークンが渡る。設定を読める資格と、秘密そのものを持ち出せることは別である。
+    value is a JSON value matching kind: id is a string, id_list an array of strings. **A setting whose secret is true always has value null and reports only is_set.** The moment the raw value is returned, the bot token is handed to everyone who can open the UI. Eligibility to read the settings and being able to carry off the secret itself are different things.
     """
 
     key: str
     kind: SettingKind
     label: str
     description: str
-    # 変更できない設定。画面は読み取り専用で表示し、変更できない理由は description が示す。
+    # A setting that cannot be changed. The UI renders it read-only, and description states why it cannot be changed.
     editable: bool
-    # 変更してもプロセスが読み直さない設定。反映には再起動が要る。
+    # A setting the process does not re-read when it changes. Taking effect requires a restart.
     restart_required: bool
     secret: bool
-    # ID がどの実体を指すか(kind が id / id_list の設定にだけ意味がある)。画面はこれを見て ID の直接入力の代わりに実体の選択 UI を出す。null なら選択肢を示せる実体が無く、ID を直接入力させる。
+    # Which entity an ID points at (meaningful only for settings whose kind is id / id_list). The UI reads this and offers an entity picker instead of direct ID entry. null means there is no entity whose choices can be listed, so the ID is entered directly.
     ref: SettingRef | None = None
-    # 値域(kind が int / number の設定にだけ意味がある)。画面が入力欄の制約として使う。exclusive_minimum が真なら minimum は「より大きい」であり、その値そのものは許されない。
+    # The range (meaningful only for settings whose kind is int / number). The UI uses it as the input field's constraint. When exclusive_minimum is true, minimum means greater than, and the value itself is not allowed.
     minimum: float | None = None
     exclusive_minimum: bool = False
     maximum: float | None = None
-    # kind に応じた値。secret の設定では常に null。
+    # The value, matching kind. Always null for a secret setting.
     value: Any = None
-    # 値が入っているか。secret の設定について、生値を返さずに設定済みかどうかだけを伝えるためにある。
+    # Whether a value is present. Exists so that a secret setting can report whether it is set without returning the raw value.
     is_set: bool
     updated_at: UtcDateTime | None = None
-    # 最後に変更した利用者。初期値の投入と CLI からの変更では null(どちらもプラットフォームの利用者による変更ではない)。
+    # The user who last changed it. null for the seeding of seed values and for changes from the CLI (neither is a change by a platform user).
     updated_by: IdOut | None = None
 
 
 class SettingsOut(_OutModel):
-    """設定の全件。並びは登録簿の順で、画面での並びが要求ごとに変わることはない。"""
+    """Every setting. The order is the registry's order, so the order in the UI never varies from request to request."""
 
     settings: list[SettingOut] = Field(default_factory=list)
 
 
 class SettingsUpdate(_WriteModel):
-    """設定の部分更新の要求本文。
+    """Request body for a partial update of the settings.
 
-    updates に載せたキーだけを変更し、省略したキーは現在の値のまま残す。**部分更新であることは、秘密の設定を「変更しない」と表現する唯一の手段でもある。**画面は秘密の生値を読めない以上、変更しない秘密を再送できず、全件を送る方式では秘密が必ず壊れる。
+    Only the keys carried in updates are changed; an omitted key keeps its current value. **Being a partial update is also the only way to express leaving a secret setting unchanged.** Since the UI cannot read a secret's raw value, it cannot resend a secret it is not changing, and a send-everything scheme would always corrupt the secrets.
 
-    値の型・値域・そのキーを変更してよいかの検査はここでは行わない。キーごとに型が異なり、その定義の真実は設定の登録簿(common.settings)にあるためである。ここに型を書くと定義が 2 箇所に分かれ、登録簿へ設定を足したときにここを直し忘れた分だけが、登録簿の検査に届く前に 422 で弾かれる。検査は SettingsStore.set_many が行い、その ValueError を 400 へ写す。
+    The value's type, its range and whether that key may be changed are not checked here. Types differ per key, and the source of truth for those definitions is the settings registry (common.settings). Writing the types here would split the definition across two places, and any setting added to the registry but forgotten here would be rejected with 422 before it ever reached the registry's own check. SettingsStore.set_many performs the check, and its ValueError is mapped to 400.
     """
 
     updates: dict[str, Any]
 
 
 class SettingsUpdateOut(SettingsOut):
-    """設定の更新の応答。
+    """The response to a settings update.
 
-    updated_keys は実際に変更したキー。settings には更新後の全件を返す。更新した値だけを返すと、画面は自分が送った値を信じて描き直すことになり、正規化(ID の重複の除去・URL の末尾の / の削除など)の結果が次の再読み込みまで画面に現れない。
+    updated_keys are the keys actually changed. settings returns every setting as it stands after the update. Returning only the updated values would leave the UI redrawing from the values it sent, and the results of normalization (removing duplicate IDs, dropping a trailing / from a URL, and so on) would not reach the UI until the next reload.
     """
 
     updated_keys: list[str] = Field(default_factory=list)

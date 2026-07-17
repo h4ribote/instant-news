@@ -1,10 +1,10 @@
-"""Discord bot の実装。記事の通知・DM の送信と、ゲートウェイのイベントによるロール・メンバー・投票・コメントの反映を担う。
+"""The Discord bot: sends article notification posts and DMs, and applies gateway events for roles, members, votes and comments.
 
-この bot は Discord への送信と、Discord から届くイベントの反映のみを担い、記事を公開するかどうかの判断は一切行わない。公開は server が行い、その時点で article_discord_posts へ message_id = NULL の行を、article_subscription_notices へ sent_at = NULL の行を積む。bot はその待ち行列を拾って送るだけである。server から bot へ直接イベントを渡す方式にすると、bot が停止している間に公開された記事の通知が失われるが、DB を待ち行列にすれば bot は復帰後に未送信の行を拾い直せる。
+The bot only sends to Discord and applies the events Discord delivers; it never decides whether an article is published. The server publishes, and at that moment enqueues a row with message_id = NULL in article_discord_posts and a row with sent_at = NULL in article_subscription_notices. The bot just picks that queue up and sends. Handing events straight from server to bot would lose the notifications for articles published while the bot was down; with the DB as the queue, the bot picks the unsent rows back up once it is back.
 
-これは Discord から bot へ届くゲートウェイのイベントとは別の話である。そちらは Discord 側で起きた出来事の唯一の知らせであり、購読する(client.py を参照)。取りこぼしうるという性質は同じであるため、写しを保つ各部品は取りこぼしを前提に照合を持つ。
+Gateway events arriving from Discord are a separate matter: they are the only notice of what happened on Discord's side, so the bot subscribes to them (see client.py). They can be missed just the same, so every component that keeps a mirror has a reconcile that assumes misses.
 
-本パッケージには、送信ループとイベントのリスナが共有する部品だけを置く。
+This package holds only the parts shared by the send loops and the event listeners.
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ logger = logging.getLogger(__name__)
 
 
 async def resolve_channel(client: discord.Client, channel_id: int) -> discord.abc.GuildChannel | discord.Thread | discord.abc.PrivateChannel | None:
-    """チャンネルをキャッシュから引き、無ければ API から取得する。存在しない・アクセスできない場合は None。
+    """Look the channel up in the cache, falling back to the API. None if it does not exist or is not accessible.
 
-    見つからない場合に例外を投げないのは、宛先チャンネルの設定誤りや削除が 1 件あっても、他の宛先への送信・数え直しを止めてはならないため。
+    Not raising when the channel is missing is deliberate: one misconfigured or deleted destination channel must not stop sends and recounts for the other destinations.
 
-    キャッシュ上のオブジェクトが持つ数(Thread.message_count など)を読む用途には使わない。discord.py はキャッシュ上のスレッドの返信数を更新しないため、古い値をそのまま返す。
+    Do not use this to read counts off the cached object (Thread.message_count and the like). discord.py does not update a cached thread's reply count, so it hands back the stale value.
     """
     channel = client.get_channel(channel_id)
     if channel is not None:

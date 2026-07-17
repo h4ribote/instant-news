@@ -1,10 +1,10 @@
-"""認証主体(セッション / API キー)の表現と、権限の判定。
+"""Principals (session / API key) and the permission check.
 
-セッションと API キーという 2 つの認証経路を Principal という 1 つの型へ畳む。以降の層は「どうやって認証したか」ではなく「誰が、何を持っているか」だけを見ればよくなる。
+Sessions and API keys are two authentication paths folded into one type, Principal. Layers above need only ask "who is this and what do they hold", never "how did they authenticate".
 
-**API キーの権限を発行時に凍結してはならない。**キーは所有者の権限を機械が借りたものであり、キー自身が権限を持つわけではない。権限は要求のたびに users / user_roles の現在のスナップショットから判定する。凍結すると、管理者を外れた者のキーが管理権限を持ち続け、ロールを外すという最も自然な対処が効かなくなる。この設計のため、ロールの同期(bot が行う)が権限剥奪の実効手段になっている。
+**An API key's permissions must not be frozen at issue time.** A key is a machine borrowing its owner's permissions; the key itself holds none. Permissions are decided on every request from the current snapshot of users / user_roles. Freezing them would leave a demoted admin's key holding admin permissions, and removing the role — the most natural remedy — would stop working. This design is what makes role sync (performed by the bot) the effective means of revoking permissions.
 
-秘密(セッショントークン・API キー)の生値は保存しない。DB には SHA-256 だけを置き、照合は生値を同じ手順で要約して突き合わせる。DB が漏れても、そこからセッションやキーを復元して成りすますことはできない。
+Raw values of secrets (session tokens, API keys) are never stored. The DB holds only the SHA-256; lookup hashes the presented raw value by the same procedure and compares. A leaked DB cannot be turned back into a session or a key to impersonate anyone.
 """
 
 from __future__ import annotations
@@ -21,50 +21,50 @@ from common.config import Config
 from common.db import Database
 from common.settings import RuntimeSettings
 
-# Discord の権限ビットフィールドにおける Administrator。このビットを立てたロールの保有者は、その guild の全操作を行える。
+# Administrator in Discord's permission bitfield. A holder of a role with this bit set can perform every operation in that guild.
 ADMINISTRATOR_BIT: Final = 1 << 3
 
-# 値の集合の真実は migrations/0001_initial.sql の api_token_scopes.scope にある。
+# The source of truth for this value set is api_token_scopes.scope in migrations/0001_initial.sql.
 Scope = Literal['articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin']
 
-# 管理者資格を要求するスコープ。キーにこれらが付いているだけでは足りず、要求の時点で所有者が管理者であることを毎回確かめる。
-# settings:admin は admin.role_ids を書き換えられる、すなわち管理者の資格そのものを配れるため、他のどのスコープよりも強い。それでも特別扱いを要さないのは、この集合に入れること自体が「所有者が今この瞬間に管理者であること」を要求のたびに問う仕掛けだからである。管理者を外れた者の settings:admin のキーは、その時点で自分に管理ロールを付け直すこともできなくなる。
+# Scopes that require admin eligibility. Carrying one on a key is not enough: the owner is checked for admin on every request.
+# settings:admin can rewrite admin.role_ids, i.e. hand out admin eligibility itself, so it is stronger than any other scope. It still needs no special case, because membership in this set is precisely the mechanism that asks "is the owner an admin at this very moment" on every request. Once the owner loses admin, their settings:admin key can no longer even re-grant its owner an admin role.
 ADMIN_SCOPES: Final[frozenset[str]] = frozenset({'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin'})
 
-# スコープの含意。鍵が要求されたスコープ、値がその要求を成立させうるスコープの集合である。
-# articles:write:any は「著者・報道社を自由に指定した記事の作成・更新」であり、著者を所有者に固定した作成・更新(articles:write)を包含する。含意を持たないと、この 1 つだけを与えたキーが記事を 1 本も書けないという、スコープの定義と正反対の状態になる。
-# 含意で要求を通した場合でも、通した側のスコープに応じた管理者資格の検査は必ず行うこと(deps.ensure_scope が担う)。articles:write:any は管理者スコープであり、articles:write 相当の操作に使うからといって、その検査を省いてよいわけではない。
+# Scope implications: the dict key is the requested scope, the value is the set of scopes that can satisfy that request.
+# articles:write:any is "create/update an article naming any author and publisher", which subsumes create/update with the author pinned to the owner (articles:write). Without the implication, a key granted only articles:write:any could not write a single article — the exact opposite of what the scope is defined to mean.
+# Even when a request is allowed via an implication, the admin-eligibility check for the scope that allowed it must still run (deps.ensure_scope does this). articles:write:any is an admin scope; using it for an articles:write-equivalent operation does not excuse that check.
 SCOPE_IMPLICATIONS: Final[dict[str, frozenset[str]]] = {
     'articles:write': frozenset({'articles:write', 'articles:write:any'}),
 }
 
 
 def granting_scopes(scope: str) -> frozenset[str]:
-    """その要求を成立させうるスコープの集合を返す。含意を持たないスコープでは自分自身だけを返す。"""
+    """Return the set of scopes that can satisfy this request; a scope with no implication returns only itself."""
     return SCOPE_IMPLICATIONS.get(scope, frozenset({scope}))
 
 
 def hash_secret(raw: str) -> str:
-    """セッショントークン・API キーの生値を、保存と照合に使う SHA-256(16 進 64 桁)へ要約する。
+    """Hash a session token / API key raw value into the SHA-256 (64 hex digits) used for storage and lookup.
 
-    パスワードと違い、これらは十分な乱雑さを持つ値をこちらが生成したものであるため、総当たりの余地が無く、ストレッチングは要らない。sessions.token_hash と api_tokens.token_hash が CHAR(64) なのはこの出力の桁数に合わせたもの。
+    Unlike passwords, these are values we generate ourselves with ample randomness, so there is no room for brute force and no stretching is needed. sessions.token_hash and api_tokens.token_hash are CHAR(64) to match the digit count of this output.
     """
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
 def secret_equal(left: str, right: str) -> bool:
-    """秘密の文字列を一定時間で比較する。
+    """Compare secret strings in constant time.
 
-    通常の == は不一致の位置で打ち切るため、比較にかかる時間から先頭何文字が一致したかを推測できる。hmac.compare_digest は非 ASCII の str を受け付けないため、先に UTF-8 のバイト列へ落としてから渡す。
+    A plain == stops at the position of the first mismatch, so the time the comparison takes reveals how many leading characters matched. hmac.compare_digest does not accept non-ASCII str, so encode to UTF-8 bytes before passing them in.
     """
     return hmac.compare_digest(left.encode('utf-8'), right.encode('utf-8'))
 
 
 @dataclass(frozen=True)
 class Principal:
-    """要求を発している主体。
+    """The principal making the request.
 
-    role_ids は「今の」スナップショットであり、要求ごとに読み直したものが入る。token_scopes は API キー経由のときだけ意味を持ち、そのキーに与えた制限を表す。スコープは権限そのものではなく、所有者が持つ権限のうちキーへ貸し出す範囲の上限である(所有者が管理者でなくなれば、ads:admin の付いたキーも管理操作を通さない)。
+    role_ids is the snapshot of *now*, re-read on every request. token_scopes is meaningful only for API-key requests and expresses the restriction placed on that key. A scope is not a permission in itself: it is a ceiling on how much of the owner's permissions the key may borrow (once the owner is no longer an admin, even a key carrying ads:admin will not pass an admin operation).
     """
 
     user_id: int
@@ -72,13 +72,13 @@ class Principal:
     is_guild_member: bool
     is_guild_owner: bool
     role_ids: frozenset[int]
-    # API キー経由なら api_tokens.id、セッション経由なら None。記事の改版・画像の取り込みには「どのキーが実際に投稿したか」として記録する。
+    # api_tokens.id for an API-key request, None for a session request. Recorded on article revisions and image ingests as "which key actually posted this".
     token_id: int | None
     token_scopes: frozenset[str]
 
     @property
     def via_token(self) -> bool:
-        """API キーによる要求か。"""
+        """Whether this request came via an API key."""
         return self.token_id is not None
 
 
@@ -90,9 +90,9 @@ async def load_principal_for_user(
     token_scopes: Iterable[str] = (),
     conn: Connection | None = None,
 ) -> Principal | None:
-    """users.id から主体を組み立てる。行が無ければ None。
+    """Build a principal from users.id; None if there is no row.
 
-    セッション・API キーのどちらの経路も、認証の照合を終えたあとはここへ合流する。権限の材料(guild メンバーシップ・オーナー・保有ロール)を読むのはこの 1 箇所だけであり、経路によって判定の材料が変わることが起こらない。
+    Both the session path and the API-key path converge here once their authentication lookup is done. This is the only place that reads the inputs to the permission check (guild membership, owner, held roles), so those inputs can never vary by path.
     """
     row = await db.fetch_one(
         'SELECT id, discord_user_id, is_guild_member, is_guild_owner FROM users WHERE id = %s',
@@ -114,15 +114,15 @@ async def load_principal_for_user(
 
 
 async def load_principal_from_session(db: Database, config: Config, token_hash: str) -> Principal | None:
-    """セッショントークンの SHA-256 から主体を解決する。無効なら None。
+    """Resolve a principal from a session token's SHA-256; None if invalid.
 
-    config は API キーの経路と対称にするために受ける(セッションの照合そのものは設定に依らない)。
+    config is taken only for symmetry with the API-key path (the session lookup itself does not depend on config).
     """
     row = await db.fetch_one(
         'SELECT token_hash, user_id FROM sessions WHERE token_hash = %s AND expires_at > NOW()',
         token_hash,
     )
-    # 引き当ては索引のある token_hash で行うが、一致の判断はここで行う。DB の照合順序(utf8mb4_0900_ai_ci)は大文字小文字を区別しないため、SQL の = だけを一致の根拠にしない。
+    # The lookup goes through the indexed token_hash, but the match is decided here: the DB collation (utf8mb4_0900_ai_ci) is case-insensitive, so SQL's = alone is never the grounds for a match.
     if row is None or not secret_equal(str(row['token_hash']), token_hash):
         return None
     principal = await load_principal_for_user(db, int(row['user_id']))
@@ -133,9 +133,9 @@ async def load_principal_from_session(db: Database, config: Config, token_hash: 
 
 
 async def load_principal_from_token(db: Database, config: Config, raw_token: str) -> Principal | None:
-    """API キーの生値から主体を解決する。無効なら None。
+    """Resolve a principal from an API key's raw value; None if invalid.
 
-    revoked_at が入っている、または expires_at を過ぎたキーは無効。加えて、**所有者が対象の guild のメンバーでなければ、照合が通っても認証を成立させない**。キーは所有者の権限を機械が借りたものであり、所有者が guild を離れた時点で借りる相手が居ない。権限を落として「認証済みだが何もできない主体」にするのではなく、資格情報そのものが通らないようにする。
+    A key with revoked_at set, or past expires_at, is invalid. On top of that, **if the owner is not a member of the target guild, authentication does not succeed even though the lookup matched**. A key is a machine borrowing its owner's permissions, and once the owner has left the guild there is nobody left to borrow from. Rather than stripping permissions down to an "authenticated but powerless" principal, the credential itself is rejected.
     """
     token_hash = hash_secret(raw_token)
     row = await db.fetch_one(
@@ -146,7 +146,7 @@ async def load_principal_from_token(db: Database, config: Config, raw_token: str
     if row is None or not secret_equal(str(row['token_hash']), token_hash):
         return None
     token_id = int(row['id'])
-    # 資格の判定より先に記録する。last_used_at は「このキーが使われた」という事実であり、その要求が通ったかどうかとは別物である(通らなくなったキーが叩かれ続けている状況こそ、気づきたい事象である)。
+    # Recorded before the eligibility check. last_used_at is the fact that this key was used, which is a different thing from whether the request was allowed (a key that no longer passes yet keeps being hammered is exactly the situation worth noticing).
     await db.execute('UPDATE api_tokens SET last_used_at = NOW() WHERE id = %s', token_id)
     scope_rows = await db.fetch_all('SELECT scope FROM api_token_scopes WHERE token_id = %s', token_id)
     principal = await load_principal_for_user(
@@ -161,14 +161,14 @@ async def load_principal_from_token(db: Database, config: Config, raw_token: str
 
 
 async def is_admin(db: Database, settings: RuntimeSettings, principal: Principal) -> bool:
-    """要求の時点でこの主体が管理者資格を満たすかを判定する。
+    """Decide whether this principal meets admin eligibility at the time of the request.
 
-    次のいずれかを満たせば管理者とする。
-      (a) guild のオーナーである(users.is_guild_owner)。オーナーはロールに依らず guild の全権を持つため、ロールだけを見ると必ず取りこぼす。
-      (b) 保有ロールのいずれかが Discord の Administrator 権限(discord_roles.permissions の 1 << 3)を持つ。
-      (c) 保有ロールのいずれかが settings の admin.role_ids に含まれる。Administrator は guild の全操作を許す極めて強い権限であり、このプラットフォームの管理を任せたいだけの相手に配らせないための逃げ道である。
+    Any one of these makes an admin:
+      (a) The guild owner (users.is_guild_owner). The owner holds full authority over the guild regardless of roles, so looking at roles alone always misses them.
+      (b) One of the held roles carries Discord's Administrator permission (1 << 3 in discord_roles.permissions).
+      (c) One of the held roles is listed in the settings' admin.role_ids. Administrator permits every operation in the guild and is extremely strong; this is the escape hatch that avoids handing it out to someone you only want to run this platform.
 
-    **settings をこの関数の中で読み直さない。**呼び出し側が要求ごとに settings 表から解決したものを渡すこと(server では依存性がそれを行う)。起動時に読んだ設定を握って渡すと、管理ロールを画面から外しても、そのロールだけで管理者だった者が再起動まで管理者のままになる。判定の材料のうちロールの側(principal.role_ids)は要求ごとに読み直した現在のスナップショットであり、設定の側だけが凍結されるという歪んだ状態を作ってはならない。
+    **Do not re-read settings inside this function.** The caller passes settings resolved from the settings table per request (in server, a dependency does this). Passing settings read at startup would mean that anyone who was an admin by that role alone stays an admin until restart, even after the admin role is removed in the UI. The role side of the inputs (principal.role_ids) is a current snapshot re-read on every request, and a skewed state where only the settings side is frozen must never be created.
     """
     if principal.is_guild_owner:
         return True
@@ -177,7 +177,7 @@ async def is_admin(db: Database, settings: RuntimeSettings, principal: Principal
     if not principal.role_ids.isdisjoint(settings.admin.role_ids):
         return True
     role_ids = tuple(principal.role_ids)
-    # IN 句は個数分の %s を組み立てる。埋め込むのは placeholder だけであり、値は必ず引数として渡す。
+    # The IN clause is built with one %s per element. Only the placeholders are interpolated; the values always go through as arguments.
     placeholders = ', '.join(['%s'] * len(role_ids))
     found = await db.fetch_val(
         f'SELECT 1 FROM discord_roles WHERE id IN ({placeholders}) AND (permissions & %s) <> 0 LIMIT 1',
@@ -188,11 +188,11 @@ async def is_admin(db: Database, settings: RuntimeSettings, principal: Principal
 
 
 def has_scope(principal: Principal, scope: str) -> bool:
-    """このスコープに相当する操作が、主体に与えられた範囲に収まっているか。
+    """Whether the operation this scope names falls within the range granted to the principal.
 
-    スコープはキーに対する制限であって、人に対する制限ではない。セッション経由(via_token が偽)の主体は Web UI から自分の権限で操作しているのであり、キーの範囲という概念を持たないため常に真を返す。**これは「何でもできる」という意味ではない。**管理操作の可否は is_admin による資格の判定が別途担っており、この関数はその判定を代替しない。
+    A scope restricts a key, not a person. A session principal (via_token false) is acting through the Web UI with their own permissions and has no notion of a key's range, so this always returns True. **That does not mean "may do anything".** Whether an admin operation is allowed is handled separately by is_admin's eligibility check, which this function does not stand in for.
 
-    判定は厳密一致ではなく含意を通す(SCOPE_IMPLICATIONS)。上位のスコープが下位の操作を包含するのは定義そのものであり、その関係を各呼び出し元に書かせると、書き忘れた 1 箇所だけが仕様どおりに発行されたキーを黙って拒む。ただし真を返したことは管理者資格の検査を済ませたことを意味しない。含意で通った場合に何を検査すべきかは deps.ensure_scope が判断する。
+    The check is not an exact match: it goes through implications (SCOPE_IMPLICATIONS). A higher scope subsuming a lower operation is the definition itself, and making every call site spell that relation out means the one site that forgets silently rejects a key issued exactly to spec. Returning True still does not mean the admin-eligibility check has been done; deps.ensure_scope decides what to check when a request was allowed via an implication.
     """
     if not principal.via_token:
         return True

@@ -1,10 +1,10 @@
-"""記事と画像の閲覧範囲の判定。
+"""The visibility check for articles and images.
 
-閲覧の可否は 2 つの軸の積で決まる。status(公開の段階)と visibility(閲覧範囲)であり、両方を満たさなければ見せない。status だけを見ると下書きが公開範囲の記事として漏れ、visibility だけを見ると公開前の原稿が読まれる。
+Access is the product of two axes: status (the publication stage) and visibility. Both must pass. Check status alone and a draft leaks as a publicly scoped article; check visibility alone and unpublished draft copy gets read.
 
-判定はこのモジュールへ集約する。記事の詳細・一覧・全文検索・画像の配信・og メタの注入はいずれも同じ問いに答える必要があり、経路ごとに書くと必ずどれかが緩む。緩んだ 1 箇所が全体の閲覧制限を無効にする。
+The check lives in this module. Article detail, listings, full-text search, image serving and og meta injection all have to answer the same question, and written per route one of them always ends up laxer; a single lax spot voids the access restriction everywhere.
 
-閲覧できない対象には 403 ではなく 404 を返すこと(errors.NotFound)。403 は「そこに何かがある」ことを教えてしまい、存在自体が秘密である限定公開の記事では、それだけで漏洩になる。この規則は呼び出し側の責務であり、このモジュールは真偽だけを返す。
+Return 404 rather than 403 for anything the viewer cannot see (errors.NotFound). A 403 reveals that something is there, and for a limited-visibility article whose very existence is secret, that alone is a leak. Obeying this is the caller's job; this module returns only a boolean.
 """
 
 from __future__ import annotations
@@ -17,52 +17,52 @@ from common.settings import RuntimeSettings
 
 from .principals import Principal, is_admin
 
-# この段階の記事だけが、著者本人と管理者以外の利用者に見える。draft / in_review / scheduled はまだ公に出していない原稿であり、archived は取り下げたものである。
+# Only articles at this status are visible to users other than the author and an admin. draft / in_review / scheduled are draft copy not yet made public; archived has been withdrawn.
 PUBLISHED: Final = 'published'
 
 
 async def can_view_article(db: Database, principal: Principal | None, article: Mapping[str, Any], *, settings: RuntimeSettings) -> bool:
-    """principal が article を閲覧できるかを返す。
+    """Return whether principal may view article.
 
-    article は articles の行であり、id / author_id / status / visibility を含んでいる必要がある。一覧のように行を既に引いてある場面で再取得しないよう、行そのものを受け取る。
+    article is a row from articles and must carry id / author_id / status / visibility. The row itself is passed in so that callers which already hold it, such as listings, do not re-fetch it.
 
-    settings は管理者の判定に要る。管理者資格の 3 つ目の条件(settings の admin.role_ids に含まれるロールの保有)は設定を見ないと判定できず、省略可能にすると、渡し忘れた呼び出しだけが委譲された管理者を管理者と見なさなくなる。渡すのは要求ごとに settings 表から解決したものであること(管理ロールの変更が閲覧範囲へ即座に効く必要がある)。
+    settings is needed for the admin check: the third condition of admin eligibility — holding a role listed in the settings' admin.role_ids — cannot be decided without them, and making them optional would leave a caller that forgot to pass them quietly failing to treat a delegated admin as an admin. Pass the settings resolved from the settings table on this request, because a change to the admin roles has to reach the visibility check immediately.
     """
     author_id = article.get('author_id')
     if principal is not None and author_id is not None and int(author_id) == principal.user_id:
-        # 自分が書いたものは、公開の段階にも閲覧範囲にも関わらず読める。
+        # What you wrote yourself is readable whatever its status and visibility.
         return True
     if await _is_administrator(db, settings, principal):
-        # 管理者は公開前の原稿を含めて読める。編集の責任を負う立場が自分の記事しか見られないと、公開前の確認が成立しない。
+        # Admins read unpublished draft copy too. Pre-publication review cannot work if the people accountable for editing see only their own articles.
         return True
     if article.get('status') != PUBLISHED:
         return False
     visibility = article.get('visibility')
     if visibility == 'public':
         return True
-    # public 以外は、対象 guild に現在参加しているログイン済みの利用者だけが候補になる。過去に参加していた者のセッションが残っていても、is_guild_member が偽になった時点で読めなくなる。
+    # Anything but public is open only to logged-in users currently in the target guild. A former member's session may still exist, but the moment is_guild_member turns false they can no longer read.
     if principal is None or not principal.is_guild_member:
         return False
     if visibility == 'members':
         return True
     if visibility == 'restricted':
         return await _has_visibility_role(db, principal, int(article['id']))
-    # 未知の閲覧範囲は拒否する。列挙が増えたときに、判定を書き足すまでの間だけ見えなくなるのは正しい side であり、その逆(既定で見せる)は漏洩になる。
+    # Refuse an unknown visibility. When the enum grows, being invisible until the check is extended is the correct side to fall on; the reverse — visible by default — is a leak.
     return False
 
 
 def visibility_sql_filter(principal: Principal | None) -> tuple[str, list[Any]]:
-    """一覧・検索のクエリの WHERE へ差し込む条件の断片と、その引数を返す。
+    """Return the condition fragment to splice into the WHERE of listing and search queries, and its parameters.
 
-    返す断片は括弧で閉じてあるため、呼び出し側は AND で素直に連結できる。**条件は articles という名前で記事の表を参照する。**呼び出し側のクエリは articles に別名を付けてはならない(付けると、この断片が指す articles.* が解決できない列になり、クエリが実行時に落ちる)。
+    The fragment is closed in parentheses, so callers can AND it on directly. **The condition refers to the articles table by the name articles.** The calling query must not alias articles: alias it and the articles.* this fragment names becomes an unresolvable column, and the query fails at runtime.
 
-    この関数が答えるのは visibility の軸だけである。status の絞り込み(既定では published のみ)と、管理者による公開前の記事の閲覧は呼び出し側が足す。管理者の判定はロールの権限ビットを DB から引く必要があり、引数を取らない同期の関数では答えられない。
+    This answers the visibility axis only, and it carries no admin clause at all. The status filter (published only, by default), an admin's access to unpublished articles, and an admin's access to published articles of limited visibility are all the caller's to add. Deciding admin means reading the roles' permission bits from the DB, which a synchronous function taking no database handle cannot do.
 
-    著者本人の記事を含めるのは、can_view_article と一覧を一致させるためである。これが無いと、自分が書いた限定公開の記事が詳細では読めるのに一覧に出ない。
+    The author's own articles are included to keep the listing in step with can_view_article. Without it, a limited-visibility article you wrote would be readable in detail yet absent from the listing. That same split still stands for admins, because no caller adds the admin clause: an admin holding none of a restricted article's roles reads it in detail yet never sees it listed.
     """
     if principal is None:
         return ("(articles.visibility = 'public')", [])
-    # clauses と params は同じ順序で積む。プレースホルダの並びと引数の並びがずれると、別のロールで判定が通ってしまう。
+    # clauses and params are appended in the same order. Let the placeholder order and the parameter order drift apart and the check passes against the wrong role.
     clauses: list[str] = ["articles.visibility = 'public'", 'articles.author_id = %s']
     params: list[Any] = [principal.user_id]
     if principal.is_guild_member:
@@ -78,15 +78,15 @@ def visibility_sql_filter(principal: Principal | None) -> tuple[str, list[Any]]:
 
 
 async def can_view_media(db: Database, principal: Principal | None, media_id: int, is_public: bool, *, settings: RuntimeSettings) -> bool:
-    """principal が media_id の画像を受け取れるかを返す。
+    """Return whether principal may receive the image media_id.
 
-    公開の画像(カバー・広告・ロゴ・アイコン)は認証なしで配信する。そうでない画像は、それを参照している記事のうち 1 つでも principal が閲覧できるなら配信する。同じバイト列が複数の記事から参照されうるため、1 つでも読める記事があれば、その利用者はもうその画像を見られる立場にある。
+    Public images (covers, ads, logos, icons) are served without authentication. Any other image is served if principal can view even one of the articles referencing it: the same bytes may be referenced from several articles, so a single readable article already puts that user in a position to see the image.
 
-    参照の検査を省いて「ログイン済みなら配信」にしてはならない。閲覧制限のある記事の図版が、その記事を読めない全メンバーへ配られる。
+    Never skip the reference check and serve on "logged in" alone. The images inside an access-restricted article would then be handed to every member who cannot read it.
     """
     if is_public:
         return True
-    # 参照元の記事を引く。article_media は本文の保存時に積まれた事実であり、本文を読み直して推測しない。
+    # Pull the referencing articles. article_media is a fact recorded when the body was saved; do not re-read the body and guess.
     articles = await db.fetch_all(
         'SELECT a.id, a.author_id, a.status, a.visibility'
         ' FROM article_media am JOIN articles a ON a.id = am.article_id'
@@ -100,25 +100,25 @@ async def can_view_media(db: Database, principal: Principal | None, media_id: in
 
 
 def _placeholders(count: int) -> str:
-    """IN 句へ差し込む、個数分のプレースホルダを組み立てる。
+    """Build count placeholders to splice into an IN clause.
 
-    値そのものは決して SQL へ埋め込まない。組み立てるのは %s の並びだけであり、値は引数として渡す。ロール ID は int に正規化済みだが、ここで連結する習慣を作ると、いずれ文字列を受ける場所で同じ書き方をしてしまう。
+    The values themselves are never embedded in the SQL. Only the run of %s is built here; the values travel as parameters. Role IDs are already normalized to int, but a habit of concatenating here ends up repeated somewhere that takes strings.
     """
     return ', '.join(['%s'] * count)
 
 
 def _ordered_role_ids(principal: Principal) -> list[int]:
-    """principal の保有ロールを安定した順序で返す。
+    """Return the roles principal holds in a stable order.
 
-    frozenset の反復順は実行ごとに変わりうる。順序を固定しておくと、同じ主体の同じ問い合わせが常に同じ SQL と同じ引数になり、ログの突き合わせとプリペアドステートメントの再利用が効く。
+    frozenset iteration order can vary from run to run. Fixing it makes the same query for the same principal always produce the same SQL and the same parameters, so log correlation and prepared-statement reuse keep working.
     """
     return sorted(principal.role_ids)
 
 
 async def _is_administrator(db: Database, settings: RuntimeSettings, principal: Principal | None) -> bool:
-    """principal が管理者かを返す。未認証(None)なら偽。
+    """Return whether principal is an admin. Unauthenticated (None) is false.
 
-    判定そのものは principals.is_admin に委ねる。ここに独自の実装を置くと、管理者の定義が 2 箇所に分かれ、必ずどちらかが取り残される。実際、設定(admin.role_ids)による委譲を見ない実装をここに持っていた間は、委譲された管理者が記事を編集できるのに閲覧すると 404 になっていた。「拒否する側へ倒れるから安全」は、その委譲を中心の機能として謳う以上、正しさの説明にならない。設定の出どころが settings 表へ移ってもこの一本化は保つ(判定を 2 箇所に分ければ、同じズレが同じ形で再発する)。
+    The decision itself is left to principals.is_admin. A separate implementation here would split the definition of an admin across two places, and one of them always gets left behind: while this file held a version that ignored delegation via the admin.role_ids setting, a delegated admin could edit an article but got a 404 on viewing it. "It fails closed, so it is safe" is no account of correctness when that delegation is advertised as a central feature. Keep the check in one place now that the settings come from the settings table as well; split it in two and the same drift returns in the same shape.
     """
     if principal is None:
         return False
@@ -126,7 +126,7 @@ async def _is_administrator(db: Database, settings: RuntimeSettings, principal: 
 
 
 async def _has_visibility_role(db: Database, principal: Principal, article_id: int) -> bool:
-    """principal が、その記事の閲覧を許可されたロールを 1 つ以上持つかを返す。"""
+    """Return whether principal holds at least one role permitted to view the article."""
     if not principal.role_ids:
         return False
     role_ids = _ordered_role_ids(principal)

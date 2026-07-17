@@ -1,4 +1,4 @@
-"""報道社ランキングの API。集計そのものは app.rankings が持つ。"""
+"""The publisher ranking API. The tally itself lives in app.rankings."""
 
 from __future__ import annotations
 
@@ -21,11 +21,11 @@ async def get_publisher_ranking(
     days: Annotated[int, Query(ge=1, le=365)] = DEFAULT_DAYS,
     limit: Annotated[int, Query(ge=1, le=100)] = DEFAULT_LIMIT,
 ) -> list[PublisherRankingItem]:
-    """直近 days 日の報道社ランキングを score(反応数 + 返信数)の降順で返す。
+    """Return the publisher ranking for the last days days, descending by score (reactions + replies).
 
-    集計対象は公開済みかつ visibility='public' の記事に限る(閲覧制限のある記事を公開のランキングに混ぜない)。認証を要さないのはランキングが誰にとっても同一の公開の成果物であるためで、要求元によって順位が変わることはない。
+    The tally is restricted to status='published' articles with visibility='public', so that articles with access restrictions are not mixed into a public ranking. No authentication is required because the ranking is a single public artefact, identical for everyone; the order never varies with the caller.
 
-    days・limit の上限は、際限のない期間・件数を指定して全件の集計を強いる要求を防ぐために設ける。
+    days and limit are capped so that no request can force a tally over everything by naming an unbounded period or row count.
     """
     rows = await publisher_ranking(db, days=days, limit=limit)
     return [PublisherRankingItem.model_validate(row) for row in rows]

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Discord bot のエントリポイント。
+"""Discord bot entry point.
 
-リポジトリのルートを作業ディレクトリとして `python -m bot.main` で起動する(common パッケージと bot パッケージをルートからの絶対 import で解決するため)。
+Start with `python -m bot.main` from the repository root as the working directory, so that the `common` and `bot` packages resolve as absolute imports from the root.
 
-この bot は Discord への送信と、Discord から届くイベントの反映だけを行い、記事を公開するかどうかは判断しない。公開は server が行い、送るべきものを DB の待ち行列へ積む。したがって bot が停止していても公開は進み、bot は復帰後に未送信の行を拾って送る。
+The bot only sends to Discord and applies the events Discord delivers; it never decides whether an article is published. The server publishes and enqueues what has to be sent onto the DB queue, so publishing proceeds while the bot is down and the bot picks up the unsent rows once it is back.
 
-設定の真実は MySQL の settings 表にあり、config.yaml が持つのはそこへ写す初期値でしかない。bot は自分のトークンすら DB からしか読めないため、Discord へ繋ぐ前に DB へ繋ぎ、初期値の投入を済ませてから設定を読む。server と bot のどちらが先に起動するかは決まっておらず、bot が先だと settings 表が空のままトークンを読むことになるため、投入は bot も行う。INSERT IGNORE で冪等であり、両方が呼んでも、どちらが先でも安全である。
+The source of truth for settings is the MySQL settings table; config.yaml only holds the seed values copied into it at first boot. The bot cannot read even its own token from anywhere but the DB, so it connects to the DB and finishes seeding before it reads settings and connects to Discord. The startup order of server and bot is not fixed, and a bot that starts first would read the token from an empty settings table, so the bot seeds too. Seeding is idempotent via INSERT IGNORE, so it is safe for both to call it, in either order.
 
-トークンだけは起動時にしか読まない。Discord への接続はトークンで確立するものであり、変更へ追随するには繋ぎ直すしかない。設定の登録簿はトークンを restart_required としており、変更を検知して再接続する仕組みは持たない(その複雑さに見合わない)。他の設定は、送信ループが周回のたびに、イベントのリスナがイベントを処理するたびに読み直すため、bot を再起動せずに効く。
+Only the token is read at startup and never again. The Discord connection is established with the token, so following a change would mean reconnecting; the settings registry marks the token restart_required and there is no detect-and-reconnect mechanism (not worth the complexity). Every other setting takes effect without a bot restart, because the send loop re-reads on each pass and the event listeners re-read each time they handle an event.
 
-bot の実体は bot/app/client.py の NewsBot にある。どのイベントを購読し、何を写すかはそちらを参照。
+The bot's implementation is NewsBot in bot/app/client.py; see there for which events it subscribes to and what it mirrors.
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ LOG_FORMAT: Final = '%(asctime)s %(levelname)-8s %(name)s: %(message)s'
 
 
 async def _run(config: Config) -> int:
-    """DB へ繋ぎ、設定の初期値を投入し、settings 表から読んだトークンで Discord へ繋ぐ。
+    """Connect to the DB, seed the settings, and connect to Discord with the token read from the settings table.
 
-    DB と Discord の接続を 1 つのイベントループの中で開く。接続プールはそれを作ったイベントループに紐づくため、別のループで作ったプールを bot が掴むと最初のクエリで壊れる。
+    Both connections are opened inside a single event loop: a connection pool is bound to the loop that created it, so a pool built on another loop breaks on the bot's first query.
     """
     db = Database(config.database)
     await db.connect()
@@ -47,20 +47,20 @@ async def _run(config: Config) -> int:
             logger.error('settings 表の設定を読み取れませんでした: %s', exc)
             return 1
         if inserted:
-            # 投入は未登録のキーだけを埋める。既にある値を config.yaml で上書きすると、管理画面から変更した設定が再起動のたびに黙って元へ戻る。
+            # Seeding fills only the keys that are not there yet: overwriting existing values from config.yaml would silently revert settings changed from the admin screen on every restart.
             logger.info('settings 表に未登録だった設定へ config.yaml の初期値を投入しました: %s。以後はこの表が真実であり、変更は管理画面から行います。', ', '.join(inserted))
         logger.info('対象の guild %s として起動します。', settings.discord.guild_id)
 
         bot = NewsBot(config, db, store)
         try:
-            # discord.Client.run() ではなく start() を使うのは、トークンを読むために先に DB へ繋ぐ必要があり、run() が自前で asyncio.run() を呼んでしまうため。run(log_handler=None) が行っていた discord.py 側のログ設定の抑止は、start() を使えば設定そのものが行われないため不要になる。
+            # start() rather than discord.Client.run(), because reading the token requires connecting to the DB first and run() calls asyncio.run() itself. The run(log_handler=None) that used to suppress discord.py's own logging setup is unnecessary with start(), which never performs that setup at all.
             async with bot:
                 await bot.start(settings.discord.bot.token)
         except discord.LoginFailure:
             logger.error('Discord への認証に失敗しました。設定の discord.bot.token を確認してください(python -m server.cli get-setting discord.bot.token で確認できます)。')
             return 1
         except discord.PrivilegedIntentsRequired:
-            # どちらが欠けていても Discord は同じ切り方をし、discord.py も区別しない。片方だけを案内すると、それを既に有効にしている運用者は「有効なのに起動しない」という手掛かりの無い状態に置かれるため、両方を挙げて何のために要るかまで書く。
+            # Discord cuts the connection the same way whichever of the two is missing, and discord.py does not tell them apart either. Naming only one would leave an operator who has already enabled that one with no clue why it still will not start, so list both and say what each is needed for.
             logger.error(
                 '特権 intent が有効になっていません。Discord の開発者ポータルで次の 2 つを有効にしてください。'
                 'SERVER MEMBERS INTENT(guild のメンバーの取り込みと、参加・離脱・ロール変更のイベントの購読に必要)。'

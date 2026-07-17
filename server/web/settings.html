@@ -42,7 +42,7 @@
 <main class="container layout">
   <div class="main" data-main>
 
-    <!-- アカウント。独自パスワードは持たず、Discord アカウントが一意な識別子。 -->
+    <!-- Account. There is no password of our own: the Discord account is the unique identifier. -->
     <section class="card" data-account-card hidden>
       <div class="section-head"><h2>アカウント</h2></div>
       <div class="form-row">
@@ -62,13 +62,13 @@
     </section>
 
     <!--
-      API キー。発行者に紐づき、発行者の資格でスコープが決まる。
-      生値は保存せず SHA-256 のみを持つため、発行直後に一度だけ表示する。
+      API keys: bound to the issuer, and the scope is decided by the issuer's eligibility.
+      The raw value is never stored, only its SHA-256, so it is shown exactly once right after issue.
     -->
     <section class="card" data-keys-card hidden>
       <div class="section-head"><h2>API キー</h2></div>
 
-      <!-- 発行直後の一度きりの表示。以後は再表示できない。 -->
+      <!-- The one-time reveal right after issue; it can never be shown again. -->
       <div data-reveal></div>
 
       <div class="table-scroll" data-keys></div>
@@ -90,19 +90,18 @@
       </div>
 
       <!--
-        管理者スコープは、Discord の Administrator / guild オーナー、
-        または設定で指定した管理ロールを持つユーザーだけが発行できる。
-        権限は要求のたびに現在のロールから判定するため、管理者を外れればキーは通らなくなる。
+        Only Discord's Administrator, the guild owner, or a user holding an admin role named in the settings can issue an admin scope.
+        Permissions are decided from the current roles on every request, so a key stops being accepted once its issuer loses admin.
       -->
       <div class="form-row" data-scope-notice></div>
     </section>
 
-    <!-- タグ購読。チャンネルへの通知とは別に、個人宛ての DM で新着を受け取る仕組み。 -->
+    <!-- Tag subscriptions: receiving the latest by personal DM, a mechanism separate from the channel notification posts. -->
     <section class="card" data-subs-card hidden>
       <div class="section-head"><h2>購読中のタグ</h2></div>
       <div class="table-scroll" data-subs></div>
 
-      <!-- 購読の追加。タグページへ行かずとも、この場から未購読のタグを選んで購読できる。 -->
+      <!-- Add a subscription: pick an unsubscribed tag right here, without going to the tag page. -->
       <div class="form-row">
         <label class="lbl">タグを購読する</label>
         <select data-sub-tag></select>
@@ -159,11 +158,10 @@ import { api, get, post, del, me, escapeHtml, formatDateTime, renderAdSlot, qs, 
 import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, loginUrl } from '/static/js/chrome.js';
 
 /*
- * キーに与えるスコープ。1 本のキーには 1 つのスコープだけを与える。
- * 広告管理アプリに渡すのは広告の権限だけでよく、記事の署名を偽造する力を混ぜて渡してはならない。
- * 用途ごとに分けて発行すれば、片方だけを失効できる。
- * admin が真のスコープは、要求の時点で発行者が管理者資格を満たしているときにだけ発行でき、
- * 管理者を外れれば発行済みのキーもその時点で通らなくなる。
+ * The scopes a key can be given. One key gets exactly one scope.
+ * An ad-management app only needs the ad permission; never mix in the power to forge an article's byline.
+ * Issuing a separate key per purpose means either one can be revoked on its own.
+ * A scope with admin true can only be issued while the issuer meets admin eligibility at request time, and once they lose admin, already-issued keys stop being accepted from that moment.
  */
 const SCOPES = [
   {
@@ -201,7 +199,7 @@ const SCOPES = [
 let viewer = null;
 let isAdmin = false;
 
-/** ログインしていない利用者に、この画面が何のためにあるかを示してログインへ送る。 */
+/** Tell a signed-out user what this page is for, and send them to login. */
 function renderLoginRequired() {
   document.querySelector('[data-main]').innerHTML =
     '<section class="card login-card"><div class="section-head"><h2>ログインが必要です</h2></div>' +
@@ -209,7 +207,7 @@ function renderLoginRequired() {
     `<a class="btn-discord" href="${escapeHtml(loginUrl())}">🎮 Discord でログイン</a></div></section>`;
 }
 
-/** アカウント欄。所属も権限も Discord 側で決まるため、この画面は現在の状態を映すだけで、変更の手段は持たない。 */
+/** The account area. Affiliation and permissions are both decided on the Discord side, so the UI only reflects the current state and offers no means of changing it. */
 function renderAccount() {
   const u = viewer.user || viewer;
   const status = ['Discord で認証済み'];
@@ -227,7 +225,7 @@ function renderAccount() {
     ? '<span>所属している報道社はありません。</span>'
     : pubs.map((p) => `<a class="m" href="/publishers/${encodeURIComponent(p.slug)}">${pubLogoHtml(p)}${escapeHtml(p.name)}</a>`).join('');
 
-  /* ロールは Discord 側の実体であり、この場から辿れる先を持たない。見た目はタグの粒と揃えつつ、行き先の無いリンクにはしない。 */
+  /* A role really lives on the Discord side and has nothing here to link to. Match the look of the tag chips, but do not make it a link that goes nowhere. */
   const roles = listOf(viewer.roles, 'roles');
   document.querySelector('[data-roles]').innerHTML = roles.length === 0
     ? '<span>保有しているロールはありません。</span>'
@@ -236,7 +234,7 @@ function renderAccount() {
   document.querySelector('[data-account-card]').hidden = false;
 }
 
-/** 発行できるスコープの選択肢。管理者でない利用者に管理者スコープを見せない。 */
+/** The issuable scope choices. A non-admin user is never shown an admin scope. */
 function renderScopeChoices() {
   const choices = SCOPES.filter((s) => isAdmin || !s.admin);
   const select = document.querySelector('[data-token-scope]');
@@ -257,7 +255,7 @@ function renderScopeChoices() {
   document.querySelector('[data-scope-notice]').innerHTML = isAdmin ? adminNoticeHtml() : nonAdminNoticeHtml();
 }
 
-/** 管理者への注意。強い力を持つスコープを、必要のないクライアントへ渡させないための注意書き。 */
+/** The admin notice. It exists to stop a scope with strong power being handed to a client that does not need it. */
 function adminNoticeHtml() {
   return '<div class="notice"><span class="ic">⚠</span><div>' +
     '<b>1 本のキーに用途を束ねないでください。</b>' +
@@ -269,7 +267,7 @@ function adminNoticeHtml() {
     '</div></div>';
 }
 
-/** 管理者でない利用者への説明。発行できないスコープが存在すること自体は隠さない。 */
+/** Explanation for non-admin users. The existence of scopes they cannot issue is not itself hidden. */
 function nonAdminNoticeHtml() {
   return '<div class="notice info"><span class="ic">🔒</span><div>' +
     '<b>管理者向けのスコープは発行できません。</b>' +
@@ -278,7 +276,7 @@ function nonAdminNoticeHtml() {
     '</div></div>';
 }
 
-/** キーの一覧。同じ人が何本も持つため、名前と先頭数文字を必ず出す。これが無いとどれを失効すべきか判別できない。 */
+/** The key listing. One person holds several keys, so always show the name and the leading characters; without them you cannot tell which key to revoke. */
 function renderTokens(tokens) {
   const box = document.querySelector('[data-keys]');
   if (tokens.length === 0) {
@@ -293,7 +291,7 @@ function renderTokens(tokens) {
     const scopes = (t.scopes || []).map((s) => `<span class="scope${SCOPES.some((x) => x.value === s && x.admin) ? ' admin' : ''}">${escapeHtml(s)}</span>`).join('');
     const used = t.last_used_at ? formatDateTime(t.last_used_at) : '未使用';
 
-    /* 失効済みのキーは、失効の操作ではなく事実として出す(取り消せるものではない)。 */
+    /* A revoked key is shown as a fact rather than as a revoke action, since revocation cannot be undone. */
     const action = t.revoked_at
       ? `<span class="s-count">${escapeHtml(formatDateTime(t.revoked_at))} 失効済み</span>`
       : `<button class="btn danger" type="button" data-revoke="${escapeHtml(t.id)}" data-name="${escapeHtml(t.name)}">失効</button>`;
@@ -311,7 +309,7 @@ function renderTokens(tokens) {
     `<tbody>${rows}</tbody></table>`;
 }
 
-/** キーの一覧を読み直す。 */
+/** Reload the key listing. */
 async function loadTokens() {
   try {
     renderTokens(listOf(await get('/api/me/tokens'), 'tokens'));
@@ -320,13 +318,13 @@ async function loadTokens() {
   }
 }
 
-/** 発行の応答から生値を取り出す。生値はこの応答にしか存在しない。 */
+/** Pull the raw value out of the issue response. The raw value exists nowhere but this response. */
 function rawTokenOf(data) {
   if (!data) return null;
   return data.token || data.raw_token || data.key || null;
 }
 
-/** 発行直後の一度きりの表示。ここで写し取らなければ、このキーは二度と使えない。 */
+/** The one-time reveal right after issue. Copy it down here or the key can never be used. */
 function renderReveal(raw) {
   const box = document.querySelector('[data-reveal]');
   box.innerHTML = '<div class="key-reveal">' +
@@ -340,7 +338,7 @@ function renderReveal(raw) {
       await navigator.clipboard.writeText(raw);
       ev.currentTarget.textContent = 'コピーしました';
     } catch (e) {
-      /* 書き込みが許されない環境では、利用者が自分で選択して写せるように文字列を選ぶ。 */
+      /* Where clipboard writes are not permitted, select the string so the user can copy it down by hand. */
       const range = document.createRange();
       range.selectNodeContents(box.querySelector('[data-raw]'));
       const sel = window.getSelection();
@@ -351,7 +349,7 @@ function renderReveal(raw) {
   });
 }
 
-/** キーを発行する。 */
+/** Issue a key. */
 async function issueToken(btn) {
   const nameInput = document.querySelector('[data-token-name]');
   const name = nameInput.value.trim();
@@ -373,7 +371,7 @@ async function issueToken(btn) {
       renderReveal(raw);
       nameInput.value = '';
     } else {
-      /* 生値を受け取れなかったキーは誰にも使えない。残しておく理由が無いため、その場で失効を促す。 */
+      /* A key whose raw value never arrived is useless to anyone. There is no reason to keep it, so prompt to revoke it on the spot. */
       alert('キーは発行されましたが、生値を受け取れませんでした。この値は再表示できないため、一覧からこのキーを失効して発行し直してください。');
     }
     await loadTokens();
@@ -388,7 +386,7 @@ async function issueToken(btn) {
   }
 }
 
-/** キーを失効する。失効は取り消せないため、名前を示して確認する。 */
+/** Revoke a key. Revocation cannot be undone, so confirm with the name shown. */
 async function revokeToken(id, name) {
   if (!confirm(`キー「${name}」を失効します。このキーを使っているプログラムは、以後すべての要求が拒否されます。よろしいですか?`)) return;
   try {
@@ -399,12 +397,12 @@ async function revokeToken(id, name) {
   await loadTokens();
 }
 
-/* このサーバーの全タグ(購読の追加の選択肢)。一度だけ取得して使い回す。 */
+/* Every tag on this Discord server (the choices for adding a subscription). Fetched once and reused. */
 let allTags = null;
-/* 現在購読しているタグの slug。追加の選択肢から購読済みを除くために保持する。 */
+/* The slugs of the currently subscribed tags, kept so that already-subscribed tags can be dropped from the add choices. */
 let subscribedSlugs = new Set();
 
-/** 購読中のタグ。 */
+/** The subscribed tags. */
 function renderSubscriptions(subs) {
   const box = document.querySelector('[data-subs]');
   document.querySelector('[data-subs-card]').hidden = false;
@@ -428,7 +426,7 @@ function renderSubscriptions(subs) {
     `<tbody>${rows}</tbody></table>`;
 }
 
-/** 購読の一覧を読み直す。読み直したら追加の選択肢も更新する(購読した/解除したタグが選択肢に現れる・消えるため)。 */
+/** Reload the subscription listing, then refresh the add choices: a tag just subscribed has to drop out of them, and one just unsubscribed has to reappear. */
 async function loadSubscriptions() {
   try {
     renderSubscriptions(listOf(await get('/api/me/subscriptions'), 'subscriptions'));
@@ -439,14 +437,14 @@ async function loadSubscriptions() {
   await populateSubTagSelect();
 }
 
-/** このサーバーの全タグを一度だけ取得する。 */
+/** Fetch every tag on this Discord server, once. */
 async function ensureAllTags() {
   if (allTags) return allTags;
   allTags = listOf(await get('/api/tags'), 'tags');
   return allTags;
 }
 
-/** 購読の追加の選択肢を、まだ購読していないタグで埋める。全て購読済みか、そもそもタグが無ければ、選択そのものを閉じる。 */
+/** Fill the add choices with the tags not yet subscribed. If all are subscribed, or there are no tags at all, disable the select itself. */
 async function populateSubTagSelect() {
   const select = document.querySelector('[data-sub-tag]');
   const btn = document.querySelector('[data-subscribe]');
@@ -479,7 +477,7 @@ async function populateSubTagSelect() {
   hint.textContent = '選んだタグの記事が公開されると、あなた個人宛てに DM が届きます。';
 }
 
-/** タグを購読する。PUT は同じ要求を何度出しても同じ状態になるため、既に購読していても成功する。 */
+/** Subscribe to a tag. PUT is idempotent, the same request repeated leaves the same state, so it succeeds even when already subscribed. */
 async function subscribe(btn) {
   const select = document.querySelector('[data-sub-tag]');
   const slug = select && select.value;
@@ -500,7 +498,7 @@ async function subscribe(btn) {
   await loadSubscriptions();
 }
 
-/** 購読を解除する。 */
+/** Unsubscribe from a tag. */
 async function unsubscribe(slug, name) {
   if (!confirm(`#${name} の購読を解除します。以後このタグの新着 DM は届きません。よろしいですか?`)) return;
   try {
@@ -511,7 +509,7 @@ async function unsubscribe(slug, name) {
   await loadSubscriptions();
 }
 
-/** 一覧は読み直すたびに作り直されるため、操作は入れ物の側で受ける。 */
+/** The listings are rebuilt on every reload, so actions are delegated to the container instead. */
 function wireActions() {
   document.querySelector('[data-keys]').addEventListener('click', (ev) => {
     const btn = ev.target.closest('[data-revoke]');

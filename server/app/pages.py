@@ -1,10 +1,10 @@
-"""静的な HTML ページの配信と、記事ページへの og メタの注入。
+"""Serving the static HTML pages, and injecting og meta into the article page.
 
-フロントエンドは静的な HTML と JavaScript であり、内容は JSON API から取得して描画する。しかし SNS や Discord のクローラは JavaScript を実行しないため、共有時のカードに何も出ない。記事ページだけはサーバー側で og メタを埋めてから返す。
+The frontend is static HTML and JavaScript that fetches its content from the JSON API and renders it. Social and Discord crawlers do not run JavaScript, so a shared link's card comes out empty. The article page alone is served with og meta already filled in server-side.
 
-**og:image と本文の抜粋を出すのは visibility='public' かつ status='published' の記事に限る。**下書き・レビュー中・予約・アーカイブや、members / restricted の記事は、タイトルを含めて一切出さない。og メタはクローラのために存在するものであり、認証を経ない相手へそのまま渡る。ここに未公開・限定記事の内容を載せると、URL を知るだけで中身が読めてしまう。
+**og:image and the body excerpt are emitted only for articles with visibility='public' and status='published'.** Draft, in-review, scheduled and archived articles, and members / restricted ones, emit nothing at all, title included. og meta exists for crawlers and is handed straight to unauthenticated parties, so putting unpublished or limited-visibility content here would make it readable to anyone who knows the URL.
 
-og:image に使えるのはカバー画像だけである。カバー画像は Discord embed に出すため認証なしで配信されるが、本文中の画像は記事と同じ閲覧判定を受けるため、クローラが取得すると 404 になる。
+Only the cover image is usable as og:image. The cover image is served without authentication because Discord embeds show it, but images inside the body get the same visibility check as the article, so a crawler fetching one gets a 404.
 """
 
 from __future__ import annotations
@@ -33,30 +33,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=['pages'])
 
-# 静的フロントエンドの置き場。server/app/pages.py から見て server/web/。
+# Where the static frontend lives: server/web/, relative to server/app/pages.py.
 WEB_DIR: Final = Path(__file__).resolve().parent.parent / 'web'
 
-# 記事ページのテンプレート内で、生成した og メタ群と差し替える目印。
+# Marker in the article template that the generated og meta replaces.
 OG_PLACEHOLDER: Final = '<!-- og:meta -->'
 
-# <title> に添える名前。カードの表題とタブの表題を揃えるために使う。
+# Name appended to <title>, so the card title and the tab title match.
 SITE_NAME: Final = 'instant-news'
 
-# og:description の長さ。これより長い説明は主要な SNS が途中で切るため、切られ方を相手任せにせずこちらで丸める。
+# og:description length. The major social sites cut anything longer, so truncate here rather than leave the cut up to them.
 DESCRIPTION_LIMIT: Final = 200
 
-# テンプレートが持つ <title> を落とすためのもの。HTML の <title> は 1 つだけが有効であり、テンプレート側の表題が残ると、そちらが先に現れて記事の表題を上書きしてしまう。
-# コメントと <title> を 1 つの選択肢として並べ、コメントは丸ごと読み飛ばす。テンプレートの注記が散文として <title> や </title> に言及していると、コメントを読み飛ばさない検索は、その言及から本物の </title> までを 1 つの要素と見なして巻き込む。挟まれたコメントの終わり(-->)や og の目印まで消え、以降の <link> や <script> が閉じ損ねたコメントに飲まれる。
+# Drops the <title> the template carries: only one <title> in an HTML document is effective, and a surviving template title comes first and so overrides the article's.
+# Comments and <title> are alternatives in one pattern so comments are skipped whole. If a template note mentions <title> or </title> in prose, a search that did not skip comments would treat everything from that mention to the real </title> as a single element and swallow it, taking out the intervening comment's --> and the og marker, after which the following <link> and <script> are eaten by the unclosed comment.
 _COMMENT_OR_TITLE: Final = re.compile(r'(?P<comment><!--.*?-->)|(?P<title><title\b[^>]*>.*?</title\s*>)', re.IGNORECASE | re.DOTALL)
 
-# 地の文を取り出す際に、前後を空白で区切るブロック要素。区切らないと段落の末尾と次の段落の先頭が 1 語に繋がる。
+# Block elements padded with a space on each side when extracting plain text; without the padding the end of one paragraph and the start of the next join into one word.
 _BLOCK_TAGS: Final = frozenset({'p', 'div', 'br', 'li', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'table', 'tr', 'td', 'th', 'hr'})
 
 
 class _TextExtractor(HTMLParser):
-    """レンダリング済みの本文 HTML から地の文だけを取り出す。
+    """Pull just the plain text out of rendered body HTML.
 
-    抜粋(articles.excerpt)が無い記事の og:description を本文から作るために使う。本文の Markdown を自前で解釈すると、コードブロックの中身や記法の断片を拾ってしまうため、既にレンダリングとサニタイズを経た body_html を入力にする。
+    Used to build og:description from the body when the article has no excerpt (articles.excerpt). Interpreting the body Markdown here would pick up code-block contents and markup snippets, so the input is body_html, which has already been rendered and sanitized.
     """
 
     def __init__(self) -> None:
@@ -79,7 +79,7 @@ class _TextExtractor(HTMLParser):
 
 
 def _plain_text(body_html: str) -> str:
-    """本文 HTML を 1 行の地の文へ均す。解釈できない断片が混ざっていても例外にせず、取り出せた分を返す。"""
+    """Flatten body HTML into a single line of plain text. Fragments that cannot be parsed do not raise; whatever could be extracted is returned."""
     parser = _TextExtractor()
     parser.feed(body_html)
     parser.close()
@@ -87,14 +87,14 @@ def _plain_text(body_html: str) -> str:
 
 
 def _truncate(text: str, limit: int) -> str:
-    """limit を超える文字列を丸め、省略記号を添える。"""
+    """Truncate a string longer than limit and append an ellipsis."""
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + '…'
 
 
 def _description(article: dict[str, Any]) -> str | None:
-    """og:description に出す説明文。抜粋があればそれを使い、無ければ本文から作る。"""
+    """The description for og:description: the excerpt if there is one, otherwise built from the body."""
     excerpt = (article.get('excerpt') or '').strip()
     if excerpt:
         return _truncate(' '.join(excerpt.split()), DESCRIPTION_LIMIT)
@@ -104,19 +104,19 @@ def _description(article: dict[str, Any]) -> str | None:
 
 
 def _meta_tag(attribute: str, name: str, content: str) -> str:
-    """メタタグ 1 つ。属性値は必ずエスケープする。記事の表題も抜粋もカバーの URL も執筆者が書いた文字列であり、そのまま埋めると引用符を閉じて任意のタグを差し込める。"""
+    """One meta tag. Attribute values are always escaped: the article title, the excerpt and the cover URL are all strings a writer typed, and embedding them raw would let the writer close the quote and inject arbitrary tags."""
     return f'<meta {attribute}="{escape(name)}" content="{escape(content)}">'
 
 
 def _is_shareable(article: dict[str, Any]) -> bool:
-    """クローラへ内容を渡してよい記事か。誰でも閲覧できる公開済みの記事だけが該当する。"""
+    """Whether the article's content may be handed to a crawler: only published articles that anyone can view qualify."""
     return article.get('status') == 'published' and article.get('visibility') == 'public'
 
 
 def _build_meta(config: Config, article: dict[str, Any]) -> str:
-    """記事ページの head に入れる表題とメタタグ群を組み立てる。"""
+    """Build the <title> and the meta tags that go in the article page's head."""
     if not _is_shareable(article):
-        # 未公開・限定記事。ここへ到達できるのは著者本人と管理者だけだが、その画面から内容がクローラや共有先へ流れないよう、表題も含めて何も出さない。
+        # An unpublished draft copy or a limited-visibility article. Only the author and admins can reach this, but nothing is emitted, not even the title, so that no content flows from their page out to a crawler or a share target.
         return f'<title>{escape(SITE_NAME)}</title>\n<meta name="robots" content="noindex">'
 
     title = str(article.get('title') or '')
@@ -132,19 +132,19 @@ def _build_meta(config: Config, article: dict[str, Any]) -> str:
         tags.append(_meta_tag('property', 'og:description', description))
     cover = (article.get('cover_image_url') or '').strip()
     if cover:
-        # 配信 URL は /media/... の絶対パスで入るため、公開 URL を前置して絶対 URL にする。外部ホストの絶対 URL はそのまま残る。
+        # A delivery URL arrives as an absolute path under /media/..., so prefix the public URL to make it an absolute URL. An absolute URL on a remote host is left as is.
         tags.append(_meta_tag('property', 'og:image', urljoin(f'{config.server.base_url}/', cover)))
     tags.append(_meta_tag('name', 'twitter:card', 'summary_large_image'))
     return '\n'.join(tags)
 
 
 def _strip_first_title(html: str) -> str:
-    """テンプレートが持つ最初の <title> 要素を落とす。コメントの中身は要素と見なさない。"""
+    """Drop the first <title> element the template carries. Content inside a comment does not count as an element."""
     removed = False
 
     def _replace(match: re.Match[str]) -> str:
         nonlocal removed
-        # コメントはそのまま返す(og の目印もコメントであり、消してはならない)。
+        # Return comments untouched: the og marker is itself a comment and must not be removed.
         if match.group('comment') is not None or removed:
             return match.group(0)
         removed = True
@@ -154,12 +154,12 @@ def _strip_first_title(html: str) -> str:
 
 
 def _inject_meta(template: str, meta: str) -> str:
-    """テンプレートの目印を生成したメタタグ群で置き換える。"""
-    # テンプレート側の <title> は必ず落とす。残すと 2 つの <title> が並び、先に現れた方が採用される。順序に頼らず 1 つだけにしておけば、正しい HTML になり、素朴な走査を行う相手も記事の表題を拾える。
+    """Replace the template's marker with the generated meta tags."""
+    # The template's <title> is always dropped: leaving it puts two <title> elements side by side and the first one wins. Keeping exactly one instead of relying on order gives valid HTML, and even a naive scanner then picks up the article's title.
     stripped = _strip_first_title(template)
     if OG_PLACEHOLDER in stripped:
         return stripped.replace(OG_PLACEHOLDER, meta, 1)
-    # 目印を失ったテンプレートでもメタを落とさない。黙って省くと、共有カードが空になったことに誰も気付けない。
+    # A template that has lost the marker still gets its meta. Skipping it silently would leave the share card empty with no one able to notice.
     logger.warning('article.html に %s がありません。</head> の直前へ og メタを挿入します。', OG_PLACEHOLDER)
     if '</head>' in stripped:
         return stripped.replace('</head>', f'{meta}\n</head>', 1)
@@ -168,7 +168,7 @@ def _inject_meta(template: str, meta: str) -> str:
 
 
 def _page_path(filename: str) -> Path:
-    """配信するページの実体。存在しない場合は配備の誤りであり、利用者には 500 を返してログへ場所を残す(応答にファイルの場所を出さない)。"""
+    """The file behind a served page. A missing file is a deployment error: the user gets a 500 and the path is recorded in the log, never put in the response."""
     path = WEB_DIR / filename
     if not path.is_file():
         logger.error('ページのテンプレートが見つかりません: %s', path)
@@ -181,16 +181,16 @@ def _read_template(filename: str) -> str:
 
 
 def _serve(filename: str) -> FileResponse:
-    """静的なページをそのまま返す。内容は JavaScript が API から取得して描画する。"""
+    """Return a static page as is. JavaScript fetches the content from the API and renders it."""
     return FileResponse(_page_path(filename))
 
 
 async def render_article_page(db: Database, config: Config, settings: RuntimeSettings, slug: str, principal: Principal | None) -> HTMLResponse:
-    """記事ページを組み立てて返す。
+    """Build and return the article page.
 
-    閲覧できない記事は 403 ではなく 404 を返す。403 は「その slug に何かがある」ことを教えてしまい、存在自体が秘密である限定公開の記事では、それだけで漏洩になる。
+    An article the viewer cannot see returns 404, not 403. A 403 reveals that something exists at that slug, and for a limited-visibility article whose very existence is secret, that alone is a leak.
 
-    config は公開 URL の組み立て(og:url / og:image)に、settings は閲覧範囲の判定に使う。前者は config.yaml、後者は settings 表と出どころが異なるため、両方を受け取る。
+    config is used to build public URLs (og:url / og:image), settings to run the visibility check. Both are taken because their sources differ: config.yaml for the former, the settings table for the latter.
     """
     article = await db.fetch_one('SELECT * FROM articles WHERE slug = %s', slug)
     if article is None or not await can_view_article(db, principal, article, settings=settings):
@@ -198,14 +198,12 @@ async def render_article_page(db: Database, config: Config, settings: RuntimeSet
     return HTMLResponse(_inject_meta(_read_template('article.html'), _build_meta(config, article)))
 
 
-# --------------------------------------------------------------------------
-# 経路。API(/api/...)・画像(/media/...)・静的資産(/static/...)と衝突しないよう、いずれも固定の接頭辞を持つ。
-# --------------------------------------------------------------------------
+# Routes. Each one carries a fixed prefix so it cannot collide with the API (/api/...), images (/media/...) or static assets (/static/...).
 
 
 @router.get('/', include_in_schema=False)
 async def index_page() -> FileResponse:
-    """トップ。新着記事の一覧。"""
+    """Home. The latest articles listing."""
     return _serve('index.html')
 
 
@@ -217,44 +215,44 @@ async def article_page(
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> HTMLResponse:
-    """記事面。og メタを注入するためここだけ動的に組み立てる。"""
+    """The article page. The only one built dynamically, because og meta is injected into it."""
     return await render_article_page(db, config, settings, slug, principal)
 
 
 @router.get('/tags/{slug}', include_in_schema=False)
 async def tag_page(slug: str) -> FileResponse:
-    """タグページ(話題の特設ページ)。"""
+    """The tag page: a dedicated hub for a topic."""
     return _serve('tag.html')
 
 
 @router.get('/publishers/{slug}', include_in_schema=False)
 async def publisher_page(slug: str) -> FileResponse:
-    """報道社のプロフィール。"""
+    """A publisher's profile."""
     return _serve('publisher.html')
 
 
 @router.get('/categories/{slug}', include_in_schema=False)
 async def category_page(slug: str) -> FileResponse:
-    """カテゴリ別の一覧。トップと同じ雛形を使い、絞り込みは JavaScript が URL から読む。"""
+    """The per-category listing. Uses the same template as the home page; JavaScript reads the filter from the URL."""
     return _serve('index.html')
 
 
 @router.get('/editor', include_in_schema=False)
 async def editor_page() -> FileResponse:
-    """記事の作成・編集画面。"""
+    """The editor: create and edit articles."""
     return _serve('editor.html')
 
 
 @router.get('/settings', include_in_schema=False)
 async def settings_page() -> FileResponse:
-    """利用者の設定画面(API キー・タグ購読)。"""
+    """The user's own settings page (API keys, tag subscriptions)."""
     return _serve('settings.html')
 
 
 @router.get('/admin', include_in_schema=False)
 async def admin_page() -> FileResponse:
-    """プラットフォームの設定画面(settings 表の全キー)。
+    """The platform settings screen (every key in the settings table).
 
-    ここで返すのは雛形だけであり、設定の値は settings:admin を要求する API からしか取れない。誰に見せるかを決めるのはこの経路ではなく、その API である。
+    Only the template is returned here; the setting values are obtainable solely from an API that requires settings:admin. Who they are shown to is decided by that API, not by this route.
     """
     return _serve('admin.html')

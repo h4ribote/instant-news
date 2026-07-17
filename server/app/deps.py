@@ -1,8 +1,8 @@
-"""FastAPI の依存性。要求から認証主体を解決し、操作に必要な資格を検査する。
+"""FastAPI dependencies. Resolve the authenticated principal from the request and check the eligibility an operation needs.
 
-認証の受け口は 2 つある。ブラウザ向けの Cookie(session)と、機械クライアント向けの Authorization: Bearer。両方があれば Bearer を優先する(明示的に資格情報を添えた側の意図を採る)。
+There are two ways in: the Cookie (session) for browsers, and Authorization: Bearer for machine clients. When both are present Bearer wins, taking the intent of the side that attached credentials explicitly.
 
-**スコープの検査は API キー経由のときだけ行う。**スコープはキーに貸し出す範囲の上限であって、人が Web UI から自分の権限で行う操作を縛るものではない。一方、管理者資格の検査は経路に依らず、要求のたびに現在のロールから行う。
+**Scope is checked only on the API key path.** A scope is a ceiling on what the key may borrow, not a limit on what a person does from the Web UI with their own permissions. Admin eligibility, by contrast, is checked regardless of path and decided from the current roles on every request.
 """
 
 from __future__ import annotations
@@ -29,14 +29,14 @@ from .principals import (
 )
 
 BEARER_SCHEME: Final = 'bearer'
-# 解決した主体を要求の間だけ覚えておくための場所。1 つの要求で複数の依存性が主体を求めても、DB を引き直さない。
+# Holds the resolved principal for the life of one request, so that several dependencies asking for it do not each re-query the DB.
 _PRINCIPAL_STATE_KEY: Final = 'instant_news_principal'
-# 「まだ解決していない」と「解決した結果が未認証(None)」を区別するための番人。
+# Sentinel separating "not resolved yet" from "resolved, and the result is unauthenticated (None)".
 _UNRESOLVED: Final = object()
 
 
 async def get_db(request: Request) -> Database:
-    """アプリの状態に置いた Database を取り出す。"""
+    """Return the Database placed on the app state."""
     db = getattr(request.app.state, 'db', None)
     if db is None:
         raise RuntimeError('app.state.db が設定されていません。アプリの起動時に Database を割り当ててください。')
@@ -44,9 +44,9 @@ async def get_db(request: Request) -> Database:
 
 
 async def get_config(request: Request) -> Config:
-    """アプリの状態に置いた Config を取り出す。
+    """Return the Config placed on the app state.
 
-    ここから取れるのは config.yaml が真実であり続ける値(server / database / 画像の保存先)だけである。discord / admin / articles と画像の各上限は settings 表が真実であり、get_settings から取る。
+    Only the values config.yaml remains the source of truth for are available here: server / database / the image storage location. For discord / admin / articles and the image limits the settings table is the source of truth, so take those from get_settings.
     """
     config = getattr(request.app.state, 'config', None)
     if config is None:
@@ -55,7 +55,7 @@ async def get_config(request: Request) -> Config:
 
 
 async def get_settings_store(request: Request) -> SettingsStore:
-    """アプリの状態に置いた SettingsStore を取り出す。設定を書き換える経路(管理画面)が使う。"""
+    """Return the SettingsStore placed on the app state. Used by the path that rewrites settings (the admin screen)."""
     store = getattr(request.app.state, 'settings', None)
     if store is None:
         raise RuntimeError('app.state.settings が設定されていません。アプリの起動時に SettingsStore を割り当ててください。')
@@ -63,25 +63,25 @@ async def get_settings_store(request: Request) -> SettingsStore:
 
 
 async def get_settings(request: Request) -> RuntimeSettings:
-    """settings 表の現在の設定を取り出す。
+    """Return the current settings from the settings table.
 
-    要求のたびに読むが、SettingsStore が短い時間だけ値を保持するため DB への問い合わせは毎回は起こらない。設定の変更を反映するのに再起動を要さないのはこのためである。**取得した値を跨いで保持しないこと。**モジュールのグローバルや起動時の変数へ写すと、画面から変更した値がそのプロセスにだけ届かなくなる。
+    Read on every request, but SettingsStore holds the values for a short while, so this does not query the DB every time. That is why a settings change takes effect without a restart. **Never keep the returned value beyond the current request.** Copying it into a module global or a variable set at startup means a value changed from the UI never reaches that process.
     """
     store = await get_settings_store(request)
     return await store.snapshot()
 
 
 async def get_media_config(request: Request) -> MediaConfig:
-    """画像のモジュールへ渡す実効設定を組み立てる。保存先は config.yaml、上限は settings 表から取る。"""
+    """Assemble the effective config handed to the image modules: the storage location from config.yaml, the limits from the settings table."""
     config = await get_config(request)
     settings = await get_settings(request)
     return effective_media_config(config, settings)
 
 
 def _bearer_token(request: Request) -> str | None:
-    """Authorization ヘッダから Bearer のキーを取り出す。Bearer 以外のスキームは扱わない。
+    """Take the Bearer API key out of the Authorization header. No other scheme is handled.
 
-    前段のプロキシや別の目的で Authorization が付くことがあるため、Bearer 以外は「API キーの提示ではない」とみなして Cookie の判定へ進む。
+    An upstream proxy or some unrelated purpose may set Authorization, so anything that is not Bearer counts as "no API key presented" and falls through to the cookie check.
     """
     header = request.headers.get('Authorization')
     if not header:
@@ -99,25 +99,25 @@ async def _resolve_principal(request: Request) -> Principal | None:
     if raw_token is not None:
         principal = await load_principal_from_token(db, config, raw_token)
         if principal is None:
-            # Bearer を名乗った以上、通らないキーは黙って未認証へ落とさない。失効・期限切れのキーが「公開分だけが返る成功応答」を受け取ると、機械のクライアントは失敗に気づけず、書いたつもりの記事が消えたようにしか見えない。
+            # Having presented itself as Bearer, a key that does not check out must not be dropped silently to unauthenticated. If a revoked or expired key got back a success response carrying only the public subset, a machine client could not tell it had failed, and the article it believed it wrote would simply look as if it had vanished.
             raise Unauthorized('API キーが無効です。失効・期限切れであるか、所有者が対象の Discord サーバーに参加していません。')
         return principal
     raw_session = request.cookies.get(SESSION_COOKIE_NAME)
     if not raw_session:
         return None
-    # 期限切れ・破棄済みの Cookie は未認証として扱う。ブラウザは古い Cookie を送り続けるため、ここを 401 にすると公開ページすら開けなくなる。
+    # An expired or already destroyed cookie counts as unauthenticated. Browsers keep sending a stale cookie, so raising 401 here would make even public pages impossible to open.
     return await load_principal_from_session(db, config, hash_secret(raw_session))
 
 
 async def get_principal_optional(request: Request) -> Principal | None:
-    """要求の主体を解決する。未認証なら None。
+    """Resolve the requesting principal, or None when unauthenticated.
 
-    公開の一覧や記事の詳細のように、認証の有無で見えるものが変わる経路で使う。
+    For routes where what is visible depends on whether the caller is authenticated, such as the public listing and the article detail.
     """
     cached: object = getattr(request.state, _PRINCIPAL_STATE_KEY, _UNRESOLVED)
     if isinstance(cached, Principal):
         return cached
-    # 解決の結果が未認証(None)だったことも覚えておく。_UNRESOLVED のときだけ解決へ進む。
+    # A resolution that came out unauthenticated (None) is remembered as well; only _UNRESOLVED falls through to resolving.
     if cached is None:
         return None
     principal = await _resolve_principal(request)
@@ -126,7 +126,7 @@ async def get_principal_optional(request: Request) -> Principal | None:
 
 
 async def get_principal(request: Request) -> Principal:
-    """要求の主体を解決する。未認証なら 401。"""
+    """Resolve the requesting principal; 401 when unauthenticated."""
     principal = await get_principal_optional(request)
     if principal is None:
         raise Unauthorized()
@@ -134,27 +134,27 @@ async def get_principal(request: Request) -> Principal:
 
 
 def _scope_text(scopes: Iterable[str]) -> str:
-    """文言に出すスコープの並び。順序を固定しないと、同じ状況の 403 が要求ごとに違う文面で返る。"""
+    """Order the scopes named in a message. Without a fixed order, the same 403 comes back worded differently from one request to the next."""
     return ' / '.join(sorted(scopes))
 
 
 async def ensure_scope(db: Database, settings: RuntimeSettings, principal: Principal, *scopes: str) -> None:
-    """列挙したスコープの**いずれか**に相当する操作を、この主体が今の資格で行えるかを検査する。送出は Forbidden。
+    """Check whether this principal, with the eligibility it holds now, may perform an operation matching **any one** of the listed scopes. Raises Forbidden.
 
-    検査は 3 段。いずれも要求の時点で判定し、発行時の資格を持ち出さない。
-      1. guild のメンバーであること。どのスコープも最低限これを要する。
-      2. API キー経由なら、要求を成立させうるスコープ(含意を含む。principals.granting_scopes)を 1 つ以上キーが持つこと(セッション経由では検査しない)。
-      3. 要求を実際に成立させたスコープが管理者スコープしかないなら、所有者が今この瞬間に管理者資格を満たすこと。**キーにスコープが付いているだけでは足りない。**満たさなくなった者のキーは、この段で止まる。
+    Three stages. Each is decided as of the request; the eligibility held at issue time is never carried forward.
+      1. Guild membership. Every scope requires at least this.
+      2. On the API key path, the key must hold at least one scope that can satisfy the request, implications included (principals.granting_scopes). Not checked on the session path.
+      3. If the scopes that actually satisfied the request are admin scopes and nothing else, the owner must meet admin eligibility at this very moment. **Carrying the scope on the key is not enough.** A key whose owner no longer qualifies stops at this stage.
 
-    3 段目が見るのは「要求されたスコープ名」ではなく「実際に要求を通したスコープ」である。articles:write:any だけを持つキーが articles:write の要求を通すとき、要求名は管理者スコープではないが、貸し出されている力は管理者スコープのものである。要求名だけを見ると、この経路が管理者資格の検査を丸ごと迂回する。逆に、管理者資格を要さないスコープを 1 つでも実際に持っているなら、それだけで要求は成立するため管理者である必要はない。
+    Stage 3 looks at the scope that actually let the request through, not at the requested scope name. When a key holding only articles:write:any satisfies an articles:write request, the requested name is not an admin scope, yet the power being lent is an admin scope's. Going by the requested name alone would let this path bypass the admin eligibility check entirely. Conversely, actually holding even one scope that does not require admin eligibility satisfies the request on its own, so being an admin is not required.
     """
     if not scopes:
         raise ValueError('検査するスコープを 1 つ以上指定してください。')
     if not principal.is_guild_member:
-        # 認証は通っているため 401 ではなく 403。もう一度ログインしても資格は戻らず、戻すには対象の Discord サーバーへ参加し直すしかない(API キー経由の非メンバーはそもそも認証の段階で通らない)。
+        # Authentication succeeded, so 403 rather than 401. Logging in again does not bring the eligibility back; only rejoining the target Discord server does. A non-member on the API key path never gets past authentication in the first place.
         raise Forbidden('対象の Discord サーバーに参加していないため、この操作は行えません。')
     if not principal.via_token:
-        # セッション経由の主体はキーの範囲という概念を持たない。要求が管理者スコープでしか成立しないときにだけ、現在の管理者資格を問う。
+        # A principal on the session path has no notion of a key's range. Ask for current admin eligibility only when the request can be satisfied by admin scopes alone.
         if all(scope in ADMIN_SCOPES for scope in scopes) and not await is_admin(db, settings, principal):
             raise Forbidden(f'{_scope_text(scopes)} は管理者のみが行えます。')
         return
@@ -163,16 +163,16 @@ async def ensure_scope(db: Database, settings: RuntimeSettings, principal: Princ
     if not held:
         raise Forbidden(f'この API キーには {_scope_text(granting)} のいずれのスコープもありません。')
     if held - ADMIN_SCOPES:
-        # 管理者資格を要さないスコープで既に成立している。
+        # Already satisfied by a scope that does not require admin eligibility.
         return
     if not await is_admin(db, settings, principal):
         raise Forbidden(f'{_scope_text(held)} は管理者のみが行えます。')
 
 
 async def ensure_admin(db: Database, settings: RuntimeSettings, principal: Principal) -> None:
-    """管理者資格を要求する。送出は Forbidden。
+    """Require admin eligibility. Raises Forbidden.
 
-    API キーによる要求は通さない。キーに貸し出せる権限はスコープが名指ししたものだけであり、どのスコープにも当たらない操作を「所有者が管理者だから」という理由で通すと、articles:write だけを与えたキーが管理操作を行えることになる。スコープでキーを縛る仕組みが、そこで意味を失う。
+    A request made with an API key is never allowed through. The only permissions a key may borrow are the ones its scope names, and letting an operation that matches no scope through on the grounds that "the owner is an admin" would mean a key granted only articles:write could perform admin operations. That is the point at which bounding keys by scope stops meaning anything.
     """
     if principal.via_token:
         raise Forbidden('この操作は API キーでは行えません。Web UI からログインしてください。')
@@ -183,7 +183,7 @@ async def ensure_admin(db: Database, settings: RuntimeSettings, principal: Princ
 
 
 def require_scope(scope: str) -> Callable[..., Awaitable[Principal]]:
-    """そのスコープに相当する操作の資格を要求する依存性を作る。"""
+    """Build a dependency requiring the eligibility for an operation matching that scope."""
 
     async def dependency(
         principal: Principal = Depends(get_principal),
@@ -197,7 +197,7 @@ def require_scope(scope: str) -> Callable[..., Awaitable[Principal]]:
 
 
 def require_admin() -> Callable[..., Awaitable[Principal]]:
-    """管理者資格を要求する依存性を作る。"""
+    """Build a dependency requiring admin eligibility."""
 
     async def dependency(
         principal: Principal = Depends(get_principal),

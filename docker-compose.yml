@@ -1,49 +1,58 @@
-# instant-news の実行環境。db(MySQL)・server(FastAPI)・bot(Discord bot)の 3 サービスで構成する。
+# Runtime environment for instant-news: three services — db (MySQL), server (FastAPI) and bot (Discord bot).
 #
-# 状態を持つ場所は MySQL だけではない。この構成が永続化する状態は次の 2 つであり、両者は互いを参照する:
-#   db-data     … MySQL のデータ。記事・利用者・画像の登録簿(media 表)。
-#   media-data  … 画像の実体。media 表の各行が content_hash で指す先(config.yaml の media.storage_dir)。
-# したがってバックアップと復元は必ず 2 つを揃えて行う。MySQL だけを戻すと、記事は画像を指しているのに実体が無い状態になり、media 表だけを消すと実体が誰からも参照されないまま残る。画像をボリュームではなくコンテナのファイルシステムに置くと、イメージを入れ替えた瞬間に全画像が消え、DB 側の参照だけが残る。
+# MySQL is not the only place that holds state. This deployment persists two, and they reference each other:
+#   db-data: MySQL's data — articles, users, the catalogue of images (the media table), and the platform settings. Once the seed values are dropped from config.yaml, this is the only copy of discord.guild_id and the OAuth and bot credentials, and a deployment restored without it cannot boot at all: SettingsStore.bootstrap refuses to start for the settings that have no default.
+#   media-data: the image blobs — what each media row points at via content_hash (media.storage_dir in config.yaml).
+# So back up and restore the two together. Restoring MySQL alone leaves articles pointing at blobs that are not there; wiping only the media table leaves blobs that nothing references. Putting the images on the container filesystem instead of a volume loses every image the moment the container image is replaced, leaving only the DB-side references behind.
 #
-# ビルドコンテキストは server・bot とも、各サービスのディレクトリではなくリポジトリのルートである。両者は common/ を共有しており、コンテキストを絞ると common/ をコピーできない。
+# The build context for both server and bot is the repository root, not each service's own directory: the two share common/, which a narrower context could not copy.
 #
-# config.yaml は Git 追跡対象外であり、イメージにも焼き込まない(.dockerignore で除外している)。実行時にマウントで渡すため、設定を変えてもイメージの再ビルドは要らない。common/config.py はリポジトリのルート、すなわちコンテナ内の /app にある config.yaml を探すため、そこへ重ねる。
+# config.yaml is untracked by Git and is never baked into the image (.dockerignore excludes it). It is passed in by mount at run time, so changing config needs no image rebuild. common/config.py looks for config.yaml at the repository root, i.e. /app inside the container, so it is mounted over that path.
+# That reaches only part of the file. Only server / database / media.storage_dir are read from the mount on every boot; everything else in it is a seed value copied into the MySQL settings table at first boot and never read again. The settings table is the source of truth for those and admins change them from /admin, so editing them here and restarting does nothing (common/settings.py, config.example.yaml).
 #
-# compose は YAML の設定ファイルを読めないため、DB の資格情報と公開ポートだけは config.yaml と二重に現れる。値はリポジトリのルートに置く .env(Git 追跡対象外にすること)で与え、config.yaml の対応する値と一致させる。
+# compose cannot read the YAML config file, so the DB credentials and the published port — and only those — appear twice, here and in config.yaml. Supply them from a .env at the repository root (keep it untracked by Git) and keep them equal to the corresponding config.yaml values.
 
 services:
   db:
     image: mysql:8.4
     restart: unless-stopped
     command:
-      # スキーマは utf8mb4 で作られる(migrations/0001_initial.sql)。MySQL 8 の既定と同じだが、絵文字と多言語を扱う前提が既定値に依存しないよう明示する。
+      # The schema is created as utf8mb4 (migrations/0001_initial.sql). That is also MySQL 8's default, but emoji and multilingual text are a premise here, so it is stated rather than left to a default.
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
-      # articles の全文検索は ngram パーサを使う(日本語は空白で語を区切らないため、既定の空白区切りでは索引が成立しない)。ngram_token_size は起動時にしか設定できず、この値で索引が構築されるため、後から変える場合は FULLTEXT 索引の作り直しが要る。2 は 2 文字の語から拾える既定値。
+      # Full-text search over articles uses the ngram parser: Japanese does not separate words with spaces, so the default space-delimited parser builds no usable index.
+      # ngram_token_size can only be set at startup and the index is built with this value, so changing it later requires rebuilding the FULLTEXT index. 2 is the default, and picks up words from two characters up.
       - --ngram-token-size=2
-      # ngram パーサに対してストップワードを無効にする。既定のストップワード一覧は英語向けで、1 文字の "a" と "i" を含む。ngram パーサは語ではなくトークンを構成する「文字」を一覧と照合し、1 文字でも該当するとそのトークンごと索引から捨てるため、既定のままでは 2 文字トークンが全て a か i を含む語(Japan → ja/ap/pa/an、data → da/at/ta、Asia・AI・API・capital など)は索引に 1 つも残らず、検索しても常に 0 件になる。ch が残る China や a も i も含まない Tokyo が引けるため、不具合は語ごとにまだらに現れる。日本語の語は影響を受けない。ngram_token_size と同じくこの値は索引の構築時に読まれるので(検索時の値は結果を左右しない)、後から変える場合は FULLTEXT 索引の作り直しが要る。
+      # Disable stopwords for the ngram parser. The default stopword list is written for English and contains the single characters "a" and "i".
+      # The ngram parser matches the list against the characters a token is made of, not against words, and drops the whole token from the index if even one character matches.
+      # So with the default list, any word whose 2-character tokens all contain a or i (Japan -> ja/ap/pa/an, data -> da/at/ta, and Asia, AI, API, capital) leaves nothing at all in the index, and searching for it always returns 0 results.
+      # The breakage shows up patchily, word by word: China still matches because ch survives, and Tokyo contains neither a nor i. Japanese words are unaffected.
+      # Like ngram_token_size, this value is read when the index is built (the value at search time does not affect results), so changing it later requires rebuilding the FULLTEXT index.
       - --innodb-ft-enable-stopword=OFF
-      # InnoDB がデータと索引を載せるメモリ。MySQL の既定は 128 MiB であり、記事本文(LONGTEXT)と ngram の全文索引を抱えるには小さい。ここから溢れた分は読むたびにディスクへ行く。値は実行環境の空きメモリで決まるため .env で与える。db コンテナにメモリ上限を設けていない以上、MySQL に自動計算させる(innodb_dedicated_server)とホスト全体の RAM を基準に約 75% を確保しようとし、同居する server と bot を圧迫するため、明示した値を渡す。
+      # Memory InnoDB holds data and indexes in. MySQL's default is 128 MiB, too small to hold article bodies (LONGTEXT) plus the ngram full-text index; whatever overflows goes to disk on every read.
+      # The value depends on the host's free memory, so it comes from .env. The db container has no memory limit, so letting MySQL compute the size itself (innodb_dedicated_server) would claim about 75% of the whole host's RAM and squeeze the co-located server and bot — hence an explicit value.
       - --innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-1G}
-      # バイナリログの保持期間(7 日)。MySQL 8.4 の既定は 30 日だが、この構成にレプリカは無く、バックアップもボリュームを揃えて取る方式(下記 volumes の説明)であって binlog を退避しない。したがって 30 日分を db-data に溜め続けても、それを使う手順がどこにも無いまま容量だけを消費する。それでも残すのは、取り違えた更新を掛けた直後に mysqlbinlog で内容を読み、何が起きたかを追える猶予としてである。
+      # Binary log retention (7 days). MySQL 8.4 defaults to 30 days, but this deployment has no replica, and backups pair the volumes (see the volumes notes below) rather than archiving binlogs, so 30 days would accumulate in db-data and consume space with no procedure anywhere that uses it.
+      # They are kept at all as a grace window: right after a wrong update is applied, mysqlbinlog can read them back to trace what happened.
       - --binlog-expire-logs-seconds=604800
     environment:
-      # config.yaml の database 節と一致させること。パスワードには既定値を持たせない。リポジトリに既定の資格情報を置くと、変更されないまま本番へ出る。
+      # Keep these equal to the database section of config.yaml. The passwords get no default: a default credential sitting in the repository ships to production unchanged.
       MYSQL_DATABASE: ${MYSQL_DATABASE:-instant_news}
       MYSQL_USER: ${MYSQL_USER:-instant_news}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?config.yaml の database.password と同じ値を .env の MYSQL_PASSWORD に設定してください}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MySQL の root パスワードを .env の MYSQL_ROOT_PASSWORD に設定してください(アプリケーションは root を使わず、保守用です)}
     volumes:
       - db-data:/var/lib/mysql
-      # データディレクトリが空のとき、すなわち初回起動時にのみ実行され、スキーマを作る。既存のデータがある環境では実行されないため、スキーマ変更を反映する手段にはならない。
+      # Runs only when the data directory is empty, i.e. on first boot, and creates the schema. It does not run where data already exists, so it is not a way to apply schema changes.
       - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      # 127.0.0.1 を明示して TCP で確かめる(localhost では UNIX ソケットに繋いでしまい、初期化中の一時サーバーにも繋がってしまう)。初期化中の MySQL はネットワークを無効にした一時サーバーで動くため、TCP で繋がること自体が初期化の完了を意味する。さらにアプリと同じ資格情報で対象のデータベースへ問い合わせ、利用者とスキーマまで揃ったことを確かめる。
+      # Check over TCP with an explicit 127.0.0.1: localhost would connect over the UNIX socket, which also reaches the temporary server that runs during initialization.
+      # MySQL initializes on a temporary server with networking disabled, so connecting over TCP at all means initialization has finished. The query then goes to the target database with the application's own credentials, confirming the user and the schema are in place too.
       test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u \"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" -D \"$$MYSQL_DATABASE\" -e 'SELECT 1' > /dev/null 2>&1"]
       interval: 5s
       timeout: 5s
       retries: 30
-      # スキーマの初期化が終わるまでは失敗して当然であり、その間の失敗を unhealthy と数えさせない。
+      # Failing is expected until schema initialization finishes; do not let failures in that window count as unhealthy.
       start_period: 60s
 
   server:
@@ -53,17 +62,17 @@ services:
     restart: unless-stopped
     depends_on:
       db:
-        # スキーマの初期化が終わるまで起動を待つ。db のコンテナが立ち上がったことと、MySQL が接続を受けられることは別である。
+        # Wait for schema initialization before starting. The db container coming up and MySQL being able to accept connections are two different things.
         condition: service_healthy
-    # 公開するのは config.yaml の server.port。compose は config.yaml を読めないため、既定値の 8000 から変える場合は config.yaml の server.port と .env の INSTANT_NEWS_PORT の両方を合わせること(コンテナの内と外で同じ番号を使う)。
+    # What is published is server.port from config.yaml. compose cannot read config.yaml, so moving off the 8000 default means changing both server.port there and INSTANT_NEWS_PORT in .env (the same number is used inside and outside the container).
     ports:
       - "${INSTANT_NEWS_PORT:-8000}:${INSTANT_NEWS_PORT:-8000}"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      # 画像の実体。マウント先は config.yaml の media.storage_dir と一致させること。
+      # The image blobs. The mount target must match media.storage_dir in config.yaml.
       - media-data:/var/lib/instant-news/media
     healthcheck:
-      # 待ち受けポートは config.yaml が決めるため、ここでも設定から読む。トップページの配信までを確かめる。
+      # config.yaml decides the listen port, so read it from the config here too. This checks all the way through to the home page being served.
       test: ["CMD", "python", "-c", "import urllib.request; from common.config import load_config; urllib.request.urlopen(f'http://127.0.0.1:{load_config().server.port}/', timeout=5).read()"]
       interval: 15s
       timeout: 10s
@@ -78,13 +87,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # bot は server に依存しない。記事の公開を決めて通知を待ち行列へ積むのは server、待ち行列を読んで Discord へ送るのは bot であり、両者は DB の待ち行列(article_discord_posts / article_subscription_notices)だけで繋がる。server が落ちていても bot は積まれた分を送れ、bot が落ちていても server は公開して積める。
+    # bot does not depend on server. server decides an article's publication and enqueues the notification post; bot reads the queue and sends it to Discord. The only thing joining the two is the DB queues (article_discord_posts / article_subscription_notices), so bot can still send what is already enqueued while server is down, and server can still publish and enqueue while bot is down.
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-    # 画像のボリュームは持たない。画像を書くのも配信するのも server である。
+    # No image volume here: server is what writes images and what serves them.
 
 volumes:
-  # MySQL のデータ。
+  # MySQL's data.
   db-data:
-  # 画像の実体。config.yaml の media.storage_dir に対応する。
+  # The image blobs; corresponds to media.storage_dir in config.yaml.
   media-data:

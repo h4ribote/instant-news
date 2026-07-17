@@ -1,10 +1,10 @@
-"""記事の保存・公開のサービス層。
+"""Service layer for saving and publishing articles.
 
-このモジュールは HTTP を知らない。ルータからもバックグラウンドの予約公開ループからも同じ呼び出しで使えるようにするためである。送出する例外は errors.py の AppError 派生であり、HTTP への変換は境界(例外ハンドラ)が行う。
+This module knows nothing about HTTP, so the routers and the background scheduled-publishing loop can drive it through the same calls. It raises the AppError subclasses from errors.py; the boundary (the exception handlers) turns them into HTTP responses.
 
-保存と公開で Discord ロールの扱いが正反対である点がこのモジュールの要である。保存時の資格判定(誰の名義で書けるか・速報を立てられるか)は現在のロールを都度参照するが、公開時に決まる署名(articles.publisher_id)は凍結し、以後ロールが変わっても動かさない。誰がいつどの社の名前で報じたかは過去の事実であって、現在の所属の関数ではない。
+The heart of the module is that save and publish treat Discord roles in opposite ways. Eligibility at save time (whose name may be written under, whether breaking news may be flagged) is re-read from the current roles every time, but the byline settled at publish time (articles.publisher_id) is frozen and never moves again, however the roles change afterwards. Who reported under which publisher's name and when is a past fact, not a function of the current affiliation.
 
-画像の取り込みは公開時ではなく保存のたびに行う。Discord の CDN URL は約 24 時間で失効するため、公開時まで待つと下書きのまま放置された記事は失効後の取得になり、そのときには元の画像がもう存在しない。
+Images are ingested on every save rather than at publish time. Discord CDN URLs expire in about 24 hours, so waiting until publish means an article left sitting as a draft is fetched after expiry, when the original image is already gone.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .media.service import IngestFailure, ingest_article_images
 from .principals import Principal, has_scope, is_admin
 from .schemas import ArticleWrite, visible_text
 
-# ArticleError / ArticleForbidden は errors.py で定義したものをそのまま用いる。例外から HTTP への変換を errors.py へ集約する方針のもとでは、同名の別クラスをここで定義すると例外ハンドラの対応表から外れ、業務上の規則違反が 400 や 403 ではなく 500 として返る。
+# ArticleError / ArticleForbidden are re-exported from errors.py, never redefined here. Exception-to-HTTP conversion is centralized in errors.py, so a same-named class defined here would fall outside the handler table and business-rule violations would come back as 500 instead of 400 or 403.
 __all__ = [
     'ArticleError',
     'ArticleForbidden',
@@ -41,37 +41,35 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# slug に残す文字。Unicode の語構成文字(日本語を含む)と - . のみを残し、それ以外は - へ潰す。URL のパス断片としてそのまま出るため、空白や区切りに化ける文字を残さない。
+# Characters a slug may keep: Unicode word characters (Japanese included) plus - and ., everything else collapsed to -. The slug goes out verbatim as a URL path segment, so nothing that could turn into whitespace or a separator may survive.
 _SLUG_STRIP_RE: Final = re.compile(r'[^\w.-]+', re.UNICODE)
-# 連番の接尾辞(-2 など)を足しても articles.slug の VARCHAR(200) に収まるようにする。
+# Leaves room for a numbering suffix (-2 and so on) inside articles.slug's VARCHAR(200).
 _SLUG_BASE_MAX_LENGTH: Final = 190
-# タイトルが記号だけで構成されていて slug が空になった場合の代替。
+# Fallback for a title made entirely of symbols, which slugifies to an empty string.
 _SLUG_FALLBACK: Final = 'article'
-# 自動生成の slug が衝突し続けた場合に打ち切る上限。
+# Where to give up when generated slugs keep colliding.
 _SLUG_MAX_ATTEMPTS: Final = 1000
 
-# 記事の保存で参照する既存行の列。
+# Columns of the existing row read when saving an article.
 _EXISTING_COLUMNS: Final = (
     'id, slug, author_id, publisher_id, category_id, series_id, series_position, title, excerpt, body_md, '
     'cover_image_url, status, visibility, byline_mode, is_breaking, is_sponsored, sponsor_name, scheduled_at, published_at'
 )
 
 
-# --------------------------------------------------------------------------
-# 小さな補助
-# --------------------------------------------------------------------------
+# Small helpers.
 
 
 def _specified(payload: ArticleWrite, name: str) -> bool:
-    """その項目が要求で明示的に指定されたか。
+    """Whether the request named this field explicitly.
 
-    ArticleWrite は作成と部分更新の両方で使うため全項目が省略可能であり、「省略された」と「明示的に null を指定した」を値だけでは区別できない。前者は既存値の維持、後者は消去であって意味が正反対になる。
+    ArticleWrite serves both creation and partial update, so every field is optional and the value alone cannot tell "omitted" from "explicitly set to null". The first keeps the existing value, the second erases it: opposite meanings.
     """
     return name in payload.model_fields_set
 
 
 def _merged(payload: ArticleWrite, existing: dict[str, Any] | None, name: str, default: Any = None) -> Any:
-    """指定されていればその値、されていなければ既存値、既存も無ければ既定値を返す。"""
+    """Return the given value if the request named it, else the existing value, else the default."""
     if _specified(payload, name):
         return getattr(payload, name)
     if existing is not None:
@@ -80,7 +78,7 @@ def _merged(payload: ArticleWrite, existing: dict[str, Any] | None, name: str, d
 
 
 def _merged_id(payload: ArticleWrite, existing: dict[str, Any] | None, name: str) -> int | None:
-    """ID の項目を int へ正規化して合成する。要求では文字列、DB では BIGINT で扱う。"""
+    """Merge an ID field, normalizing it to int. Requests carry IDs as strings; the DB stores BIGINT."""
     if _specified(payload, name):
         value = getattr(payload, name)
         return None if value is None else to_snowflake(value)
@@ -90,36 +88,34 @@ def _merged_id(payload: ArticleWrite, existing: dict[str, Any] | None, name: str
 
 
 def _flag(value: Any) -> int:
-    """TINYINT(1) の列へ渡す 0/1 にする。DB からは int、要求からは bool で来る。"""
+    """Coerce to the 0/1 a TINYINT(1) column takes. The value arrives as int from the DB and as bool from the request."""
     return 1 if value else 0
 
 
 def _slugify(title: str) -> str:
-    """タイトルから slug の素を作る。
+    """Build the base slug from a title.
 
-    日本語のタイトルを ASCII へ音訳する術は無く、落とすと slug が空になるため、Unicode の語構成文字はそのまま残す(ブラウザとサーバーの双方がパーセント符号化を透過的に扱う)。
+    There is no way to transliterate a Japanese title into ASCII, and dropping non-ASCII would leave the slug empty, so Unicode word characters are kept as they are: browser and server both handle percent-encoding transparently.
     """
     normalized = unicodedata.normalize('NFKC', title).lower()
     slug = _SLUG_STRIP_RE.sub('-', normalized).strip('-.')
     if len(slug) > _SLUG_BASE_MAX_LENGTH:
         slug = slug[:_SLUG_BASE_MAX_LENGTH].rstrip('-.')
-    # '.' や '..' はパスの断片として特別な意味を持つため、そのまま slug にしてはならない。
+    # '.' and '..' carry special meaning as path segments, so neither may become a slug.
     if not slug or slug in ('.', '..'):
         return _SLUG_FALLBACK
     return slug
 
 
-# --------------------------------------------------------------------------
-# 資格の判定
-# --------------------------------------------------------------------------
+# Eligibility checks.
 
 
 async def has_write_any(db: Database, settings: RuntimeSettings, principal: Principal) -> bool:
-    """著者・報道社を自由に指定できる主体か。
+    """Whether the principal may name any author and any publisher freely.
 
-    API キー経由では、スコープが付いているだけでは足りず、要求の時点で所有者が現に管理者資格を満たしていなければならない(発行時の資格を凍結しないため、管理者を外れたユーザーの古いキーはその時点で通らなくなる)。セッション経由では管理者であることがそのまま同じ力になる。
+    Via an API key the scope alone is not enough: the owner must meet admin eligibility at the moment of the request. A key's eligibility is never frozen at issue time, so an old key owned by a user who has since lost admin stops passing from that moment on. Via a session, being an admin is the same power directly.
 
-    管理者が所有する articles:write のキーに対してもこの判定を通す必要がある。所有者が管理者であることだけを見ると、著者を所有者に固定するはずのキーが他人の記事へ手を伸ばせてしまい、スコープの区別が消える。
+    An articles:write key owned by an admin must go through this check too. Looking only at whether the owner is an admin would let a key that is supposed to pin the author to its owner reach into other people's articles, erasing the distinction between the two scopes.
     """
     if principal.via_token:
         return has_scope(principal, 'articles:write:any') and await is_admin(db, settings, principal)
@@ -127,7 +123,7 @@ async def has_write_any(db: Database, settings: RuntimeSettings, principal: Prin
 
 
 def ensure_may_edit(principal: Principal, existing: dict[str, Any], *, write_any: bool) -> None:
-    """既存の記事を編集・公開できる主体かを検査する。著者本人か、著者を自由に指定できる主体だけが操作できる。"""
+    """Check that the principal may edit or publish an existing article. Only the author themselves, or a principal that may name any author freely."""
     if write_any:
         return
     if existing['author_id'] != principal.user_id:
@@ -135,13 +131,13 @@ def ensure_may_edit(principal: Principal, existing: dict[str, Any], *, write_any
 
 
 async def _ensure_within_rate_limit(db: Database, settings: RuntimeSettings, principal: Principal, *, conn: Connection | None = None) -> None:
-    """API キー 1 本あたりの作成・更新の上限を検査する。
+    """Check the hourly create/update limit for one API key.
 
-    キー単位であってユーザー単位でもエンドポイント単位でもない。自動投稿は本質的に暴走しうるため、上限に達したキーだけが止まり、同じ人間の他のキーや Web UI からの投稿は影響を受けないようにする。人間の手による投稿はこの意味では暴走しないため、セッション経由は対象外である。
+    The limit is per key, not per user and not per endpoint. Automated posting can run away by nature, so only the key that hit the limit stops: the same person's other keys and posts from the Web UI are untouched. Posting by hand does not run away in this sense, so the session path is exempt.
 
-    conn を渡した呼び出しが上限の実際の担保である。キーの行を FOR UPDATE で確保してから数えることで、同じキーからの保存が直列化され、数えた後・改版を挿入する前に他の要求が割り込めなくなる。確保せずに数えると、並行して届いた全ての要求が挿入前の同じ値を読み、上限 60 に対して同時に投げた 500 件が全て通る(上限は直列な要求に対してしか効かなくなる)。トークンの行がキー単位のミューテックスとして働く。
+    The call that passes conn is what actually enforces the limit. Taking the key's row FOR UPDATE before counting serializes saves from the same key, so no other request can slip in after the count and before the revision insert. Counting without taking it lets every concurrent request read the same pre-insert value: against a limit of 60, 500 requests fired at once all pass, and the limit only bites on serial requests. The token row acts as a per-key mutex.
 
-    conn を渡さない呼び出しは、外部ホストからの画像の取得という重い処理を、どのみち弾く要求のために走らせないための早い段階での目安である。ここを通っても上限に達していないことは保証されない。
+    The call without conn is an early estimate, there only to keep the heavy work of fetching images from remote hosts from running for a request that will be rejected anyway. Passing it does not guarantee the limit has not been reached.
     """
     if principal.token_id is None:
         return
@@ -157,7 +153,7 @@ async def _ensure_within_rate_limit(db: Database, settings: RuntimeSettings, pri
     used = int(row['used']) if row else 0
     if used < limit:
         return
-    # 窓から最も古い改版が外れるまでの秒数。既に外れている(境界で 0 以下になった)場合も、即時の再試行を促さないよう 1 秒は空ける。
+    # Seconds until the oldest revision falls out of the window. Even when it already has (0 or less right at the boundary), keep at least 1 second so an immediate retry is not invited.
     retry_after = max(int(row['retry_after']) if row else 1, 1)
     raise RateLimited(
         f'このキーの記事の作成・更新は 1 時間あたり {limit} 件までです。',
@@ -167,9 +163,9 @@ async def _ensure_within_rate_limit(db: Database, settings: RuntimeSettings, pri
 
 
 async def _resolve_author_id(db: Database, principal: Principal, payload: ArticleWrite, existing: dict[str, Any] | None, *, write_any: bool) -> int:
-    """著者を決める。
+    """Decide the author.
 
-    articles:write のキーは著者をキーの所有者に固定する。このキーで得られる力を「その人が Web UI から手で投稿するのと同じ」に留めるためであり、他人を著者に指定できるのは articles:write:any(および管理者のセッション)だけである。
+    An articles:write key pins the author to the key's owner, holding the power the key grants down to what that person could do by hand from the Web UI. Only articles:write:any (and an admin session) may name someone else as the author.
     """
     current = existing['author_id'] if existing is not None else principal.user_id
     if not _specified(payload, 'author_id') or payload.author_id is None:
@@ -185,7 +181,7 @@ async def _resolve_author_id(db: Database, principal: Principal, payload: Articl
 
 
 async def _ensure_may_sign_publisher(db: Database, principal: Principal, publisher_id: int, *, write_any: bool) -> None:
-    """その報道社を名乗れる主体かを検査する。所属を表すロールを保有していることが条件である。"""
+    """Check that the principal may publish under that publisher's name. The condition is holding the role that represents the affiliation."""
     if write_any:
         return
     role_id = await db.fetch_val('SELECT role_id FROM publishers WHERE id = %s', publisher_id)
@@ -194,11 +190,11 @@ async def _ensure_may_sign_publisher(db: Database, principal: Principal, publish
 
 
 def _ensure_byline_unfrozen(existing: dict[str, Any] | None, author_id: int, publisher_id: int | None) -> None:
-    """公開済みの記事の署名(著者と報道社)を変える要求を拒む。
+    """Refuse any request that changes a published article's byline (author and publisher).
 
-    公開の時点で「著者がその報道社のロールを実際に持っているか」を検証して署名を確定させており(_freeze_publisher)、それが成り立つのは以後この対が動かないことを前提にしている。公開後に片方だけでも書き換えられると、検証を経ていない対が「検証済みの署名」として記事に残る。公開してから報道社を付ける、あるいは正当に公開した記事の著者だけを他人に差し替える、という順序で検証を素通りできてはならない。
+    _freeze_publisher settles the byline at publish time by verifying that the author really holds the publisher's role, and that only holds if the pair never moves afterwards. Rewriting even one half after publication leaves an unverified pair on the article, presented as a verified byline. Publishing first and attaching a publisher afterwards, or replacing only the author of a legitimately published article, must not be an ordering that walks past the verification.
 
-    誰がいつどの社の名前で報じたかは過去の事実であり、著者を自由に指定できる主体であっても後から書き換える正当な理由が無い。値の変わらない指定(要求元が記事全体を送り返す形の更新)は素通しするため、公開済みの記事の本文や見出しの訂正は妨げない。
+    Who reported under which publisher's name and when is a past fact, and even a principal that may name any author has no legitimate reason to rewrite it after the fact. A specification that changes nothing (an update where the caller sends the whole article back) passes through, so corrections to a published article's body or headline are not blocked.
     """
     if existing is None or existing['published_at'] is None:
         return
@@ -209,24 +205,22 @@ def _ensure_byline_unfrozen(existing: dict[str, Any] | None, author_id: int, pub
 
 
 def _ensure_may_flag_breaking(settings: RuntimeSettings, principal: Principal) -> None:
-    """速報を立てられる主体かを検査する。
+    """Check that the principal may flag an article as breaking news.
 
-    設定が空リストであれば誰も立てられない。これは設定の未記入ではなく「速報を使わない」という有効な意思であり、既定で誰でも立てられる側へ倒してはならない。
+    An empty list in the setting means nobody may. That is not an unfilled setting but a valid intent, "we do not use breaking news", and must never fall back to letting anyone flag one.
     """
     allowed = settings.articles.breaking.allowed_role_ids
     if not allowed or principal.role_ids.isdisjoint(allowed):
         raise ArticleForbidden('速報を立てる権限がありません。')
 
 
-# --------------------------------------------------------------------------
-# 参照先の解決
-# --------------------------------------------------------------------------
+# Resolving referenced entities.
 
 
 async def _resolve_tag_ids(db: Database, slugs: list[str]) -> list[int]:
-    """タグの slug を ID へ解決する。存在しない slug はエラーにする。
+    """Resolve tag slugs to IDs. A slug that does not exist is an error.
 
-    記事の投稿でタグを勝手に増やさない。タグの新設は taxonomy:admin の管轄であり、綴りの誤りが黙って新しいタグを生むと、分類は静かに壊れていく。
+    Posting an article never adds tags of its own accord. Creating a tag belongs to taxonomy:admin, and if a misspelling silently produced a new tag the classification would quietly rot.
     """
     if not slugs:
         return []
@@ -240,7 +234,7 @@ async def _resolve_tag_ids(db: Database, slugs: list[str]) -> list[int]:
 
 
 async def _resolve_visibility_role_ids(db: Database, role_ids: list[str]) -> list[int]:
-    """閲覧を許可するロールを検証して int の一覧にする。同期済みのロールでなければエラーにする。"""
+    """Validate the roles allowed to view and return them as a list of ints. A role that has not been synced is an error."""
     if not role_ids:
         return []
     ids = [to_snowflake(value) for value in role_ids]
@@ -254,7 +248,7 @@ async def _resolve_visibility_role_ids(db: Database, role_ids: list[str]) -> lis
 
 
 async def _unique_slug(db: Database, conn: Connection, base: str, *, exclude_id: int | None) -> str:
-    """base をもとに未使用の slug を作る。衝突したら連番を付す。"""
+    """Build an unused slug from base, appending a number on collision."""
     candidate = base
     for attempt in range(1, _SLUG_MAX_ATTEMPTS + 1):
         taken = await db.fetch_val(
@@ -271,7 +265,7 @@ async def _unique_slug(db: Database, conn: Connection, base: str, *, exclude_id:
 
 
 async def _ensure_slug_free(db: Database, conn: Connection, slug: str, *, exclude_id: int | None) -> None:
-    """明示された slug が空いているかを検査する。自動生成と違い、黙って連番を付けて別の URL にしてはならない。"""
+    """Check that an explicitly given slug is free. Unlike generation, it must never silently append a number and hand back a different URL."""
     taken = await db.fetch_val(
         'SELECT id FROM articles WHERE slug = %s AND (%s IS NULL OR id <> %s)',
         slug,
@@ -283,9 +277,7 @@ async def _ensure_slug_free(db: Database, conn: Connection, slug: str, *, exclud
         raise Conflict(f'この slug は既に使われています: {slug}')
 
 
-# --------------------------------------------------------------------------
-# 保存
-# --------------------------------------------------------------------------
+# Saving.
 
 
 async def save_article(
@@ -297,11 +289,11 @@ async def save_article(
     article_id: int | None,
     payload: ArticleWrite,
 ) -> tuple[int, list[IngestFailure]]:
-    """記事を作成または更新する。戻り値は (記事 ID, 取り込めなかった画像の一覧)。
+    """Create or update an article. Returns (article ID, the images that could not be ingested).
 
-    article_id が None なら作成、そうでなければ更新である。取り込めなかった画像は例外にせず戻り値へ載せる。外部ホストの一時的な不調で記事が出せなくなってはならない一方、取り込めなかった URL は本文にそのまま残り、いずれ失効して画像が消えるため、黙って成功として扱わず必ず呼び出し元へ伝える。
+    A None article_id creates, anything else updates. Images that could not be ingested are returned rather than raised: a temporary fault at a remote host must never stop an article going out. But a URL that failed stays in the body as it is and will eventually expire, taking the image with it, so the failure is never silently counted as success and is always reported to the caller.
 
-    config と settings の両方を受け取るのは、画像の取り込みに要る設定の出どころが分かれているためである。保存先(storage_dir)は実行環境と一体で config.yaml が持ち、各上限は管理者が変更できる settings 表が持つ。effective_media_config がこの 2 つを 1 つに畳む。
+    Both config and settings are taken because the settings image ingestion needs come from two different places. The storage location (storage_dir) is bound to the runtime environment and lives in config.yaml; the individual limits live in the settings table, where an admin can change them. effective_media_config folds the two into one.
     """
     existing: dict[str, Any] | None = None
     if article_id is not None:
@@ -312,7 +304,7 @@ async def save_article(
     write_any = await has_write_any(db, settings, principal)
     if existing is not None:
         ensure_may_edit(principal, existing, write_any=write_any)
-    # 早い段階での目安。上限に達しているキーのために外部ホストからの画像の取得を走らせないためだけのものであり、上限そのものはトランザクション内の検査が担保する。
+    # Early estimate only, to avoid fetching images from remote hosts on behalf of a key that is already at the limit. The limit itself is enforced by the check inside the transaction.
     await _ensure_within_rate_limit(db, settings, principal)
 
     author_id = await _resolve_author_id(db, principal, payload, existing, write_any=write_any)
@@ -333,8 +325,8 @@ async def save_article(
 
     publisher_id = _merged_id(payload, existing, 'publisher_id')
     _ensure_byline_unfrozen(existing, author_id, publisher_id)
-    # 資格の検査は署名を実際に変える要求に限る。値の変わらない指定(要求元が記事全体を送り返す形の更新)まで弾くと、記事に触れられる主体が名乗れる報道社の現在の保有者だけになり、解散した報道社の過去記事を管理者が直せなくなる。
-    # 著者が変わる場合も署名は変わる。報道社の値が同じでも、その社を名乗る人物が入れ替わるのは新しい署名を作ることであり、素通しすると「報道社を変えず著者だけを差し替える」だけで検査が消える。
+    # The eligibility check runs only for a request that actually changes the byline. Rejecting a specification that changes nothing (an update where the caller sends the whole article back) would narrow the principals able to touch an article down to the current holders of that publisher's role, and an admin could no longer fix the past articles of a dissolved publisher.
+    # A changed author changes the byline too. Even with the same publisher, swapping the person publishing under that name makes a new byline, and letting it through would erase the check via "keep the publisher, replace only the author".
     signature_changed = existing is None or publisher_id != existing['publisher_id'] or author_id != existing['author_id']
     if publisher_id is not None and signature_changed:
         if await db.fetch_val('SELECT id FROM publishers WHERE id = %s', publisher_id) is None:
@@ -353,13 +345,13 @@ async def save_article(
         raise ArticleError('status が scheduled のときは scheduled_at が必須です。')
 
     is_breaking = bool(_merged(payload, existing, 'is_breaking', False))
-    # 検査は立てる要求に限る。既に立っている速報の本文を直すたびに権限を問うと、速報を出せる者しか訂正できなくなる。
+    # The check runs only for a request that raises the flag. Demanding the permission every time the body of an already-breaking article is fixed would leave only those who may flag breaking news able to correct it.
     if is_breaking and not (existing is not None and existing['is_breaking']):
         _ensure_may_flag_breaking(settings, principal)
 
     is_sponsored = bool(_merged(payload, existing, 'is_sponsored', False))
     sponsor_name = _merged(payload, existing, 'sponsor_name')
-    # 判定は「空白を落とすと空か」ではなく「表示可能な文字を含むか」で行う。str.strip() が落とすのは str.isspace() が真の文字だけであり、U+200B(ゼロ幅空白)や U+FEFF は素通りする。それらを名前にすると、記事面にも embed にも「広告」ラベルだけが出て広告主が誰なのかはどこにも表示されず、開示を要求した意味が消える。
+    # The test is whether the name holds a visible character, not whether it is empty once whitespace is stripped. str.strip() only removes characters for which str.isspace() is true, so U+200B (zero-width space) and U+FEFF survive it and masquerade as a non-empty name. With one of those as the sponsor, the article page and the embed show nothing but the Sponsored label, the advertiser appears nowhere, and requiring the disclosure has bought nothing.
     if is_sponsored and not (sponsor_name and visible_text(sponsor_name)):
         raise ArticleError('is_sponsored が真のときは sponsor_name が必須です。「広告」とだけ書いても開示になりません。')
 
@@ -368,7 +360,7 @@ async def save_article(
     byline_mode = _merged(payload, existing, 'byline_mode', 'author')
     series_position = _merged(payload, existing, 'series_position')
 
-    # tags / visibility_role_ids は指定されたときだけ洗い替える。None は「触れない」を意味する。
+    # tags / visibility_role_ids are refreshed to match the request only when the request names them. None means leave them alone.
     tag_ids: list[int] | None = None
     if _specified(payload, 'tags'):
         tag_ids = await _resolve_tag_ids(db, payload.tags or [])
@@ -389,8 +381,8 @@ async def save_article(
         if not effective_roles:
             raise ArticleError('visibility が restricted のときは visibility_role_ids に 1 つ以上のロールが必要です。')
 
-    # 画像の取り込みはトランザクションの外で行う。外部ホストへの取得は設定上の総所要時間まで掛かりうるため、その間トランザクションを開いたままにすると記事の行を長時間ロックし続ける。media は内容アドレスで重複排除され記事とは独立に存在するため、記事の保存が後で失敗しても不整合にならない(参照されない実体が残るだけである)。
-    # uploaded_by は取り込みを実際に起こした主体にする。著者ではないのは、利用量の上限が資源を使った側に掛かるべきであり、articles:write:any で他人を著者にした投稿の取り込み分が、その他人の枠を削ってはならないためである。
+    # Images are ingested outside the transaction. Fetching from remote hosts can take up to the configured total time budget, and holding the transaction open for that would keep the article's row locked the whole time. media rows are content-addressed, deduped and exist independently of articles, so a later failure of the article save leaves nothing inconsistent: only an unreferenced blob.
+    # uploaded_by is the principal that actually caused the ingest, not the author, because the quota should fall on whoever used the resource: images ingested for a post that named someone else as the author under articles:write:any must not eat that other person's quota.
     body_md, media_ids, failures = await ingest_article_images(
         db,
         effective_media_config(config, settings),
@@ -401,11 +393,11 @@ async def save_article(
     body_html = render_markdown(body_md)
 
     async with db.transaction() as conn:
-        # 上限の担保はここで行う。キーの行を確保してから数え、同じトランザクションで改版を挿入することで、数えた後に他の要求が割り込めなくなる。記事の行より先に確保するのは、ロックを取る順序をこの経路で常に(キー → 記事)に揃え、逆順で待ち合う組み合わせを作らないためである。
+        # This is where the limit is enforced: take the key's row, count, and insert the revision in one transaction, so no other request can slip in after the count. The key's row is taken before the article's so that this path always locks in the order key then article, never forming a pair that waits on each other in reverse.
         await _ensure_within_rate_limit(db, settings, principal, conn=conn)
 
         if article_id is not None:
-            # 記事の行をロックしてから改版番号を採る。同じ記事への保存が同時に走ると MAX(revision_number)+1 を同じ値で読み、(article_id, revision_number) の一意制約で片方が落ちる。
+            # Lock the article's row before taking a revision number. Concurrent saves of the same article would read the same MAX(revision_number)+1, and the (article_id, revision_number) unique constraint would drop one of them.
             if await db.fetch_val('SELECT id FROM articles WHERE id = %s FOR UPDATE', article_id, conn=conn) is None:
                 raise NotFound('記事が見つかりません。')
 
@@ -413,7 +405,7 @@ async def save_article(
             slug = payload.slug
             await _ensure_slug_free(db, conn, slug, exclude_id=article_id)
         elif existing is not None:
-            # タイトルを直すたびにパーマリンクが変わると、既に配られた URL が壊れる。slug の変更は明示的な指定でだけ起こす。
+            # A permalink that changed every time the title was fixed would break URLs already handed out. The slug moves only on an explicit specification.
             slug = existing['slug']
         else:
             slug = await _unique_slug(db, conn, _slugify(title), exclude_id=None)
@@ -467,7 +459,7 @@ async def save_article(
             for role_id in visibility_role_ids:
                 await db.execute('INSERT INTO article_visibility_roles (article_id, role_id) VALUES (%s, %s)', article_id, role_id, conn=conn)
 
-        # article_media は追記のみで、行を消してはならない。編集で本文から画像を外しても過去の改版はその画像を参照し続けており、消すと改版履歴を開いた瞬間に画像が 404 になる。
+        # article_media is append-only; a row must never be deleted. An edit that drops an image from the body leaves the past revisions still referencing it, and deleting the row would 404 the image the moment someone opens the revision history.
         for media_id in media_ids:
             await db.execute('INSERT IGNORE INTO article_media (article_id, media_id) VALUES (%s, %s)', article_id, media_id, conn=conn)
 
@@ -478,7 +470,7 @@ async def save_article(
                 conn=conn,
             )
         )
-        # editor_id は「誰の名前で書かれたか」であり、その改版時点の署名(著者)を残す。「誰が実際に投稿したか」は via_token_id が担い、両者は別物である。articles:write:any が他人の署名で記事を出せる以上、後者が無いと説明責任が追えない。
+        # editor_id records whose name the revision was written under: the byline (the author) as of that revision. Who actually posted it is carried by via_token_id, and the two are different things. Since articles:write:any can publish an article under someone else's byline, accountability cannot be traced without the latter.
         await db.execute(
             'INSERT INTO article_revisions (article_id, revision_number, editor_id, via_token_id, title, body_md, excerpt, note, is_correction) '
             'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
@@ -494,22 +486,20 @@ async def save_article(
             conn=conn,
         )
 
-        # status='published' での保存も公開である。行の status だけを書き換えて済ませると、署名の凍結も通知の待ち行列への追加も起こらないまま「公開された記事」が生まれる。公開の手順は 1 つに保つ。
+        # A save with status='published' is a publication too. Writing the row's status and leaving it at that would produce a published article with neither the byline frozen nor the notifications enqueued. There is one procedure for publishing and this keeps it that way.
         if status == 'published':
             await publish_article(db, settings, article_id, conn=conn)
 
     return article_id, failures
 
 
-# --------------------------------------------------------------------------
-# 公開
-# --------------------------------------------------------------------------
+# Publishing.
 
 
 async def _freeze_publisher(db: Database, conn: Connection, article_id: int, author_id: int, publisher_id: int | None) -> int | None:
-    """公開の時点で署名を確定する。著者がその報道社のロールを実際に持っているかを検証する。
+    """Settle the byline at publish time, verifying that the author really holds the publisher's role.
 
-    保存時に検査するのは「書いている主体がその社を名乗れるか」であり、ここで検査するのは「署名される著者が実際にその社に所属しているか」である。両者は別であり、著者を自由に指定できる主体であっても、実在しない所属を署名にはできない。
+    Save time checks whether the principal doing the writing may publish under that publisher's name; this checks whether the author being bylined is actually affiliated with it. They are different questions, and even a principal that may name any author cannot turn an affiliation that does not exist into a byline.
     """
     if publisher_id is None:
         return None
@@ -521,7 +511,7 @@ async def _freeze_publisher(db: Database, conn: Connection, article_id: int, aut
     )
     if holds is not None:
         return publisher_id
-    # 公開を止めない。予約公開は背景のループが実行するため、ここで例外にすると記事は永遠に公開されないまま失敗を繰り返す。名乗れない署名を外して公開し、記録はログに残す。
+    # Publication is not stopped. Scheduled publishing runs from a background loop, so raising here would leave the article repeating the same failure and never going out. The byline the author is not entitled to is dropped, the article is published, and the fact is recorded in the log.
     logger.warning(
         '記事 %s の署名を外しました。著者 %s は報道社 %s の所属ロールを保有していません。',
         article_id,
@@ -532,13 +522,13 @@ async def _freeze_publisher(db: Database, conn: Connection, article_id: int, aut
 
 
 async def publish_article(db: Database, settings: RuntimeSettings, article_id: int, *, conn: Connection | None = None) -> None:
-    """記事を公開し、通知を待ち行列へ積む。
+    """Publish an article and enqueue its notifications.
 
-    再公開しても published_at を動かさない(COALESCE)。最初に公開された時刻は過去の事実であり、記事を直すたびに新しい記事として並び直してはならない。同じ理由で署名の凍結も最初の公開でだけ行い、以後は著者のロールが変わっても動かさない。
+    Re-publishing does not move published_at (COALESCE). The time an article first went out is a past fact, and fixing it must not reorder it into the listing as a new article. For the same reason the byline is frozen only at the first publication and never moves again, however the author's roles change.
 
-    通知を待ち行列へ積むのも最初の公開のときだけである。公開済みの記事の編集は新しい通知を生まない。積む宛先は記事のカテゴリとタグから毎回解決されるため、2 度目以降も積むと、公開後にタグを 1 つ足しただけで新しいチャンネルへ「新着記事」が流れ、そのタグの購読者には過去記事の DM が届く。(article_id, channel_id) の一意制約が防げるのは同じ宛先への二重送信だけであり、新しい宛先の行は素通りする。誤字の修正が読者への通知を生んではならない。
+    Notifications are enqueued only at the first publication too; editing a published article produces no new notification. The recipients are resolved afresh from the article's category and tags every time, so enqueueing on later publications would mean that merely adding one tag after publication sends a new-article notification to a new channel and DMs that tag's subscribers about an old article. The (article_id, channel_id) unique constraint only prevents sending twice to the same recipient; a row for a new recipient passes straight through. Fixing a typo must never notify readers.
 
-    conn を渡すと呼び出し元のトランザクションに乗る。通知の待ち行列への追加を公開と同じトランザクションで行うためにあり、分けると「公開されたのに誰にも通知されない記事」が生まれうる。
+    Passing conn joins the caller's transaction. It exists so the notification enqueue runs in the same transaction as the publication; split apart, they can produce an article that is published but that nobody is told about.
     """
     if conn is None:
         async with db.transaction() as owned:
@@ -554,7 +544,7 @@ async def publish_article(db: Database, settings: RuntimeSettings, article_id: i
         raise NotFound('記事が見つかりません。')
 
     if row['published_at'] is not None:
-        # 2 度目以降の公開。署名にも通知にも触れず、状態だけを戻す(アーカイブから戻す経路がここに当たる)。ここで凍結をやり直すと、記者が移籍した後の編集で過去の署名が遡って書き換わる。
+        # A second or later publication. Neither the byline nor the notifications are touched; only the status goes back (restoring from archived comes through here). Re-freezing at this point would let an edit made after a reporter transferred rewrite the old byline retroactively.
         await db.execute("UPDATE articles SET status = 'published' WHERE id = %s", article_id, conn=conn)
         return
 
@@ -568,17 +558,15 @@ async def publish_article(db: Database, settings: RuntimeSettings, article_id: i
     await enqueue_notifications(db, article_id, conn=conn)
 
 
-# --------------------------------------------------------------------------
-# 通知の待ち行列
-# --------------------------------------------------------------------------
+# The notification queue.
 
 
 async def resolve_notify_channels(db: Database, article_id: int, *, conn: Connection | None = None) -> set[int]:
-    """記事の通知先チャンネルの集合を返す。
+    """Return the set of notify channels for an article.
 
-    宛先はカテゴリとタグの notify_channel_id を重複排除した集合である。カテゴリの主チャンネルとタグの追加チャンネルが同じでも、1 チャンネルにつき 1 通しか送らない。
+    The recipients are the category's and the tags' notify_channel_id, deduplicated. When a category's primary channel and a tag's additional channel are the same, that channel still gets only one message.
 
-    宛先が 0 件なら空集合を返す。既定チャンネルへのフォールバックは持たない。フォールバックがあると「この欄は通知しない」という意図を表現できなくなり、notify_channel_id を NULL にしても記事が既定のチャンネルへ流れてしまう。
+    No recipients means an empty set. There is no fallback to a default channel: a fallback would make the intent "this section is not notified" inexpressible, and an article would flow to the default channel even with notify_channel_id set to NULL.
     """
     rows = await db.fetch_all(
         'SELECT c.notify_channel_id AS channel_id FROM articles a JOIN categories c ON c.id = a.category_id '
@@ -594,11 +582,11 @@ async def resolve_notify_channels(db: Database, article_id: int, *, conn: Connec
 
 
 async def enqueue_notifications(db: Database, article_id: int, *, conn: Connection | None = None) -> None:
-    """通知の宛先を待ち行列へ積む。実際の送信は bot が行う。
+    """Enqueue the article's notification recipients. The bot does the actual sending.
 
-    server から bot へ直接イベントを送る方式は、bot が落ちている間のイベントを取りこぼす。DB を待ち行列にすれば、bot は復帰後に未送信の行を拾って送れる。
+    Sending events from server straight to bot would miss every event that arrived while the bot was down. With the DB as the queue, the bot picks up the unsent rows once it is back.
 
-    いずれも INSERT IGNORE であり、同じ宛先への二重送信は (article_id, channel_id) と (article_id, user_id) の一意制約が構造的に防ぐ。一方、宛先そのものが増えた場合(公開後にタグを足した場合)に新しい行を防ぐのは一意制約ではなく、この関数を最初の公開でしか呼ばない publish_article 側の判断である。誤字修正での再通知を避けるためのフラグが要らないのは、この 2 つが揃っているためである。
+    Both are INSERT IGNORE, so the (article_id, channel_id) and (article_id, user_id) unique constraints structurally prevent sending twice to the same recipient. What prevents a new row when the recipients themselves grow (a tag added after publication) is not a constraint but publish_article's decision to call this function only at the first publication. Those two together are why no flag is needed to avoid re-notifying on a typo fix.
     """
     for channel_id in sorted(await resolve_notify_channels(db, article_id, conn=conn)):
         await db.execute(
@@ -608,7 +596,7 @@ async def enqueue_notifications(db: Database, article_id: int, *, conn: Connecti
             conn=conn,
         )
 
-    # 購読者への DM はチャンネルへの通知とは独立に積む。宛先チャンネルを持たない記事でも購読は成立する。著者自身は対象から外す(自分が書いた記事の通知を自分が受け取る意味はない)。
+    # DMs to subscribers are enqueued independently of the channel notifications: a subscription holds even for an article with no destination channel. The author is excluded, since there is no point in being notified about an article you wrote yourself.
     await db.execute(
         'INSERT IGNORE INTO article_subscription_notices (article_id, user_id) '
         'SELECT DISTINCT a.id, ts.user_id FROM articles a '

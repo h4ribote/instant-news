@@ -48,8 +48,8 @@
     </div>
 
     <!--
-      報道社ページ。報道社の実体は Discord のロールであり、加入・脱退・権限は Discord 側の運用に乗る。
-      ロゴ・紹介文・立場はロールが持てないため、報道社テーブルが持つ。
+      Publisher page. The real publisher is a Discord role: joining, leaving and permissions are all handled on the Discord side.
+      A role cannot carry a logo, description or stance, so the publishers table holds those.
     -->
     <section class="card">
       <div class="pub-hero" data-hero></div>
@@ -106,25 +106,25 @@
 import { get, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError, mediaVariant } from '/static/js/api.js';
 import { mountChrome, cssUrl, listOf, displayName, avatarHtml, pubLogoHtml } from '/static/js/chrome.js';
 
-/* このページの経路は /publishers/{slug} で固定されているため、対象の報道社は URL から取り出す。 */
+/* This page's route is fixed at /publishers/{slug}, so the target publisher is taken from the URL. */
 const SLUG = decodeURIComponent((location.pathname.match(/\/publishers\/([^/]+)\/?$/) || [])[1] || '');
 
-/* 一覧の 1 ページの件数。 */
+/* Items per page of a listing. */
 const PER_PAGE = 20;
 
-/* 今週の順位を引くために取るランキングの深さ。サイドバーに出すのは上位だけだが、順位そのものは圏外に近い社でも示したい。 */
+/* Ranking depth fetched to locate this week's rank. The sidebar draws only the top few, but the rank itself should still be reported for publishers close to unranked. */
 const RANKING_DEPTH = 50;
 
-/* サイドバーに出す報道社ランキングの件数。 */
+/* How many publishers the sidebar ranking shows. */
 const RANKING_SHOWN = 5;
 
-/* 今週の順位の集計期間(日)。 */
+/* Tally window for this week's rank, in days. */
 const RANKING_DAYS = 7;
 
 let viewer = null;
 let articlePage = 0;
 
-/** まだ次のページがあるか。応答がページ情報を持たない場合は、空になるまで「ある」とみなす。 */
+/** Whether a next page of results exists. When the response carries no pagination info, assume there is one until a page comes back empty. */
 function hasMore(data, items) {
   if (data && typeof data.has_more === 'boolean') return data.has_more;
   if (data && Number.isFinite(data.total) && Number.isFinite(data.page) && Number.isFinite(data.per_page)) {
@@ -133,7 +133,7 @@ function hasMore(data, items) {
   return items.length > 0;
 }
 
-/** 記事に添えるバッジ。記事広告の開示と速報は必ず出す(開示は装飾ではなく要件であり、一覧でも落としてはならない)。閲覧範囲は public 以外のときだけ出す(既定を明示しても情報は増えない)。 */
+/** Badges attached to an article. The sponsored-article disclosure and breaking news are always rendered: a disclosure is a requirement, not decoration, and must not be dropped even in a listing. Visibility is rendered only when it is not public, since spelling out the default adds no information. */
 function badgesHtml(a) {
   const out = [];
   if (a.is_breaking) out.push('<span class="badge breaking">速報</span>');
@@ -146,12 +146,12 @@ function badgesHtml(a) {
   return out;
 }
 
-/** 記事一覧の 1 行。この社の記事だけを並べる面なので、社名は繰り返さず、記者・カテゴリ・タグを出す。 */
+/** One row of the article listing. This page lists only this publisher's articles, so the publisher name is not repeated; the reporter, category and tags are shown instead. */
 function articleRowHtml(a) {
   const meta = [];
   if (a.category) meta.push(`<span class="cat-chip">${escapeHtml(a.category.name)}</span>`);
   for (const t of (a.tags || []).slice(0, 2)) meta.push(`<span class="tag-chip">#${escapeHtml(t.name)}</span>`);
-  /* 署名が報道社名のみの記事では、記者名を出さない(byline_mode が author_id の表示を切り替える)。 */
+  /* Articles bylined to the publisher name only do not show the reporter: byline_mode switches whether author_id is displayed. */
   if (a.author && a.byline_mode !== 'publisher') {
     meta.push(`<span class="author">${avatarHtml(a.author)}${escapeHtml(displayName(a.author))}</span>`);
   }
@@ -170,25 +170,25 @@ function articleRowHtml(a) {
     `</div></a></li>`;
 }
 
-/** 数の表示。値を持たない項目に 0 を出すと「0 件である」と読めてしまうため、分からないものは — にする。 */
+/** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as —. */
 function statValue(v) {
   return v == null ? '—' : escapeHtml(v);
 }
 
-/** 報道社の見出し・紹介・立場を描く。 */
+/** Draws the publisher's heading, description and stance. */
 function renderHero(pub) {
   document.title = `${pub.name} | instant-news`;
   document.querySelector('[data-crumb]').textContent = pub.name;
   document.querySelector('[data-articles-title]').textContent = `${pub.name}の記事`;
 
-  /* 国営メディア等は、その立場を社名の隣に添える。読者が記事の出所を判断する材料になるため、
-     プロフィールの奥ではなく見出しに置く。国営ラベルは .publisher の中でのみ字面が付くため、
-     見出しでも .publisher で包んでいる。 */
+  /* State media and the like carry their stance next to the publisher name.
+     It is material for readers judging the article's provenance, so it belongs in the heading rather than buried in the profile.
+     The state-run label is only styled inside .publisher, so the heading wraps it in .publisher too. */
   const state = pub.stance === 'state'
     ? ' <span class="publisher"><span class="state">国営</span></span>'
     : '';
 
-  /* 所属は Discord のロールで決まる。ロールが消えた(解散した)社の過去記事は残るため、その旨を示す。 */
+  /* Affiliation is decided by a Discord role. A dissolved publisher (its role gone) keeps its past articles, so say so. */
   const roleName = pub.role && pub.role.name ? pub.role.name : pub.role_name;
   const note = roleName
     ? `🎮 所属は Discord の @${escapeHtml(roleName)} ロールで管理されています`
@@ -201,7 +201,7 @@ function renderHero(pub) {
     `<span class="role-note">${note}</span></div>`;
 }
 
-/** 実績。4 列で固定されているため、4 つを必ず埋める。 */
+/** Track record. The layout is fixed at 4 columns, so all four are always filled. */
 function renderStats(stats, memberCount, rank) {
   document.querySelector('[data-stats]').innerHTML =
     `<div><b>${statValue(stats.article_count)}</b><span>記事</span></div>` +
@@ -210,7 +210,7 @@ function renderStats(stats, memberCount, rank) {
     `<div><b>${rank}</b><span>今週の順位</span></div>`;
 }
 
-/** 所属記者。報道社ロールを保有する利用者がそのまま記者になる。 */
+/** Affiliated reporters. A user holding the publisher's role is thereby a reporter; there is nothing else to join. */
 function renderMembers(members) {
   if (members.length === 0) return;
   document.querySelector('[data-members]').innerHTML = members.map((m) =>
@@ -219,7 +219,7 @@ function renderMembers(members) {
   document.querySelector('[data-members-card]').hidden = false;
 }
 
-/** 報道社の本体を読む。 */
+/** Loads the publisher itself. */
 async function loadPublisher() {
   let data;
   try {
@@ -240,7 +240,7 @@ async function loadPublisher() {
   return { stats: data.stats || pub, memberCount: members.length };
 }
 
-/** 記事一覧を 1 ページ読み、末尾に足す。 */
+/** Loads one page of the article listing and appends it to the end. */
 async function loadArticles() {
   const link = document.querySelector('[data-more-articles]');
   let data;
@@ -266,8 +266,9 @@ async function loadArticles() {
 }
 
 /**
- * 報道社ランキングを読み、サイドバーへ出しつつ、この社の今週の順位を返す。
- * 順位は Discord の投票とコメントからサーバーが記事ごとの規則で求める(規則は docs/api.md を参照)。上位だけを描き、順位の判定には深く取った一覧を使う。
+ * Loads the publisher ranking, draws it in the sidebar, and returns this publisher's rank for the week.
+ * The server derives the rank from Discord votes and comments under a per-article rule (documented in docs/api.md).
+ * Only the top entries are drawn; the rank itself is read off a more deeply fetched listing.
  */
 async function loadRanking() {
   let rows;
@@ -291,7 +292,7 @@ async function loadRanking() {
   return at < 0 ? '圏外' : `#${at + 1}`;
 }
 
-/** 加盟報道社。報道社の一覧を辿る入口をここに置く。 */
+/** Member publishers. This is the entry point for browsing the publisher listing. */
 async function loadPublishers() {
   let pubs;
   try {
@@ -306,7 +307,7 @@ async function loadPublishers() {
   document.querySelector('[data-pubs-card]').hidden = false;
 }
 
-/** 「もっと読む」を結ぶ。一覧の続きはこの場に足していく。 */
+/** Wires up the "read more" link. Further pages of the listing are appended in place. */
 function wireMore(selector, loader) {
   const link = document.querySelector(selector);
   link.addEventListener('click', (ev) => {

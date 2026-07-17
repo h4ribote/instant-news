@@ -1,35 +1,27 @@
-# instant-news 設定ファイルのひな形。
-# 本ファイルを config.yaml としてコピーし、各値を実行環境に合わせて設定してください。
+# Template for the instant-news config file. Copy it to config.yaml and set each value for your environment.
 #
-# 本ファイルは 2 つの部分に分かれます。
+# The file has two parts.
 #
-# 【実行環境】server / database / media.storage_dir
-#   常に本ファイルが真実です。設定を DB から読むためには先に DB へ繋ぐ必要があるため、その手前に要る値と、
-#   コンテナの外で決まる値(画像の保存先は名前付きボリュームのマウント先と一致していなければ意味を成しません)
-#   だけを置きます。
+# Runtime environment: server / database / media.storage_dir. This file is always the source of truth for these.
+#   Reading settings from the DB means connecting to the DB first, so this part holds only the values needed before that point, plus the values decided outside the container (the image storage directory is meaningless unless it matches the named volume's mount point).
 #
-# 【初期値】discord / admin / articles / media.fetch / media.max_pixels / media.quota_bytes_per_user
-#   初回起動時に MySQL の settings 表へ写され、以後は参照されません。真実は DB 側に移り、管理者は
-#   フロントエンドの /admin から変更します。したがって、2 回目以降の起動で本ファイルのこれらの値を
-#   書き換えても何も起きません。起動のたびに設定ファイルが DB を上書きする方式にすると、画面から変更した値が
-#   次の再起動で黙って元へ戻るため、どちらが真実かを一方に決めています。
+# Seed values: discord / admin / articles / media.fetch / media.max_pixels / media.quota_bytes_per_user.
+#   They are copied into the MySQL settings table on first boot and never read again. The source of truth moves to the DB and admins change them from /admin in the frontend, so rewriting them here on any later boot does nothing.
+#   Having the config file overwrite the DB on every boot would silently revert values changed from the UI at the next restart, so exactly one side is made authoritative.
 #
-#   この部分は任意です。書かなかったキーは既定値(下記に併記)で埋まるため、実際に設定が要るのは
-#   その環境でしか決まらない値、すなわち discord.guild_id と OAuth2・bot の資格情報だけです。
-#   投入が済んだ後に、この部分を削除しても構いません。
-#   設定が壊れて画面に入れなくなった場合(管理ロールの設定を誤った等)は、CLI から復旧できます:
+#   This part is optional. Omitted keys fall back to the default noted with each key below, so the only values that really need setting are the ones nothing but the environment can decide: discord.guild_id and the OAuth2 and bot credentials.
+#   You may delete this part once seeding is done.
+#   If the settings end up broken and lock you out of the UI (a wrong admin role setting, say), recover from the CLI:
 #     python -m server.cli get-setting admin.role_ids
 #     python -m server.cli set-setting admin.role_ids '["000000000000000000"]'
 
-# --------------------------------------------------------------------------
-# 実行環境。常に本ファイルが真実。
-# --------------------------------------------------------------------------
+# Runtime environment. This file is always the source of truth.
 
 server:
   host: 0.0.0.0
   port: 8000
-  # 外部から到達可能な公開 URL。記事 URL・画像の絶対 URL・OAuth2 の戻り先の組み立てに用いる。
-  # 逆プロキシを挟む構成では、上の host / port(待ち受け)ではなく、利用者のブラウザから見えるオリジンを書くこと。
+  # Externally reachable public URL, used to build article URLs, absolute image URLs and the OAuth2 redirect_uri.
+  # Behind a reverse proxy, write the origin as the user's browser sees it, not the host / port above, which are only the listen address.
   base_url: "http://localhost:8000"
 
 database:
@@ -40,101 +32,88 @@ database:
   password: "change-me"
 
 media:
-  # 画像の実体を置くディレクトリ。内容アドレスで保存する
-  # ({hash[0:2]}/{hash[2:4]}/{hash}.{variant}.webp)。
-  # コンテナのファイルシステムではなく Docker の名前付きボリュームを割り当てること。
-  # イメージを入れ替えた瞬間に全画像が消える。
-  # 設定として DB に置かないのは、この値がボリュームのマウント先と一体だからである。マウントを変えずに
-  # この値だけを変えても画像は見つからず、変えた瞬間に既存の全画像が参照できなくなる。
+  # Directory holding the image blobs, stored content-addressed as {hash[0:2]}/{hash[2:4]}/{hash}.{variant}.webp.
+  # Point this at a Docker named volume, not the container filesystem: every image disappears the moment the container image is replaced.
+  # It is not a DB setting because the value is inseparable from the volume's mount point. Changing it without moving the mount finds no images, and every existing image becomes unreachable the instant you change it.
   storage_dir: "/var/lib/instant-news/media"
 
-  # 以下は初期値。真実は settings 表にある。
-  # 記事の保存時に、本文中の画像 URL から画像を取得して取り込む。
-  # 任意の URL をサーバーに取得させる機能であり SSRF そのものであるため、ループバック・
-  # プライベート・リンクローカルの各 IP は拒否し、リダイレクトの各ホップで再検査する。
+  # The rest are seed values; the source of truth is the settings table.
+  # On article save, images are fetched from the image URLs in the body and ingested.
+  # This makes the server fetch an arbitrary URL, which is SSRF by definition, so loopback, private and link-local IPs are refused and re-checked at every redirect hop.
   fetch:
-    # 1 記事の保存あたりに取得を試みる画像の最大数。超過分は元の URL のまま残す。既定 20、0 以上。
-    # 0 なら取り込まない。
+    # Max images to fetch per article save; anything over the limit is left at its original URL. Default 20, minimum 0.
+    # 0 disables ingest.
     max_images_per_article: 20
-    # 1 枚あたりの最大バイト数。Content-Length は信用せず、ストリームしながら超過で中断する。
-    # 既定 10485760(10 MiB)、1 以上。
+    # Max bytes per image. Content-Length is not trusted: the fetch streams and aborts once the limit is passed. Default 10485760 (10 MiB), minimum 1.
     max_bytes: 10485760
-    # 1 枚あたりの取得のタイムアウト(秒)。既定 10、0 より大きい値。
-    # 0 は許さない。取り込まないことを表すなら max_images_per_article を 0 にすること。
+    # Per-image fetch timeout in seconds. Default 10, must be greater than 0.
+    # 0 is rejected: to disable ingest, set max_images_per_article to 0 instead.
     timeout_seconds: 10
-    # 1 記事の保存あたりの取得の総所要時間の上限(秒)。超過したものは失敗として扱う。
-    # 既定 60、0 より大きい値。
+    # Upper bound in seconds on total fetch time per article save; anything over the limit counts as a failure. Default 60, must be greater than 0.
     total_timeout_seconds: 60
-    # リダイレクトを追う最大ホップ数。各ホップで宛先 IP を再検査する。既定 3、0〜10。
+    # Max redirect hops to follow; the destination IP is re-checked at every hop. Default 3, range 0-10.
     max_redirects: 3
-  # デコード後の最大画素数。展開爆弾(数 KB の PNG が展開時に数十 GB の画素になる)への対策。
-  # バイト数ではなく画素数で上限を設ける必要がある。既定 50000000、1 以上。
+  # Max pixel count after decode, guarding against decompression bombs where a PNG of a few KB decodes to tens of GB of pixels.
+  # That is why the cap has to be on pixels rather than bytes. Default 50000000, minimum 1.
   max_pixels: 50000000
-  # 1 ユーザーが取り込める画像の合計バイト数の上限(原寸版の合計)。既定 1073741824(1 GiB)、0 以上。
+  # Quota on the total bytes of images one user may ingest, summed over the full-size renditions. Default 1073741824 (1 GiB), minimum 0.
   quota_bytes_per_user: 1073741824
 
-# --------------------------------------------------------------------------
-# 初期値。初回起動時に settings 表へ写され、以後は参照されない。
-# --------------------------------------------------------------------------
+# Seed values. Copied into the settings table on first boot and never read again.
 
 discord:
-  # 対象とする単一 Discord サーバー(guild)の ID。閲覧制限(ロール限定公開)や members 公開の
-  # 判定に用いるため必須。この 1 つのサーバーのメンバーとロールがユーザー管理の基盤となる。
-  # 設定画面には表示されるが変更できない。変更すると、ロールのスナップショット・報道社のロール紐付け・
-  # 閲覧範囲の判定がすべて別の guild を指すことになり、既存のデータが無意味になる。
-  # 他の guild へ移すのは再デプロイであって設定変更ではない。
+  # ID of the single target Discord server (guild). Required, because it drives the access-restriction (role-restricted) and members-only visibility checks.
+  # The members and roles of this one server are the basis of user management.
+  # Shown on the admin screen but not editable. Changing it would point the role snapshots, the publishers' role links and the visibility check at a different guild, leaving the existing data meaningless.
+  # Moving to another guild is a redeployment, not a settings change.
   guild_id: "000000000000000000"
-  # 利用者認証(OAuth2)に用いるアプリケーション資格情報。
-  # 必要なスコープは identify(ユーザー識別)と guilds.members.read(guild 内のロール取得)。
-  # 認可後に戻る URL は設定として持たない。server.base_url と、戻り先を受け取る経路 /auth/callback から
-  # 導出する(上記の base_url なら http://localhost:8000/auth/callback)。
-  # この導出結果を Discord のアプリケーション設定の Redirects へ登録すること。
+  # Application credentials for user authentication (OAuth2).
+  # The scopes required are identify (to identify the user) and guilds.members.read (to read the user's roles in the guild).
+  # The post-authorization return URL is not a setting: it is derived from server.base_url and /auth/callback, the route that receives the redirect_uri (with the base_url above, http://localhost:8000/auth/callback).
+  # Register that derived URL under Redirects in the Discord application settings.
   oauth:
     client_id: "000000000000000000"
     client_secret: "change-me"
-  # 新着記事を通知する bot の設定。
-  # 新着記事の通知先は、記事のカテゴリ(categories.notify_channel_id)とタグ(tags.notify_channel_id)を
-  # 重複排除した集合として解決する。宛先が 0 件の記事はどこにも通知しない。既定チャンネルへの
-  # フォールバックは持たない(「この欄は通知しない」という意図を表現できなくなるため)。
+  # Settings for the bot that posts notifications for new articles.
+  # The notification target is resolved as the deduplicated set of the article's category (categories.notify_channel_id) and tags (tags.notify_channel_id). An article whose recipient set is empty is notified nowhere.
+  # There is no fallback to a default channel: it would make the intent "do not notify for this section" inexpressible.
   bot:
-    # 変更すると bot の再接続が要る。設定画面はその旨を示す。
+    # Changing this requires the bot to reconnect; the admin screen says so.
     token: "change-me"
-    # 公開待ちの記事を拾い、予約公開の時刻到来を判定する間隔(秒)。既定 15、1〜3600。
-    # ここだけが「見に行く」間隔である。公開を決めるのは server であり、Discord はそれを知らないため、
-    # 待ち行列を周期的に見に行くしかない。以下の 2 つの照合の間隔は、Discord から届くイベントを取りこぼした
-    # 場合にそれが正されるまでの上限であって、反映の速さを決める設定ではない。
+    # Interval in seconds at which articles waiting to be published are picked up and scheduled publish times are checked for arrival. Default 15, range 1-3600.
+    # This is the only interval that goes looking: server decides publication and Discord has no way to know, so the queue can only be polled.
+    # The two reconcile intervals below are the upper bound on how long a missed Discord event stays uncorrected, not a setting that decides how fast changes take effect.
     publish_poll_interval_seconds: 15
-    # guild のロール・メンバー・オーナーを Discord と突き合わせて補正する間隔(秒)。既定 3600、1〜3600。
-    # ロールの変更はこの間隔を待たずにイベントで即座に反映される。上限があるのは安全のため。
-    # 管理者の資格とロール別の閲覧範囲は、bot が書き込むスナップショットに基づいて要求のたびに判定される。
-    # イベントは取りこぼしうる(bot の停止中や、その処理が失敗したとき)ため、必ず補正される時刻の上限が要る。
+    # Interval in seconds at which the guild's roles, members and owner are reconciled against Discord. Default 3600, range 1-3600.
+    # Role changes apply immediately from events without waiting for this interval; the cap exists as a safety net.
+    # Admin eligibility and per-role visibility are decided on every request from the snapshot the bot writes.
+    # Events can be missed (while the bot is down, or when handling one fails), so there has to be an upper bound on when they are guaranteed to be corrected.
     guild_reconcile_interval_seconds: 3600
-    # 投票の数とコメントを Discord と突き合わせて補正する間隔(秒)。既定 3600、1〜86400。
+    # Interval in seconds at which vote counts and comments are reconciled against Discord. Default 3600, range 1-86400.
     count_reconcile_interval_seconds: 3600
-    # 投票の数とコメントを照合し直す、公開からの日数。既定 14、0〜365。
-    # 照合は対象期間の通知とスレッドを 1 件残らず読み直すため、際限なく遡ると、反応がとうに止んだ記事まで含めて問い合わせが増え続ける。
-    # ここを過ぎた通知にもイベントは届き、投票もコメントもそのまま更新される(イベントが読むのは実際に変化した投稿だけである)。
-    # スレッドを開けなかった・投票用の絵文字を付けられなかった通知を拾い直す期間も兼ねる。0 にするとその再試行も止まる。
+    # Days after publication for which vote counts and comments are re-reconciled. Default 14, range 0-365.
+    # The reconcile re-reads every notification post and thread in the window, so going back without limit keeps adding queries, down to articles whose reactions stopped long ago.
+    # Notification posts past the window still receive events, and votes and comments are still updated (an event only reads the post that actually changed).
+    # The window doubles as the period for retrying notification posts whose thread could not be opened or whose vote reactions could not be added; 0 stops that retry too.
     count_reconcile_window_days: 14
 
-# プラットフォーム管理用の API キー(ads:admin / taxonomy:admin / settings:admin / articles:write:any)を
-# 発行できる資格の判定。既定では Discord の Administrator 権限保有者と guild オーナーが該当する。
-# Administrator はサーバーの全操作を許す極めて強い権限であり、広告を入稿させたいだけの相手に
-# 与えるのは筋が悪い。ここに管理ロールを列挙すると、Administrator を配らずに「編集長」「広告担当」
-# といったロールへプラットフォーム管理を委譲できる。
-# guild オーナーは bot がイベント(オーナーの移譲)と照合で users.is_guild_owner として取り込むため、設定には現れない。
-# 既定は空。
+# Eligibility to issue platform-admin API keys (ads:admin / taxonomy:admin / settings:admin / articles:write:any).
+# By default, holders of Discord's Administrator permission and the guild owner qualify.
+# Administrator allows every operation on the Discord server, which is far too strong to hand to someone who only needs to submit ads.
+# Listing admin roles here delegates platform administration to roles like "editor-in-chief" or "ad manager" without handing out Administrator.
+# The guild owner does not appear in the settings: the bot imports it as users.is_guild_owner from events (ownership transfer) and from the reconcile.
+# Default is empty.
 admin:
   role_ids: []
 
 articles:
-  # 速報。通知時にロールを mention する。
+  # Breaking news. Mentions a role when the notification is posted.
   breaking:
-    # 速報フラグを立てられるロール。空なら誰も立てられない(記事は通常記事として出る)。
-    # 乱発を防ぐため、付与できる相手を絞る。既定は空。
+    # Roles allowed to flag an article as breaking. Empty means nobody can, and articles go out as ordinary articles.
+    # Kept to a narrow set of holders so the flag is not overused. Default is empty.
     allowed_role_ids: []
-    # 通知時に mention するロール。空なら mention しない。既定は空。
+    # Roles to mention when the notification is posted. Empty means no mention. Default is empty.
     mention_role_ids: []
-  # API キー 1 本あたりの記事の作成・更新の上限(1 時間あたり)。超過したキーには 429 を返す。
-  # 自動投稿は本質的に暴走しうるため、キー単位で上限を設ける。既定 60、0 以上。
+  # Rate limit on article creates and updates per API key, per hour; a key over the limit gets 429.
+  # Automated posting can inherently run away, so the limit is per key. Default 60, minimum 0.
   api_rate_limit_per_hour: 60

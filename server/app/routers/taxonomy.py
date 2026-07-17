@@ -1,10 +1,10 @@
-"""分類(カテゴリ・タグ・報道社・連載)の読み取り API。
+"""Read API for the taxonomy (categories, tags, publishers, series).
 
-このモジュールは記事一覧の射影(fetch_article_page)も持ち、検索のルータがそれを再利用する。一覧に出す記事の形(ArticleListItem)は絞り込みの条件に依らず同一であり、条件ごとに組み立てを書き分けると、署名・反応数・タグの解決が経路ごとに食い違う。
+This module also holds the article listing projection (fetch_article_page), which the search router reuses. A listed article has the same shape (ArticleListItem) whatever the filter condition, and writing the assembly separately per condition would let the byline, reaction counts and tag resolution diverge between paths.
 
-一覧はすべて閲覧範囲の絞り込み(visibility_sql_filter)を通し、あわせて status='published' を課す。前者は「読んではいけない記事を見せない」ためであり、後者は「まだ公開していない記事を公開の索引に混ぜない」ため。閲覧範囲の絞り込みだけでは、著者本人と管理者に対して自分の下書き(published_at が NULL)が年表や検索結果へ紛れ込む。下書きは執筆者の記事一覧で辿るものであって、話題の索引に並べるものではない。
+Every listing goes through the visibility filter (visibility_sql_filter) and additionally imposes status='published'. The first keeps articles the caller must not read out of sight; the second keeps not-yet-published articles out of the public index. With the visibility filter alone, an author or an admin would see their own drafts (published_at NULL) mixed into the timeline and into search results. A draft is reached through the writer's own article listing, not lined up in the topical index. The fragment carries no admin clause and this module adds none, so a listing shows an admin only what their own roles allow, even for an article can_view_article would let them open; visibility_sql_filter records that gap.
 
-SQL の組み立てにあたり、f 文字列へ差し込むのはこのモジュール内に書いた定数(結合句・並び順・IN 句の %s の個数)だけであり、要求から来た値は必ずプレースホルダ(%s)で渡す。
+When building SQL, only constants written in this module are interpolated into f-strings (join clauses, orderings, the number of %s in an IN clause); values that came from the request are always passed as placeholders (%s).
 """
 
 from __future__ import annotations
@@ -39,32 +39,30 @@ from ..visibility import visibility_sql_filter
 
 router = APIRouter(tags=['taxonomy'])
 
-# 一覧 1 ページあたりの件数。タグ年表と検索はクエリで page しか受けないため、件数はここで固定する。
+# Items per page of a listing. The tag timeline and search take only page in the query, so the count is fixed here.
 DEFAULT_PER_PAGE: Final = 20
-# 報道社ページ・連載ページに添える記事の上限。詳細ページは「その社・その連載を概観する」ためのものであり、全件は /api/articles の絞り込みで辿れる。上限を設けないと、記事の多い報道社のページだけが際限なく重くなる。
+# Max articles attached to a publisher or series page. A detail page is there to give an overview of that publisher or series; the full set is reachable through the filters on /api/articles. Without a cap, the page of a publisher with many articles is the one that grows unboundedly heavy.
 DETAIL_ARTICLES_LIMIT: Final = 50
 
 
 class CategoryListItem(CategoryOut):
-    """カテゴリ一覧の項目。
+    """An item of the category listing.
 
-    article_count は要求元が閲覧できる公開済みの記事だけで数える。全件で数えると、読めない記事の存在と数が件数から漏れる。
+    article_count counts only the published articles the caller can view. Counting every article would leak the existence and the number of unreadable articles through the count.
     """
 
     article_count: int
 
 
 class PublisherPageOut(PublisherDetailOut):
-    """報道社ページの応答。プロフィール・所属記者・実績に、その社の記事一覧を添える。"""
+    """The publisher page response: profile, affiliated reporters and track record, plus a listing of that publisher's articles."""
 
     articles: list[ArticleListItem] = Field(default_factory=list)
 
 
-# --------------------------------------------------------------------------
-# 記事一覧の射影(検索のルータからも使う)
-# --------------------------------------------------------------------------
+# The article listing projection (the search router uses it too).
 
-# 一覧に出す記事の列。DictCursor は同名の列を後勝ちで潰すため、結合したテーブルの列には必ず接頭辞つきの別名を与える。
+# The columns of a listed article. DictCursor collapses same-named columns last-one-wins, so every column from a joined table is given a prefixed alias.
 _ARTICLE_COLUMNS: Final = '''
     articles.id AS id,
     articles.slug AS slug,
@@ -108,7 +106,7 @@ _ARTICLE_COLUMNS: Final = '''
     (SELECT COUNT(*) FROM article_comments ac WHERE ac.article_id = articles.id) AS comment_count
 '''
 
-# 記事の署名・分類を解決する結合。author_id と category_id は NOT NULL の外部キーであるため内部結合でよく、件数を変えない。反応数を結合ではなく相関副問い合わせで求めるのは、結合すると通知先の数だけ行が増えて記事の重複排除が要るうえ、1 ページ分の記事にしか要らない集計のために通知の全行を畳むことになるため。
+# The joins that resolve an article's byline and taxonomy. author_id and category_id are NOT NULL foreign keys, so an inner join is enough and does not change the row count. The reaction counts are correlated subqueries rather than joins because joining multiplies an article into as many rows as it has notify targets, which then needs deduping, and because it would fold every notification row for a tally only one page of articles needs.
 _ARTICLE_JOINS: Final = '''
     FROM articles
     JOIN users au ON au.id = articles.author_id
@@ -119,15 +117,15 @@ _ARTICLE_JOINS: Final = '''
 
 
 def published_and_visible(principal: Principal | None) -> tuple[str, list[Any]]:
-    """公開済みかつ要求元が閲覧できる記事に絞る WHERE 断片と、その引数を返す。"""
+    """Return the WHERE fragment narrowing to published articles the caller can view, and its arguments."""
     visibility_sql, visibility_args = visibility_sql_filter(principal)
     return f"articles.status = 'published' AND ({visibility_sql})", list(visibility_args)
 
 
 async def _fetch_tags_for_articles(db: Database, article_ids: Sequence[int]) -> dict[int, list[TagOut]]:
-    """記事 ID の集合に対するタグを 1 度に引き、記事 ID ごとにまとめる。
+    """Fetch the tags for a set of article IDs in one query, grouped by article ID.
 
-    記事ごとに 1 クエリを投げると 1 ページ分で件数と同じ回数の往復が生じるため、まとめて引く。
+    One query per article would cost as many round trips as there are items on the page, so they are fetched together.
     """
     if not article_ids:
         return {}
@@ -150,7 +148,7 @@ async def _fetch_tags_for_articles(db: Database, article_ids: Sequence[int]) -> 
 
 
 def _article_list_item(row: Mapping[str, Any], tags: list[TagOut]) -> ArticleListItem:
-    """一覧クエリの 1 行を ArticleListItem へ写す。"""
+    """Map one row of the listing query to an ArticleListItem."""
     publisher: PublisherOut | None = None
     if row['publisher_id'] is not None:
         publisher = PublisherOut(
@@ -197,10 +195,10 @@ def _article_list_item(row: Mapping[str, Any], tags: list[TagOut]) -> ArticleLis
         sponsor_name=row['sponsor_name'],
         status=row['status'],
         view_count=int(row['view_count']),
-        # SUM() は MySQL では DECIMAL を返すため int へ寄せる。
+        # SUM() returns DECIMAL on MySQL, so coerce to int.
         up_count=int(row['up_count']),
         down_count=int(row['down_count']),
-        # 差し引きはここで求める。行の列どうしを SQL で引くと符号なしの引き算になり、反対が賛成を上回った瞬間に文が失敗する。
+        # The subtraction is done here. Subtracting the row's columns from each other in SQL is unsigned arithmetic, and the statement fails the moment down-votes exceed up-votes.
         score=int(row['up_count']) - int(row['down_count']),
         comment_count=int(row['comment_count']),
         published_at=row['published_at'],
@@ -220,16 +218,16 @@ async def fetch_article_page(
     page: int,
     per_page: int = DEFAULT_PER_PAGE,
 ) -> Page[ArticleListItem]:
-    """条件に合う記事の 1 ページ分を、一覧の表現で返す。
+    """Return one page of the articles matching the condition, in the listing representation.
 
-    where / order_by / joins は呼び出し側がモジュール内の定数として書く SQL 断片であり、要求から来た値を混ぜてはならない。値は where_args / order_args としてプレースホルダで渡す。
+    where / order_by / joins are SQL fragments the caller writes as constants inside its own module; values that came from the request must never be mixed into them. Values are passed as placeholders via where_args / order_args.
 
-    総件数は同じ条件の COUNT(*) で数える。件数のクエリに署名・分類の結合は要らない(内部結合は NOT NULL の外部キーが相手で件数を変えず、外部結合はそもそも件数を変えない)ため、絞り込みに使う joins だけを渡す。
+    The total is counted with COUNT(*) over the same condition. That count query does not need the byline/taxonomy joins (the inner joins are against NOT NULL foreign keys and do not change the count, and the outer joins cannot change it at all), so only the joins used for narrowing are passed.
     """
     total = int(await db.fetch_val(f'SELECT COUNT(*) FROM articles {joins} WHERE {where}', *where_args) or 0)
     offset = (page - 1) * per_page
     rows: list[dict[str, Any]] = []
-    # 総件数を超えた頁は行が無いことが確定しているため、行のクエリ自体を投げない。
+    # A page of results past the total is certain to hold no rows, so the row query is not issued at all.
     if offset < total:
         rows = await db.fetch_all(
             f'SELECT {_ARTICLE_COLUMNS} {_ARTICLE_JOINS} {joins} WHERE {where} ORDER BY {order_by} LIMIT %s OFFSET %s',
@@ -249,9 +247,7 @@ async def fetch_article_page(
     )
 
 
-# --------------------------------------------------------------------------
-# カテゴリ
-# --------------------------------------------------------------------------
+# Categories
 
 
 @router.get('/api/categories', response_model=list[CategoryListItem])
@@ -259,7 +255,7 @@ async def list_categories(
     db: Annotated[Database, Depends(get_db)],
     principal: Annotated[Principal | None, Depends(get_principal_optional)],
 ) -> list[CategoryListItem]:
-    """カテゴリの一覧。ナビゲーションの並び順(position)で返し、記事数を添える。"""
+    """The category listing, returned in the navigation's order (position), with the article count attached."""
     where, args = published_and_visible(principal)
     rows = await db.fetch_all(
         f'''
@@ -274,9 +270,7 @@ async def list_categories(
     return [CategoryListItem.model_validate(row) for row in rows]
 
 
-# --------------------------------------------------------------------------
-# タグ
-# --------------------------------------------------------------------------
+# Tags
 
 _TAG_COLUMNS: Final = '''
     t.id AS id, t.slug AS slug, t.name AS name, t.description AS description,
@@ -285,7 +279,7 @@ _TAG_COLUMNS: Final = '''
 
 
 def _tag_article_count(where: str) -> str:
-    """タグに紐づく、閲覧できる公開済み記事の件数を数える相関副問い合わせ。"""
+    """Correlated subquery counting the viewable published articles attached to a tag."""
     return f'''
         (SELECT COUNT(*) FROM article_tags atg JOIN articles ON articles.id = atg.article_id
          WHERE atg.tag_id = t.id AND {where})
@@ -297,7 +291,7 @@ async def list_tags(
     db: Annotated[Database, Depends(get_db)],
     principal: Annotated[Principal | None, Depends(get_principal_optional)],
 ) -> list[TagDetailOut]:
-    """タグの一覧。記事数の多い順に返し、同数は名前順で並べる。"""
+    """The tag listing, most articles first, ties ordered by name."""
     where, args = published_and_visible(principal)
     rows = await db.fetch_all(
         f'''
@@ -316,7 +310,7 @@ async def get_tag(
     db: Annotated[Database, Depends(get_db)],
     principal: Annotated[Principal | None, Depends(get_principal_optional)],
 ) -> TagDetailOut:
-    """タグ 1 件。タグページ(話題の特設ページ)の見出しに使う。"""
+    """A single tag. Used for the heading of the tag page (the topic hub)."""
     where, args = published_and_visible(principal)
     row = await db.fetch_one(
         f'''
@@ -339,9 +333,9 @@ async def tag_timeline(
     principal: Annotated[Principal | None, Depends(get_principal_optional)],
     page: Annotated[int, Query(ge=1)] = 1,
 ) -> Page[ArticleListItem]:
-    """そのタグの記事を published_at の昇順で辿る年表。
+    """The timeline: that tag's articles walked in ascending published_at order.
 
-    新着一覧と違って古い順に並べるのは、この一覧が「最新の出来事」ではなく「その話題の経緯」を読むためのものだからである。地政学的な話題では、建国・領土変更・条約締結が時系列に並ぶこと自体に価値があり、降順ではその筋道が逆から提示されてしまう。同時刻の記事は ID の昇順で並べ、頁をまたいで順序が揺れないようにする。
+    Unlike the latest listing, this one runs oldest-first because it is read for how a topic unfolded, not for the newest events. On a geopolitical topic the value is in the founding of a state, a change of territory and the signing of a treaty standing in chronological order; descending order presents that thread backwards. Articles sharing a timestamp are ordered by ascending ID so the order does not waver across a page boundary.
     """
     tag_id = await db.fetch_val('SELECT id FROM tags WHERE slug = %s', slug)
     if tag_id is None:
@@ -357,9 +351,7 @@ async def tag_timeline(
     )
 
 
-# --------------------------------------------------------------------------
-# 報道社
-# --------------------------------------------------------------------------
+# Publishers
 
 _PUBLISHER_COLUMNS: Final = '''
     p.id AS id, p.role_id AS role_id, p.slug AS slug, p.name AS name,
@@ -369,15 +361,15 @@ _PUBLISHER_COLUMNS: Final = '''
 
 @router.get('/api/publishers', response_model=list[PublisherOut])
 async def list_publishers(db: Annotated[Database, Depends(get_db)]) -> list[PublisherOut]:
-    """報道社の一覧。解散した報道社(role_id が NULL)も過去記事の署名として残るため落とさない。"""
+    """The publisher listing. Dissolved publishers (role_id NULL) are not dropped, because they live on as the byline of past articles."""
     rows = await db.fetch_all(f'SELECT {_PUBLISHER_COLUMNS} FROM publishers p ORDER BY p.name')
     return [PublisherOut.model_validate(row) for row in rows]
 
 
 async def _publisher_members(db: Database, role_id: int | None) -> list[UserBrief]:
-    """報道社に所属する記者。所属は Discord のロールで表すため、その role_id を保有する利用者を引く。
+    """The reporters affiliated with a publisher. Affiliation is expressed by a Discord role, so this pulls the users holding that role_id.
 
-    guild を抜けた利用者は user_roles の行が残りうるため、現に参加している者だけを名簿とする。role_id が NULL の報道社は解散しており、所属者は居ない。
+    A user who has left the guild can leave a user_roles row behind, so only those currently in the guild make up the roster. A publisher whose role_id is NULL is dissolved and has nobody affiliated.
     """
     if role_id is None:
         return []
@@ -401,17 +393,17 @@ async def get_publisher(
     db: Annotated[Database, Depends(get_db)],
     principal: Annotated[Principal | None, Depends(get_principal_optional)],
 ) -> PublisherPageOut:
-    """報道社のプロフィール・所属記者・実績・記事一覧。
+    """A publisher's profile, affiliated reporters, track record and article listing.
 
-    実績は要求元が閲覧できる公開済みの記事だけで数える。全件で数えると、読めない記事の存在と反応の大きさが数字として漏れるうえ、同じページに並ぶ記事一覧の件数と実績の記事数が食い違う。
+    The track record counts only the published articles the caller can view. Counting every article would leak the existence of unreadable articles and the size of their reactions as numbers, and would make the article count in the track record disagree with the article listing sitting on the same page.
     """
     publisher_row = await db.fetch_one(f'SELECT {_PUBLISHER_COLUMNS} FROM publishers p WHERE p.slug = %s', slug)
     if publisher_row is None:
         raise NotFound('その報道社は存在しません。')
     publisher_id = int(publisher_row['id'])
     where, args = published_and_visible(principal)
-    # 点数はランキングと同じ規則で求める。ここだけ別の式にすると、報道社の面に出る点数とランキングでのその報道社の点数が食い違う。式そのものを rankings から借りるのはそのためであり、記事ごとに畳んでから合計する 2 段の形も同じ理由による(規則は rankings のモジュール docstring を参照)。
-    # ランキングと違い、対象は閲覧者が読める記事に限り(published_and_visible)、期間で区切らない。報道社の面はその報道社の実績の全体を示す場所である。
+    # The score follows the same rule as the ranking. A separate expression here would make the score shown on the publisher page disagree with that publisher's score in the ranking. That is why the expression itself is borrowed from rankings, and why the two-stage shape (fold per article, then sum) is kept. For the rule, see the rankings module docstring.
+    # Unlike the ranking, the scope is limited to the articles the viewer can read (published_and_visible) and is not cut off by period: the publisher page is where that publisher's track record is shown in full.
     stats_row = await db.fetch_one(
         f'''
         SELECT COUNT(*) AS article_count,
@@ -443,9 +435,7 @@ async def get_publisher(
     return PublisherPageOut(**publisher_row, members=members, stats=stats, articles=articles.items)
 
 
-# --------------------------------------------------------------------------
-# 連載
-# --------------------------------------------------------------------------
+# Series
 
 _SERIES_COLUMNS: Final = '''
     s.id AS id, s.slug AS slug, s.title AS title, s.description AS description,
@@ -458,7 +448,7 @@ _SERIES_JOINS: Final = 'FROM series s JOIN users o ON o.id = s.owner_id'
 
 
 def _series_out(row: Mapping[str, Any]) -> dict[str, Any]:
-    """連載の行を、owner を入れ子にした形へ写す。"""
+    """Map a series row into the shape with owner nested."""
     return {
         'id': row['id'],
         'slug': row['slug'],
@@ -479,7 +469,7 @@ def _series_out(row: Mapping[str, Any]) -> dict[str, Any]:
 
 @router.get('/api/series', response_model=list[SeriesOut])
 async def list_series(db: Annotated[Database, Depends(get_db)]) -> list[SeriesOut]:
-    """連載の一覧。更新の新しい順に返す。"""
+    """The series listing, most recently updated first."""
     rows = await db.fetch_all(f'SELECT {_SERIES_COLUMNS} {_SERIES_JOINS} ORDER BY s.updated_at DESC, s.id DESC')
     return [SeriesOut.model_validate(_series_out(row)) for row in rows]
 
@@ -490,9 +480,9 @@ async def get_series(
     db: Annotated[Database, Depends(get_db)],
     principal: Annotated[Principal | None, Depends(get_principal_optional)],
 ) -> SeriesDetailOut:
-    """連載 1 件と、その収録記事。
+    """A single series and the articles in it.
 
-    連載は順序を持つまとまりであるため、記事は series_position の昇順で並べる。position が未設定の記事は末尾へ回し、その中では公開の古い順とする(連載は第 1 回から読むものであり、新着順に並べると筋が逆になる)。
+    A series is an ordered whole, so its articles are ordered by ascending series_position. Articles with no position set go to the end, oldest published first among them (a series is read from installment 1, and ordering it latest-first reverses the thread).
     """
     row = await db.fetch_one(f'SELECT {_SERIES_COLUMNS} {_SERIES_JOINS} WHERE s.slug = %s', slug)
     if row is None:

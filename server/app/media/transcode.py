@@ -1,14 +1,14 @@
-"""受け取ったバイト列を復号し、WebP へ再符号化する。
+"""Decode the received bytes and re-encode them as WebP.
 
-受け取ったバイト列をそのまま保存してはならない。復号して再符号化することが、この経路で単独で最も効く対策である。
+Never store the received bytes as they arrived. Decoding and re-encoding is the single most effective measure on this path.
 
-- ポリグロット(GIF としても HTML としても JavaScript としても妥当なファイル)が壊れる。再符号化の出力は、こちらが持つ符号化器が書いたバイト列だけで構成され、元のバイト列は 1 バイトも残らない。
-- EXIF が落ちる。撮影地の座標や端末の識別子が、本人の意図と無関係に画像へ埋まっている。
-- 配信時の Content-Type を自分で決められる。相手の申告した形式を信じる必要が無くなる。
+- Polyglots (a file that is valid GIF and valid HTML and valid JavaScript at once) break. The re-encoded output consists solely of bytes written by our own encoder; not one byte of the input survives.
+- EXIF is dropped. Capture coordinates and device identifiers sit embedded in images without their owner ever intending it.
+- We choose the Content-Type we serve, so the format the remote claimed no longer has to be trusted.
 
-展開爆弾(数 KB の PNG が展開時に数十 GB の画素になる)への対策はバイト数では効かない。バイト数の上限を通り抜けたものが、復号した瞬間にメモリを食い尽くす。画素数で上限を設け、復号の前に検査する。
+Byte counts are no defence against a decompression bomb (a few-KB PNG that expands into tens of GB of pixels): whatever slips past the byte cap eats all memory the moment it is decoded. Cap on pixel count instead, and check before decoding.
 
-メタデータは EXIF に限らず全て捨てる。EXIF は位置情報を含み、XMP も同様の情報を持ちうる。ICC プロファイルに秘密は無いが、mode を変換した後のデータに元のプロファイル(例えば CMYK 用のもの)が付いたままになると、変換後のデータを説明しないプロファイルが残り、色が壊れる。全て捨てて sRGB として扱うのが、この用途では最も破綻が少ない。
+Drop all metadata, not just EXIF. EXIF carries location, and XMP can carry the same. ICC profiles hold no secrets, but leaving the original profile (a CMYK one, say) attached to data whose mode has been converted leaves a profile that no longer describes the data, and colours break. Dropping everything and treating the result as sRGB breaks least for this use.
 """
 
 from __future__ import annotations
@@ -20,32 +20,32 @@ from typing import Any, Final
 
 from PIL import Image, ImageSequence
 
-# 変種ごとの横幅。名前の一覧は store.VARIANTS が持つ('orig' は原寸であるためここには現れない)。
+# Width per variant. store.VARIANTS holds the list of names; 'orig' is the original size, so it does not appear here.
 VARIANT_WIDTHS: Final[dict[str, int]] = {'1200w': 1200, '400w': 400}
 
-# 非可逆の品質。可逆のときは Pillow がこの値を圧縮の手間として解釈する(値の意味が変わるだけで、指定しない理由にはならない)。
+# Lossy quality. When lossless, Pillow reads this value as compression effort instead — only its meaning changes, which is no reason to leave it unset.
 WEBP_QUALITY: Final = 90
-# 符号化の手間(0〜6)。静止画は最良を選ぶ。アニメーションは全フレームに掛かるため、記事の保存を待たせない値に留める。
+# Encoder effort (0-6). Stills take the best. Animation pays it on every frame, so keep it at a value that does not hold up an article save.
 _METHOD_STILL: Final = 6
 _METHOD_ANIMATED: Final = 4
-# WebP が表現できる辺の上限。これを超える画像は、そもそも WebP として保存できない。
+# Max side length WebP can represent. An image larger than this cannot be saved as WebP at all.
 WEBP_MAX_DIMENSION: Final = 16383
-# アルファを持つ mode。P の透過は info の transparency として現れるため、mode だけでは判定できない。
+# Modes carrying alpha. P-mode transparency shows up as a transparency key in info, so mode alone cannot decide.
 _ALPHA_MODES: Final = frozenset({'RGBA', 'LA', 'PA', 'RGBa', 'La'})
-# フレームの表示時間がこれ未満の GIF は、閲覧器が既定値へ丸めて再生する。そのまま写すと WebP では瞬いて見えるため、同じ丸めを行う。
+# Browsers round a GIF frame shorter than this up to their own default on playback. Copying the raw duration through would leave the WebP visibly flickering, so apply the same rounding here.
 _MIN_FRAME_DURATION_MS: Final = 20
 _DEFAULT_FRAME_DURATION_MS: Final = 100
 
 
 class TranscodeError(Exception):
-    """画像として復号できない、大きすぎる、WebP へ符号化できないなど、変換が成立しなかった。"""
+    """The conversion did not go through: not decodable as an image, too large, not encodable as WebP, and so on."""
 
 
 @dataclass(frozen=True)
 class EncodedImage:
-    """変換の結果。content_hash は変換後の orig の SHA-256 であり、変換前の原本のハッシュではない。
+    """The result of a conversion. content_hash is the SHA-256 of the post-conversion 'orig', not a hash of the pre-conversion original file.
 
-    配信するバイト列そのもののハッシュにすることで、URL が実際に配信される内容を指す。原本のハッシュにすると、符号化器の版が変わって出力が変わっても URL が変わらず、内容アドレスとして成立しなくなる(永久キャッシュを許している以上、これは古い画像が二度と更新されないことを意味する)。
+    Hashing the served bytes themselves makes the URL name the content actually served. Hashing the original file would leave the URL unchanged when a new encoder version changes the output, which stops it being content-addressed — and since permanent caching is allowed, that means an old image would never be updated again.
     """
 
     content_hash: str
@@ -54,7 +54,7 @@ class EncodedImage:
     byte_size: int
     is_animated: bool
     is_lossless: bool
-    # 'orig' は必須。アニメーションは 'orig' のみ。原寸より広い変種は含まない。
+    # 'orig' is mandatory. An animation has 'orig' only. No variant wider than the original size is included.
     variants: dict[str, bytes]
 
 
@@ -63,16 +63,16 @@ def _has_alpha(image: Image.Image) -> bool:
 
 
 def _strip_metadata(image: Image.Image) -> Image.Image:
-    """付随する情報を全て落とす。
+    """Drop every piece of attached metadata.
 
-    Pillow は convert や resize で info を引き継ぎ、WebP の保存時に im.info の exif をそのまま書き出す。ここで空にしておかないと、再符号化しても EXIF だけが原本から生き残る。
+    Pillow carries info over through convert and resize, and writes im.info's exif straight out when saving WebP. Without emptying it here, EXIF alone survives the re-encode from the original file.
     """
     image.info = {}
     return image
 
 
 def _to_target_mode(image: Image.Image) -> Image.Image:
-    """WebP へ書ける mode へ変換する。透過は非可逆でも保つ(WebP はアルファを別途可逆で持てる)。"""
+    """Convert to a mode WebP can write. Transparency is kept even when lossy — WebP can hold alpha losslessly on the side."""
     converted = image.convert('RGBA' if _has_alpha(image) else 'RGB')
     return _strip_metadata(converted)
 
@@ -87,16 +87,16 @@ def _save_webp(image: Image.Image, *, lossless: bool, method: int, **extra: Any)
 
 
 def _check_pixels(width: int, height: int, frames: int, max_pixels: int) -> None:
-    """復号の前に画素数を検査する。
+    """Check the pixel count before decoding.
 
-    Pillow の MAX_IMAGE_PIXELS は上限の 2 倍を超えて初めて例外にし、その間は警告を出すだけである(警告は既定で握り潰される)。上限をそのまま強制するのはこちらの検査であり、MAX_IMAGE_PIXELS の設定は Pillow の内部で遅れて復号される経路に対する二重の備えに過ぎない。
+    Pillow's MAX_IMAGE_PIXELS only raises once twice the limit is exceeded, and merely warns in between (warnings are swallowed by default). This check is what enforces the limit as written; setting MAX_IMAGE_PIXELS is no more than a second line of defence for paths that decode late inside Pillow.
     """
     if width <= 0 or height <= 0:
         raise TranscodeError(f'画像の寸法が不正です: {width}x{height}')
     pixels = width * height
     if pixels > max_pixels:
         raise TranscodeError(f'画像の画素数({pixels})が上限({max_pixels})を超えています。')
-    # アニメーションで実際に復号される画素数はフレーム数の分だけ増える。1 フレームだけを見て通すと、小さなフレームを大量に並べた爆弾が抜ける。
+    # An animation actually decodes frame-count times as many pixels. Passing it on the strength of a single frame lets through a bomb built from a huge number of small frames.
     if pixels * frames > max_pixels:
         raise TranscodeError(f'アニメーションの総画素数({pixels} × {frames} フレーム)が上限({max_pixels})を超えています。')
 
@@ -113,10 +113,10 @@ def _frame_count(image: Image.Image) -> int:
 
 
 def _encode_still(base: Image.Image, *, lossless: bool) -> dict[str, bytes]:
-    """原寸と、原寸より狭い変種を符号化する。"""
+    """Encode the original size, plus every variant narrower than it."""
     variants = {'orig': _save_webp(base, lossless=lossless, method=_METHOD_STILL)}
     for name, target_width in VARIANT_WIDTHS.items():
-        # 原寸以上の幅の変種は作らない。引き伸ばしても情報は増えず、原寸より重いファイルができるだけになる。
+        # No variant at or above the original width. Upscaling adds no information and only produces a file heavier than the original size.
         if base.width <= target_width:
             continue
         target_height = max(1, round(base.height * target_width / base.width))
@@ -137,7 +137,7 @@ def _frame_duration(frame: Image.Image) -> int:
 
 
 def _encode_animation(source: Image.Image, *, lossless: bool) -> bytes:
-    """アニメーションをアニメーション WebP へ符号化する。変種は作らない(縮小版のアニメーションに需要が無く、フレーム数だけ変換の費用が掛かる)。"""
+    """Encode an animation as animated WebP. No variants are produced: nobody wants a downscaled animation, and it would cost one conversion per frame."""
     frames: list[Image.Image] = []
     durations: list[int] = []
     for frame in ImageSequence.Iterator(source):
@@ -145,7 +145,7 @@ def _encode_animation(source: Image.Image, *, lossless: bool) -> bytes:
         frames.append(_to_target_mode(frame))
     if not frames:
         raise TranscodeError('アニメーションのフレームがありません。')
-    # GIF の loop は「繰り返す回数」で 0 が無限を意味する。指定が無い GIF は 1 回だけ再生されるのが本来の挙動であるため、無限(0)へ寄せない。
+    # A GIF's loop is a repeat count in which 0 means infinite. A GIF that does not specify one is meant to play exactly once, so do not round it towards infinite (0).
     raw_loop = source.info.get('loop')
     loop = 1 if raw_loop is None else max(0, int(raw_loop))
     return _save_webp(
@@ -160,13 +160,13 @@ def _encode_animation(source: Image.Image, *, lossless: bool) -> bytes:
 
 
 def encode_to_webp(data: bytes, *, max_pixels: int, lossless: bool = False) -> EncodedImage:
-    """バイト列を復号して WebP へ再符号化し、原寸と変種を返す。復号・符号化できない場合は TranscodeError。
+    """Decode the bytes, re-encode them as WebP, and return the original size and its variants. TranscodeError if they cannot be decoded or encoded.
 
-    CPU を占有するため、要求を処理する最中に呼ぶ場合は別スレッドへ回すこと。
+    This monopolises the CPU, so hand it to a separate thread when calling it in the middle of handling a request.
     """
     if not data:
         raise TranscodeError('画像が空です。')
-    # 復号の上限を Pillow 側にも伝える。この代入は設定由来の同じ値で上書きされ続けるため、並行して呼ばれても値は変わらない。
+    # Tell Pillow the decode limit as well. This assignment keeps being overwritten with the same settings-derived value, so the value does not change even under concurrent calls.
     Image.MAX_IMAGE_PIXELS = max_pixels
     try:
         source = Image.open(io.BytesIO(data))
