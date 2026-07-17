@@ -22,11 +22,10 @@ flowchart LR
 
     user -->|"閲覧・投稿・OAuth2 ログイン"| web
     web -->|"REST API"| server
-    discord -->|"認可コード / ロール情報"| server
     server -->|"記事・公開・通知の待ち行列"| db
     bot -->|"未送信の行を拾い、結果を書き戻す"| db
-    bot -->|"新着記事 URL を送信 / スレッド作成"| discord
-    discord -->|"ゲートウェイイベント<br/>(ロール・メンバー・投票・コメント)"| bot
+    bot -->|"新着記事の送信 / スレッド作成"| discord
+    discord -->|"ゲートウェイイベント<br/>(ロール・投票・コメント)"| bot
 ```
 
 server と bot の間に直接のイベント送信はありません。server は通知の宛先を解決して DB の待ち行列に積むところまでを行い、bot がそれを拾って Discord へ送ります。Discord からは逆にゲートウェイイベントで bot へ届き、bot が DB の写しを追随させます。

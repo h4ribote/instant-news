@@ -909,7 +909,7 @@ img { max-width: 100%; display: block; }
 }
 
 /* Publisher branding at the head of the article.
-   VOLTNEWS also puts a large logo + publisher name at the head of an article, and that is what gives it the bearing of a news agency. */
+   Placing a large logo + publisher name at the head of an article, and that is what gives it the bearing of a news agency. */
 .pub-head {
   display: flex;
   align-items: center;
@@ -966,7 +966,7 @@ img { max-width: 100%; display: block; }
 .sponsor-disclosure b { color: var(--ink-strong); }
 
 /* Stating the correction.
-   Revision history is a differentiator VOLTNEWS cannot have. A corrected article says so at the head of the body rather than at the end (journalistic accountability is why a plain update and a correction are told apart). */
+   A corrected article says so at the head of the body rather than at the end (journalistic accountability is why a plain update and a correction are told apart). */
 .correction {
   margin: 18px 0;
   padding: 12px 16px;
@@ -1284,8 +1284,7 @@ img { max-width: 100%; display: block; }
   }
 }
 
-/* The tag timeline: articles filtered by the tag, laid out in chronological order. On Marv it becomes a national history.
-   VOLTNEWS has no way to browse chronologically. */
+/* The tag timeline: articles filtered by the tag, laid out in chronological order. */
 .timeline {
   list-style: none;
   margin: 0;
