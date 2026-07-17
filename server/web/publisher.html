@@ -103,8 +103,8 @@
 </footer>
 
 <script type="module">
-import { get, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError, mediaVariant } from '/static/js/api.js';
-import { mountChrome, cssUrl, listOf, displayName, avatarHtml, pubLogoHtml } from '/static/js/chrome.js';
+import { get, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError } from '/static/js/api.js';
+import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml } from '/static/js/chrome.js';
 
 /* This page's route is fixed at /publishers/{slug}, so the target publisher is taken from the URL. */
 const SLUG = decodeURIComponent((location.pathname.match(/\/publishers\/([^/]+)\/?$/) || [])[1] || '');
@@ -149,8 +149,8 @@ function badgesHtml(a) {
 /** One row of the article listing. This page lists only this publisher's articles, so the publisher name is not repeated; the reporter, category and tags are shown instead. */
 function articleRowHtml(a) {
   const meta = [];
-  if (a.category) meta.push(`<span class="cat-chip">${escapeHtml(a.category.name)}</span>`);
-  for (const t of (a.tags || []).slice(0, 2)) meta.push(`<span class="tag-chip">#${escapeHtml(t.name)}</span>`);
+  if (a.category) meta.push(`<a class="cat-chip" href="/categories/${encodeURIComponent(a.category.slug)}">${escapeHtml(a.category.name)}</a>`);
+  for (const t of (a.tags || []).slice(0, 2)) meta.push(`<a class="tag-chip" href="/tags/${encodeURIComponent(t.slug)}">#${escapeHtml(t.name)}</a>`);
   /* Articles bylined to the publisher name only do not show the reporter: byline_mode switches whether author_id is displayed. */
   if (a.author && a.byline_mode !== 'publisher') {
     meta.push(`<span class="author">${avatarHtml(a.author)}${escapeHtml(displayName(a.author))}</span>`);
@@ -160,14 +160,10 @@ function articleRowHtml(a) {
   meta.push(...badgesHtml(a));
   if (a.published_at) meta.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))}</time>`);
 
-  const thumb = a.cover_image_url
-    ? `<div class="thumb ph" style="background-image:${cssUrl(mediaVariant(a.cover_image_url, '400w'))}"></div>`
-    : '<div class="thumb"></div>';
-
-  return `<li><a class="article-row" href="${escapeHtml(articleUrl(a.slug))}">${thumb}<div>` +
-    `<p class="title">${escapeHtml(a.title)}</p>` +
+  return `<li><div class="article-row">` +
+    `<p class="title"><a href="${escapeHtml(articleUrl(a.slug))}">${escapeHtml(a.title)}</a></p>` +
     `<div class="meta">${meta.join('')}</div>` +
-    `</div></a></li>`;
+    `</div></li>`;
 }
 
 /** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as —. */

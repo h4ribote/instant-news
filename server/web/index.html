@@ -70,23 +70,6 @@
     <!-- The breaking-news band. A badge inside the listing alone gets buried, so breaking news gets a band of its own. If there is no breaking news the band itself is not rendered. -->
     <div class="breaking-band" id="breaking" hidden></div>
 
-    <!-- Topics -->
-    <section class="card">
-      <div class="section-head">
-        <h2>トピックス</h2>
-      </div>
-      <div class="body" id="topics-body"></div>
-    </section>
-
-    <!-- Tags. Sorting and the count are done only when the response includes the article count; otherwise the tags are rendered in the order fetched. -->
-    <section class="card trend">
-      <div class="section-head">
-        <h2>タグ</h2>
-        <a class="more" href="#tags">すべてのタグ</a>
-      </div>
-      <div class="body" id="trend-body"></div>
-    </section>
-
     <!--
       The article listing. On home it shows the latest (latest_only=1); on /categories/{slug} that section; on ?q= the search results; on ?series= that series.
       Each row shows its meta in the order publisher, category, tags, reporter. The publisher appears in the listing too, to secure member publishers' prominence.
@@ -185,14 +168,11 @@
 import { get, qs, escapeHtml, formatDateTime, articleUrl, renderAdSlot, mediaVariant } from '/static/js/api.js';
 import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, cssUrlRaw } from '/static/js/chrome.js';
 
-/* How many articles to fetch at once. The article listing, and also the breaking-news band, Topics and the sidebar's two rankings, are all built from the same fetch. */
+/* How many articles to fetch at once. The article listing, and also the breaking-news band and the sidebar's two rankings, are all built from the same fetch. */
 const PER_PAGE = 20;
 
-/* The recent latest articles, shared by the breaking-news band, Topics and the sidebar rankings. latest_only=1 drops sections of recurring articles such as market prices (categories.include_in_latest = 0) from the site-wide latest feed. */
+/* The recent latest articles, shared by the breaking-news band and the sidebar rankings. latest_only=1 drops sections of recurring articles such as market prices (categories.include_in_latest = 0) from the site-wide latest feed. */
 const LATEST_URL = '/api/articles' + qs({ latest_only: 1, page: 1, per_page: PER_PAGE });
-
-/* An article published within this window gets a NEW badge. */
-const NEW_WITHIN_MS = 24 * 60 * 60 * 1000;
 
 /* Max tags shown on one listing row. Showing them all stretches the row and buries the headline, so the rest are left to the article page. */
 const TAGS_PER_ROW = 3;
@@ -249,19 +229,13 @@ function showNotice(el, text, kind) {
 }
 
 /**
- * Thumbnail. An article with no cover image is left as the grey box (do not fill it with some other image).
- * All three boxes this function feeds (128px in the listing, 168px for the featured article, 52px in the rankings) are 400px or under, so pull 400w rather than the original size. A cover is a full-size image shot as the primary element of the article page, and making the listing download the original would hand the reader several times the bytes of the picture they can actually see, every time.
+ * Thumbnail for the sidebar rankings. An article with no cover image is left as the grey box (do not fill it with some other image).
+ * The ranking box is 52px, well under 400px, so pull 400w rather than the original size. A cover is a full-size image shot as the primary element of the article page, and making a 52px box download the original would hand the reader several times the bytes of the picture they can actually see, every time.
  */
 function thumbHtml(article, cls) {
   const url = mediaVariant(article.cover_image_url, '400w');
   if (url) return `<div class="${cls} ph" data-bg="${escapeHtml(url)}"></div>`;
   return `<div class="${cls}"></div>`;
-}
-
-/** Was the article published just now? */
-function isNew(article) {
-  const t = article.published_at ? new Date(article.published_at).getTime() : NaN;
-  return Number.isFinite(t) && Date.now() - t < NEW_WITHIN_MS;
 }
 
 /** The publication time. Seconds are shown so that the order of articles falling within the same minute can be read. */
@@ -285,10 +259,10 @@ function metaHtml(article) {
   if (article.is_sponsored) parts.push('<span class="badge sponsored">広告</span>');
   if (article.publisher) {
     const state = article.publisher.stance === 'state' ? '<span class="state">国営</span>' : '';
-    parts.push(`<span class="publisher">${pubLogoHtml(article.publisher)}${escapeHtml(article.publisher.name)}${state}</span>`);
+    parts.push(`<a class="publisher" href="/publishers/${encodeURIComponent(article.publisher.slug)}">${pubLogoHtml(article.publisher)}${escapeHtml(article.publisher.name)}${state}</a>`);
   }
-  if (article.category) parts.push(`<span class="cat-chip">${escapeHtml(article.category.name)}</span>`);
-  for (const tag of (article.tags || []).slice(0, TAGS_PER_ROW)) parts.push(`<span class="tag-chip">#${escapeHtml(tag.name)}</span>`);
+  if (article.category) parts.push(`<a class="cat-chip" href="/categories/${encodeURIComponent(article.category.slug)}">${escapeHtml(article.category.name)}</a>`);
+  for (const tag of (article.tags || []).slice(0, TAGS_PER_ROW)) parts.push(`<a class="tag-chip" href="/tags/${encodeURIComponent(tag.slug)}">#${escapeHtml(tag.name)}</a>`);
   if (article.is_sponsored) parts.push(sponsorHtml(article));
   // An article with byline_mode='publisher' is bylined with the publisher name alone; the author is retained for audit but never surfaced.
   if (article.byline_mode !== 'publisher' && article.author) parts.push(`<span class="author">${avatarHtml(article.author)}${escapeHtml(displayName(article.author))}</span>`);
@@ -301,20 +275,9 @@ function metaHtml(article) {
   return `<div class="meta">${parts.join('')}</div>`;
 }
 
-/** One row of the article listing. The whole row is a link to the article, so the publisher, category and tags cannot be nested links: that would be invalid HTML. */
+/** One row of the article listing. Only the title links to the article; the publisher, category and tags each link to their own page (a listing filtered by them). The row is a plain container, not a link, so those nested links are valid HTML. The listing carries no thumbnail, so the row is the headline followed by the meta line. */
 function articleRowHtml(article) {
-  return `<li><a class="article-row" href="${escapeHtml(articleUrl(article.slug))}">${thumbHtml(article, 'thumb')}<div><p class="title">${escapeHtml(article.title)}</p>${metaHtml(article)}</div></a></li>`;
-}
-
-/** The badges attached to a Topics headline. Public gets none: it is the default here, and badging it would bury the limited-visibility articles. */
-function topicBadgesHtml(article) {
-  const parts = [];
-  if (article.is_breaking) parts.push('<span class="badge breaking">速報</span>');
-  if (isNew(article)) parts.push('<span class="badge new">NEW</span>');
-  if (article.is_sponsored) parts.push('<span class="badge sponsored">広告</span>');
-  const vis = VISIBILITY_BADGE[article.visibility];
-  if (vis && article.visibility !== 'public') parts.push(`<span class="badge ${vis.cls}">${vis.label}</span>`);
-  return parts.join('');
+  return `<li><div class="article-row"><p class="title"><a href="${escapeHtml(articleUrl(article.slug))}">${escapeHtml(article.title)}</a></p>${metaHtml(article)}</div></li>`;
 }
 
 /* Deciding which listing to show */
@@ -464,24 +427,6 @@ function renderBreaking(items) {
   el.hidden = false;
 }
 
-/** Topics: the headlines of the recent latest articles, plus the newest article that has a cover image. */
-function renderTopics(items, failure) {
-  const el = document.getElementById('topics-body');
-  if (failure) {
-    el.innerHTML = noticeHtml(`トピックスを読み込めませんでした(${reasonOf(failure)})`, 'error');
-    return;
-  }
-  if (!items.length) {
-    el.innerHTML = noticeHtml('記事はまだありません。', 'info');
-    return;
-  }
-
-  const headlines = items.slice(0, 8).map((a) => `<li><a href="${escapeHtml(articleUrl(a.slug))}">${escapeHtml(a.title)}${topicBadgesHtml(a)}</a></li>`).join('');
-  const lead = items.find((a) => a.cover_image_url) || items[0];
-  const featured = `<div class="featured"><a href="${escapeHtml(articleUrl(lead.slug))}">${thumbHtml(lead, 'thumb')}<p class="caption">${escapeHtml(lead.title)}</p></a></div>`;
-  setHtml(el, `<div class="topics"><ul class="headlines">${headlines}</ul>${featured}</div><div class="topics-footer"><a href="#articles">記事一覧へ</a><a href="#tags">タグから探す</a></div>`);
-}
-
 /** One row of a sidebar article ranking. */
 function rankingRowHtml(article, index, metaText) {
   return `<li><span class="rank-badge">${index + 1}</span><div><a class="r-title" href="${escapeHtml(articleUrl(article.slug))}">${escapeHtml(article.title)}</a><div class="r-meta">${escapeHtml(metaText)}</div></div>${thumbHtml(article, 'r-thumb')}</li>`;
@@ -502,7 +447,7 @@ function renderRanking(bodyId, items, failure, { limit, compare, meta, empty }) 
   setHtml(el, `<ol class="ranking">${ranked.map((a, i) => rankingRowHtml(a, i, meta(a))).join('')}</ol>`);
 }
 
-/** Build the breaking-news band, Topics and the sidebar article rankings from a single fetch of the latest articles. */
+/** Build the breaking-news band and the sidebar article rankings from a single fetch of the latest articles. */
 async function mountFromLatest(latestP) {
   let items = [];
   let failure = null;
@@ -514,8 +459,6 @@ async function mountFromLatest(latestP) {
 
   if (!failure) renderBreaking(items);
   else document.getElementById('breaking').remove();
-
-  renderTopics(items, failure);
 
   renderRanking('view-ranking-body', items, failure, {
     limit: 5,
@@ -540,34 +483,22 @@ function tagCount(tag) {
   return Number.isFinite(tag.article_count) ? tag.article_count : null;
 }
 
-/** Build both tag areas from one fetch. The card above is an excerpt ordered by article count; the sidebar is the index of every tag. */
+/** Build the sidebar tag index (タグ一覧) from a fetch of every tag. */
 async function mountTags() {
-  const trendEl = document.getElementById('trend-body');
   const cloudEl = document.getElementById('tagcloud-body');
 
   let tags;
   try {
     tags = listOf(await get('/api/tags'));
   } catch (e) {
-    const text = `タグを読み込めませんでした(${reasonOf(e)})`;
-    trendEl.innerHTML = noticeHtml(text, 'error');
-    cloudEl.innerHTML = `<div class="body">${noticeHtml(text, 'error')}</div>`;
+    cloudEl.innerHTML = `<div class="body">${noticeHtml(`タグを読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
     return;
   }
 
   if (!tags.length) {
-    trendEl.innerHTML = noticeHtml('タグはまだありません。', 'info');
     cloudEl.innerHTML = `<div class="body">${noticeHtml('タグはまだありません。', 'info')}</div>`;
     return;
   }
-
-  // Sort by descending article count only when the response includes it. Without it there is no basis to sort on, so leave the order fetched as it is.
-  const ranked = [...tags].sort((a, b) => (tagCount(b) ?? -1) - (tagCount(a) ?? -1)).slice(0, 9);
-  setHtml(trendEl, `<ol>${ranked.map((tag, i) => {
-    const count = tagCount(tag);
-    const countHtml = count === null ? '' : `<span class="count">${count} 件</span>`;
-    return `<li><span class="rank">${i + 1}</span><a class="kw" href="/tags/${encodeURIComponent(tag.slug)}">#${escapeHtml(tag.name)}</a>${countHtml}</li>`;
-  }).join('')}</ol>`);
 
   const shown = tags.slice(0, TAGCLOUD_LIMIT);
   const chips = shown.map((tag) => {
@@ -630,7 +561,7 @@ if (view.kind === 'search') document.getElementById('search-input').value = view
 
 const categoriesP = share(get('/api/categories'));
 const latestP = share(get(LATEST_URL));
-// The home page's first page needs no more than the same fetch as the breaking-news band, Topics and the rankings, so reuse the same Promise rather than repeating the request.
+// The home page's first page needs no more than the same fetch as the breaking-news band and the rankings, so reuse the same Promise rather than repeating the request.
 const listP = listUrl(view) === LATEST_URL ? latestP : share(get(listUrl(view)));
 
 // Each area renders independently. If one fetch fails, the other areas survive and show text of their own.

@@ -3,7 +3,7 @@
  *
  * The layout, palette and information hierarchy follow the Yahoo! News (news.yahoo.co.jp) home page, remapped onto the instant-news domain: Discord auth, publishers, categories, tags, visibility, Discord reactions/threads, ads.
  *
- * The global nav's primary element is categories (the article's primary classification, exactly one, mandatory); the utility links (tags / series / write an article) are pushed to the right. Tags vary in number and cannot be enumerated in the nav, so the entry points for browsing by topic are the sidebar's popular tags, the home page's trending tags, and the tags in an article's meta row.
+ * The global nav's primary element is categories (the article's primary classification, exactly one, mandatory); the utility links (tags / series / write an article) are pushed to the right. Tags vary in number and cannot be enumerated in the nav, so the entry points for browsing by topic are the sidebar's popular tags and the tags in an article's meta row.
  *
  * Light and dark palettes are both supported: the OS setting (prefers-color-scheme) decides, and the manual toggle on the data-theme attribute overrides it.
  *
@@ -75,7 +75,7 @@
 
   /*
    * Minimum size for something pressed with a finger. 34px is smaller than a fingertip and catches the neighbouring item along with the intended one.
-   * Applied to controls only (buttons, chips, pagers). Rows that are a link in their entirety (.article-row and the like) already clear it through their line height, so they are left alone: applied to everything it stretches out the dense listings and fewer articles fit on one viewport.
+   * Applied to controls only (buttons, chips, pagers). The dense listing is left alone: its title link is a headline tall enough on its own, and its meta chips (the publisher / category / tag links in .article-row) are kept compact on purpose, because applying it to everything stretches out the dense listings and fewer articles fit on one viewport.
    */
   --tap: 44px;
 }
@@ -634,50 +634,6 @@ img { max-width: 100%; display: block; }
   .breaking-band .headline { font-size: 15px; padding: 4px 0; }
 }
 
-/* Topics (headline list + featured article) */
-.topics { display: grid; grid-template-columns: 1fr 300px; gap: 20px; }
-@media (max-width: 900px) {
-  .topics { grid-template-columns: 1fr; }
-}
-.topics .headlines { list-style: none; margin: 0; padding: 0; }
-.topics .headlines li {
-  border-bottom: 1px dotted var(--line-strong);
-}
-.topics .headlines li:last-child { border-bottom: none; }
-.topics .headlines a {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 11px 4px;
-  font-size: 15px;
-  color: var(--link);
-  line-height: 1.4;
-}
-.topics .headlines a::before {
-  content: "";
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: var(--nav-bg);
-  flex: none;
-}
-
-.featured a { color: var(--link); }
-.featured .thumb { height: 168px; border-radius: var(--radius); }
-.featured .caption { padding-top: 8px; font-size: 14px; line-height: 1.5; }
-
-.topics-footer {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-  font-size: 14px;
-}
-@media (max-width: 600px) {
-  .topics .headlines a { min-height: var(--tap); }
-  .topics-footer a { display: inline-flex; align-items: center; min-height: var(--tap); }
-}
-
 /* Badges.
    Visibility is outline only; the disclosure (Sponsored) and breaking news are filled.
    The two are handled apart because a sponsored-article disclosure must not get buried in the row of visibility badges. */
@@ -691,7 +647,6 @@ img { max-width: 100%; display: block; }
   vertical-align: middle;
   white-space: nowrap;  /* a label such as members-only breaking onto two lines would disturb the headline leading */
 }
-.badge.new { background: var(--rank); color: #fff; }
 .badge.breaking { background: var(--breaking); color: #fff; letter-spacing: 0.5px; }
 .badge.sponsored { background: var(--sponsored); color: #fff; }
 :root[data-theme="dark"] .badge.sponsored { color: #1a1204; }
@@ -728,61 +683,22 @@ img { max-width: 100%; display: block; }
   padding: 1px 4px;
 }
 
-/* Trending tags */
-.trend .body { padding-top: 12px; }
-.trend ol {
-  list-style: none;
-  margin: 0; padding: 0;
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 4px 24px;
-}
-.trend li {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 6px 0;
-  border-bottom: 1px dotted var(--line);
-}
-.trend .rank {
-  font-weight: 800;
-  color: var(--muted);
-  min-width: 16px;
-}
-.trend li:nth-child(-n+3) .rank { color: var(--rank); }
-.trend .kw { color: var(--link); font-size: 15px; font-weight: 700; }
-.trend .count { color: var(--muted); font-size: 11px; margin-left: auto; }
-
-/* Three columns leave no room for even one word at 300px. Drop to one column as soon as the sidebar folds. */
-@media (max-width: 900px) {
-  .trend ol { grid-template-columns: 1fr; }
-}
-@media (max-width: 600px) {
-  .trend li { padding: 0; }
-  /* Make the row itself the link. Previously only .kw (a 15px string) was pressable and tapping the row padding did nothing. */
-  .trend .kw { flex: 1; display: flex; align-items: center; min-height: var(--tap); }
-}
-
-/* Article listing (thumbnail + headline + meta) */
+/* Article listing (headline + meta) */
 .articles { list-style: none; margin: 0; padding: 0; }
 .articles > li { border-bottom: 1px solid var(--line); }
 .articles > li:last-child { border-bottom: none; }
 .article-row {
-  display: grid;
-  grid-template-columns: 128px 1fr;
-  gap: 14px;
-  padding: 14px 4px;
-  align-items: start;
+  display: block;
+  padding: 14px 6px;
 }
-.article-row .thumb { height: 82px; border-radius: var(--radius); }
 .article-row .title {
   font-size: 16px;
   line-height: 1.5;
-  color: var(--link);
   margin: 0 0 8px;
   font-weight: 400;
 }
-.article-row .title:hover { text-decoration: underline; }
+/* Only the title text is the article link now (the row is no longer a link), so the colour and hover underline come from the base a rules on the nested anchor. */
+.article-row .title a { color: var(--link); }
 .meta {
   display: flex;
   flex-wrap: wrap;
@@ -810,17 +726,11 @@ img { max-width: 100%; display: block; }
 .meta .thread::before { content: "💬 "; }
 
 /*
- * The listing row on phones. The thumbnail drops to 96px (the 128:82 aspect ratio is kept), widening what is left for the headline from about 178px to about 210px.
- * The tag chips drop with it. The meta row lines up publisher, category, three tags, reporter, comment count, score, visibility and timestamp, and at narrow widths it stands taller than the headline.
- * Tags were picked as the thing to drop because tags are reachable from other entry points (the article page's tag row, the tag listing, trending) while the publisher and the visibility appear nowhere else. The disclosure (.badge.sponsored) and breaking news stay: an ad that cannot be told apart from a headline damages the articles' credibility directly.
+ * The listing row on phones. The meta row lines up publisher, category, three tags, reporter, comment count, score, visibility and timestamp, and at narrow widths it stands taller than the headline, so the tag chips are dropped.
+ * Tags were picked as the thing to drop because tags are reachable from other entry points (the article page's tag row, the tag listing) while the publisher and the visibility appear nowhere else. The disclosure (.badge.sponsored) and breaking news stay: an ad that cannot be told apart from a headline damages the articles' credibility directly.
  */
 @media (max-width: 600px) {
-  .article-row {
-    grid-template-columns: 96px 1fr;
-    gap: 10px;
-    padding: 12px 0;
-  }
-  .article-row .thumb { height: 62px; }
+  .article-row { padding: 12px 6px; }
   .article-row .title { font-size: 15px; margin-bottom: 6px; }
   .article-row .meta { gap: 4px 8px; }
   .article-row .meta .tag-chip { display: none; }
@@ -1783,7 +1693,7 @@ textarea.md {
 }
 
 /* Thumbnail and avatar placeholders (so the layout can be checked with no images wired up) */
-.thumb, .cover, .r-thumb, .figure, .flag { background: var(--ph-bg); }
+.cover, .r-thumb, .figure, .flag { background: var(--ph-bg); }
 .ph { background-size: cover; background-position: center; }
 .g1 { background: linear-gradient(135deg, #5b8def, #7f53ac); }
 .g2 { background: linear-gradient(135deg, #f7971e, #ffd200); }

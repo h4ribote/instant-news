@@ -161,22 +161,18 @@ function articleRowHtml(a) {
   const pub = a.publisher;
   if (pub) {
     const state = pub.stance === 'state' ? '<span class="state">国営</span>' : '';
-    meta.push(`<span class="publisher">${pubLogoHtml(pub)}${escapeHtml(pub.name)}${state}</span>`);
+    meta.push(`<a class="publisher" href="/publishers/${encodeURIComponent(pub.slug)}">${pubLogoHtml(pub)}${escapeHtml(pub.name)}${state}</a>`);
   }
-  if (a.category) meta.push(`<span class="cat-chip">${escapeHtml(a.category.name)}</span>`);
+  if (a.category) meta.push(`<a class="cat-chip" href="/categories/${encodeURIComponent(a.category.slug)}">${escapeHtml(a.category.name)}</a>`);
   if (a.comment_count != null) meta.push(`<span class="thread">${escapeHtml(a.comment_count)}</span>`);
   if (a.score != null) meta.push(`<span class="react">${escapeHtml((a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')) + Math.abs(a.score))}</span>`);
   meta.push(...badgesHtml(a));
   if (a.published_at) meta.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))}</time>`);
 
-  const thumb = a.cover_image_url
-    ? `<div class="thumb ph" style="background-image:${cssUrl(mediaVariant(a.cover_image_url, '400w'))}"></div>`
-    : '<div class="thumb"></div>';
-
-  return `<li><a class="article-row" href="${escapeHtml(articleUrl(a.slug))}">${thumb}<div>` +
-    `<p class="title">${escapeHtml(a.title)}</p>` +
+  return `<li><div class="article-row">` +
+    `<p class="title"><a href="${escapeHtml(articleUrl(a.slug))}">${escapeHtml(a.title)}</a></p>` +
     `<div class="meta">${meta.join('')}</div>` +
-    `</div></a></li>`;
+    `</div></li>`;
 }
 
 /** A timeline date. The year is printed only at the boundary where it changes. A topic's history spans years, so month and day alone leave the reader unable to tell which year an event belongs to. */
