@@ -1,0 +1,119 @@
+# Template for the instant-news config file. Copy it to config.yaml and set each value for your environment.
+#
+# The file has two parts.
+#
+# Runtime environment: server / database / media.storage_dir. This file is always the source of truth for these.
+#   Reading settings from the DB means connecting to the DB first, so this part holds only the values needed before that point, plus the values decided outside the container (the image storage directory is meaningless unless it matches the named volume's mount point).
+#
+# Seed values: discord / admin / articles / media.fetch / media.max_pixels / media.quota_bytes_per_user.
+#   They are copied into the MySQL settings table on first boot and never read again. The source of truth moves to the DB and admins change them from /admin in the frontend, so rewriting them here on any later boot does nothing.
+#   Having the config file overwrite the DB on every boot would silently revert values changed from the UI at the next restart, so exactly one side is made authoritative.
+#
+#   This part is optional. Omitted keys fall back to the default noted with each key below, so the only values that really need setting are the ones nothing but the environment can decide: discord.guild_id and the OAuth2 and bot credentials.
+#   You may delete this part once seeding is done.
+#   If the settings end up broken and lock you out of the UI (a wrong admin role setting, say), recover from the CLI:
+#     python -m server.cli get-setting admin.role_ids
+#     python -m server.cli set-setting admin.role_ids '["000000000000000000"]'
+
+# Runtime environment. This file is always the source of truth.
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  # Externally reachable public URL, used to build article URLs, absolute image URLs and the OAuth2 redirect_uri.
+  # Behind a reverse proxy, write the origin as the user's browser sees it, not the host / port above, which are only the listen address.
+  base_url: "http://localhost:8000"
+
+database:
+  host: db
+  port: 3306
+  name: instant_news
+  user: instant_news
+  password: "change-me"
+
+media:
+  # Directory holding the image blobs, stored content-addressed as {hash[0:2]}/{hash[2:4]}/{hash}.{variant}.webp.
+  # Point this at a Docker named volume, not the container filesystem: every image disappears the moment the container image is replaced.
+  # It is not a DB setting because the value is inseparable from the volume's mount point. Changing it without moving the mount finds no images, and every existing image becomes unreachable the instant you change it.
+  storage_dir: "/var/lib/instant-news/media"
+
+  # The rest are seed values; the source of truth is the settings table.
+  # On article save, images are fetched from the image URLs in the body and ingested.
+  # This makes the server fetch an arbitrary URL, which is SSRF by definition, so loopback, private and link-local IPs are refused and re-checked at every redirect hop.
+  fetch:
+    # Max images to fetch per article save; anything over the limit is left at its original URL. Default 20, minimum 0.
+    # 0 disables ingest.
+    max_images_per_article: 20
+    # Max bytes per image. Content-Length is not trusted: the fetch streams and aborts once the limit is passed. Default 10485760 (10 MiB), minimum 1.
+    max_bytes: 10485760
+    # Per-image fetch timeout in seconds. Default 10, must be greater than 0.
+    # 0 is rejected: to disable ingest, set max_images_per_article to 0 instead.
+    timeout_seconds: 10
+    # Upper bound in seconds on total fetch time per article save; anything over the limit counts as a failure. Default 60, must be greater than 0.
+    total_timeout_seconds: 60
+    # Max redirect hops to follow; the destination IP is re-checked at every hop. Default 3, range 0-10.
+    max_redirects: 3
+  # Max pixel count after decode, guarding against decompression bombs where a PNG of a few KB decodes to tens of GB of pixels.
+  # That is why the cap has to be on pixels rather than bytes. Default 50000000, minimum 1.
+  max_pixels: 50000000
+  # Quota on the total bytes of images one user may ingest, summed over the full-size renditions. Default 1073741824 (1 GiB), minimum 0.
+  quota_bytes_per_user: 1073741824
+
+# Seed values. Copied into the settings table on first boot and never read again.
+
+discord:
+  # ID of the single target Discord server (guild). Required, because it drives the access-restriction (role-restricted) and members-only visibility checks.
+  # The members and roles of this one server are the basis of user management.
+  # Shown on the admin screen but not editable. Changing it would point the role snapshots, the publishers' role links and the visibility check at a different guild, leaving the existing data meaningless.
+  # Moving to another guild is a redeployment, not a settings change.
+  guild_id: "000000000000000000"
+  # Application credentials for user authentication (OAuth2).
+  # The scopes required are identify (to identify the user) and guilds.members.read (to read the user's roles in the guild).
+  # The post-authorization return URL is not a setting: it is derived from server.base_url and /auth/callback, the route that receives the redirect_uri (with the base_url above, http://localhost:8000/auth/callback).
+  # Register that derived URL under Redirects in the Discord application settings.
+  oauth:
+    client_id: "000000000000000000"
+    client_secret: "change-me"
+  # Settings for the bot that posts notifications for new articles.
+  # The notification target is resolved as the deduplicated set of the article's category (categories.notify_channel_id) and tags (tags.notify_channel_id). An article whose recipient set is empty is notified nowhere.
+  # There is no fallback to a default channel: it would make the intent "do not notify for this section" inexpressible.
+  bot:
+    # Changing this requires the bot to reconnect; the admin screen says so.
+    token: "change-me"
+    # Interval in seconds at which articles waiting to be published are picked up and scheduled publish times are checked for arrival. Default 15, range 1-3600.
+    # This is the only interval that goes looking: server decides publication and Discord has no way to know, so the queue can only be polled.
+    # The two reconcile intervals below are the upper bound on how long a missed Discord event stays uncorrected, not a setting that decides how fast changes take effect.
+    publish_poll_interval_seconds: 15
+    # Interval in seconds at which the guild's roles, members and owner are reconciled against Discord. Default 3600, range 1-3600.
+    # Role changes apply immediately from events without waiting for this interval; the cap exists as a safety net.
+    # Admin eligibility and per-role visibility are decided on every request from the snapshot the bot writes.
+    # Events can be missed (while the bot is down, or when handling one fails), so there has to be an upper bound on when they are guaranteed to be corrected.
+    guild_reconcile_interval_seconds: 3600
+    # Interval in seconds at which vote counts and comments are reconciled against Discord. Default 3600, range 1-86400.
+    count_reconcile_interval_seconds: 3600
+    # Days after publication for which vote counts and comments are re-reconciled. Default 14, range 0-365.
+    # The reconcile re-reads every notification post and thread in the window, so going back without limit keeps adding queries, down to articles whose reactions stopped long ago.
+    # Notification posts past the window still receive events, and votes and comments are still updated (an event only reads the post that actually changed).
+    # The window doubles as the period for retrying notification posts whose thread could not be opened or whose vote reactions could not be added; 0 stops that retry too.
+    count_reconcile_window_days: 14
+
+# Eligibility to issue platform-admin API keys (ads:admin / taxonomy:admin / settings:admin / articles:write:any).
+# By default, holders of Discord's Administrator permission and the guild owner qualify.
+# Administrator allows every operation on the Discord server, which is far too strong to hand to someone who only needs to submit ads.
+# Listing admin roles here delegates platform administration to roles like "editor-in-chief" or "ad manager" without handing out Administrator.
+# The guild owner does not appear in the settings: the bot imports it as users.is_guild_owner from events (ownership transfer) and from the reconcile.
+# Default is empty.
+admin:
+  role_ids: []
+
+articles:
+  # Breaking news. Mentions a role when the notification is posted.
+  breaking:
+    # Roles allowed to flag an article as breaking. Empty means nobody can, and articles go out as ordinary articles.
+    # Kept to a narrow set of holders so the flag is not overused. Default is empty.
+    allowed_role_ids: []
+    # Roles to mention when the notification is posted. Empty means no mention. Default is empty.
+    mention_role_ids: []
+  # Rate limit on article creates and updates per API key, per hour; a key over the limit gets 429.
+  # Automated posting can inherently run away, so the limit is per key. Default 60, minimum 0.
+  api_rate_limit_per_hour: 60

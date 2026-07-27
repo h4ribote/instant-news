@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+httpx
+aiomysql
+cryptography
+pyyaml
+pydantic
+python-multipart
+markdown-it-py
+mdit-py-plugins
+linkify-it-py
+nh3
+Pillow

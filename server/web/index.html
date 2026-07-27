@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<!-- theme.js is not a module, so it is loaded without type. It runs synchronously in head so the saved theme is applied before the first paint, instead of painting the default theme for an instant and then switching. -->
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<!-- Top utility bar -->
+<div class="topbar">
+  <div class="container">
+    <span class="promo">Discord サーバーのメンバーとロールに基づいて閲覧範囲が決まるニュースプラットフォームです</span>
+  </div>
+</div>
+
+<!-- Logo, search, login -->
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord コミュニティの報道社連合</span>
+    </a>
+    <!-- The search form targets the home page itself (/?q=). There is no dedicated search-results page: filtering the article listing is expressed as a state of the home page. -->
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" id="search-input" placeholder="記事を検索" aria-label="記事を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <!-- js/chrome.js injects the account area (the login entry point, or the logged-in user name and logout) at the front of this. -->
+    <div class="actions" data-actions>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<!--
+  The global nav. Its primary element is the categories (the article's primary classification, exactly one, mandatory); js/chrome.js adds them from GET /api/categories in position order, ahead of the spacer.
+  The category set differs per deployment, so not one of them is written into this HTML.
+  chrome.js also adds the utility links (tags, series, admin, write an article) to the right of the spacer. Writing them per page makes them drift apart, and in fact they had drifted: this bar alone carried tags and series while the other 6 pages carried neither. On phones they move into the drawer.
+  Home is the current location by default; on a section page (/categories/{slug}) chrome.js clears that marker and moves it onto that section.
+-->
+<nav class="globalnav">
+  <div class="container" data-globalnav>
+    <a href="/" class="active">トップ</a>
+    <span class="spacer"></span>
+  </div>
+</nav>
+
+<noscript>
+  <div class="container">
+    <div class="notice"><span class="ic">⚠</span><div>このページは記事を JavaScript で読み込みます。JavaScript を有効にしてください。個々の記事のページは JavaScript 無しでも読めます。</div></div>
+  </div>
+</noscript>
+
+<div class="container">
+  <!-- Ad slot (header). The Sponsored label is drawn by .adslot::after in style.css, so this class must not be removed. If there is no candidate, api.js removes the whole slot. -->
+  <div class="adslot header" id="ad-header">
+    <div class="creative"></div>
+  </div>
+</div>
+
+<main class="container layout">
+  <!-- Main column -->
+  <div class="main">
+
+    <!-- The breaking-news band. A badge inside the listing alone gets buried, so breaking news gets a band of its own. If there is no breaking news the band itself is not rendered. -->
+    <div class="breaking-band" id="breaking" hidden></div>
+
+    <!--
+      The article listing. On home it shows the latest (latest_only=1); on /categories/{slug} that section; on ?q= the search results; on ?series= that series.
+      Each row shows its meta in the order publisher, category, tags, reporter. The publisher appears in the listing too, to secure member publishers' prominence.
+    -->
+    <section class="card" id="articles">
+      <div class="section-head">
+        <h2 id="articles-title">新着記事</h2>
+        <span class="more" id="articles-count" hidden></span>
+      </div>
+      <ul class="articles" id="articles-list"></ul>
+      <div class="body" id="articles-status" hidden></div>
+      <div class="body" id="articles-pager" style="text-align:center;" hidden></div>
+    </section>
+
+  </div>
+
+  <!-- Sidebar -->
+  <aside class="side">
+
+    <!-- The login entry point. Removed when already logged in. -->
+    <section class="card login-card" id="login-card">
+      <div class="body">
+        <p>Discord でログインすると、メンバー限定・ロール限定の記事も読めます。</p>
+        <a class="btn-discord" data-login href="/auth/login">🎮 Discord でログイン</a>
+      </div>
+    </section>
+
+    <!-- The publisher ranking. Both votes and comments are delegated to Discord, so it can be computed by tallying the mirror. -->
+    <section class="card" id="publisher-ranking">
+      <div class="section-head">
+        <h2>報道社ランキング</h2>
+        <span class="more">今週</span>
+      </div>
+      <div id="publisher-ranking-body"></div>
+    </section>
+
+    <!-- Every tag. Their number varies, so they cannot be enumerated in the nav; this is the entry point for browsing by topic. -->
+    <section class="card" id="tags">
+      <div class="section-head">
+        <h2>タグ一覧</h2>
+      </div>
+      <div id="tagcloud-body"></div>
+    </section>
+
+    <!-- Ad slot (sidebar) -->
+    <div class="adslot sidebar card" id="ad-sidebar">
+      <div class="creative"></div>
+    </div>
+
+    <!-- The view ranking (アクセスランキング). Fetched from /api/rankings/articles?metric=views, which orders the recent latest articles by a recency-weighted view count. The note beside the heading states the scope is the recent latest, not a tally over all of time; the raw view count is deliberately not shown to the reader. -->
+    <section class="card">
+      <div class="section-head">
+        <h2>アクセスランキング</h2>
+        <span class="more">直近の新着</span>
+      </div>
+      <div id="view-ranking-body"></div>
+    </section>
+
+    <!-- Series -->
+    <section class="card" id="series">
+      <div class="section-head">
+        <h2>連載</h2>
+      </div>
+      <div id="series-body"></div>
+    </section>
+
+    <!-- 注目 (featured). Fetched from /api/rankings/articles?metric=featured: reactions and replies, recency-weighted the same way as the view ranking. As there, the rank is only within the recent latest articles. -->
+    <section class="card">
+      <div class="section-head">
+        <h2>注目</h2>
+        <span class="more">直近の新着</span>
+      </div>
+      <div id="featured-body"></div>
+    </section>
+
+  </aside>
+</main>
+
+<!-- Footer -->
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="#articles">新着記事</a>
+      <a href="#publisher-ranking">報道社ランキング</a>
+      <a href="#tags">タグ一覧</a>
+      <a href="#series">連載</a>
+      <a href="/editor">記事を書く</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">このサイトは Discord サーバーのメンバー・ロールに基づいて閲覧範囲を制御しています。所属報道社はサーバー内のロールで割り当てられます。</div>
+  </div>
+</footer>
+
+<script type="module">
+import { get, qs, escapeHtml, formatDateTime, articleUrl, renderAdSlot, mediaVariant } from '/static/js/api.js';
+import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, cssUrlRaw } from '/static/js/chrome.js';
+
+/* How many articles to fetch at once. The article listing, and also the breaking-news band and the sidebar's two rankings, are all built from the same fetch. */
+const PER_PAGE = 20;
+
+/* The recent latest articles, shared by the breaking-news band and the sidebar rankings. latest_only=1 drops sections of recurring articles such as market prices (categories.include_in_latest = 0) from the site-wide latest feed. */
+const LATEST_URL = '/api/articles' + qs({ latest_only: 1, page: 1, per_page: PER_PAGE });
+
+/* Max tags shown on one listing row. Showing them all stretches the row and buries the headline, so the rest are left to the article page. */
+const TAGS_PER_ROW = 3;
+
+/* Max tags shown in the sidebar tag listing. Beyond it only the count is reported, because there is no tag index page to link to. */
+const TAGCLOUD_LIMIT = 40;
+
+const VISIBILITY_BADGE = {
+  public: { cls: 'vis-public', label: '全体公開' },
+  members: { cls: 'vis-members', label: 'メンバー限定' },
+  restricted: { cls: 'vis-restricted', label: 'ロール限定' },
+};
+
+/* Fetching */
+
+/** A fetch reused across several renders. The awaits are scattered asynchronously, and until they run the rejection is warned about as unhandled, so an empty catch here suppresses that. The real error handling is done by the try/catch at each await. */
+function share(promise) {
+  promise.catch(() => {});
+  return promise;
+}
+
+/** Extract from an exception the short reason to show the reader. */
+function reasonOf(e) {
+  return e && e.message ? e.message : String(e);
+}
+
+/* Rendering pieces */
+
+/** Empty-state and error text. Silently hiding an empty result leaves neither the reader nor the operator able to tell a failed load from a genuinely empty one. */
+function noticeHtml(text, kind = 'info') {
+  const cls = kind === 'error' ? 'notice' : 'notice info';
+  const ic = kind === 'error' ? '⚠' : 'ℹ';
+  return `<div class="${cls}"><span class="ic">${ic}</span><div>${escapeHtml(text)}</div></div>`;
+}
+
+/** Apply the image URL stashed in data-bg as a background. While the HTML is being built the URL is escaped as an attribute value, which concentrates interpreting it as CSS into this one place (string-concatenating it into a style attribute would let the URL's contents be interpreted as CSS). Assigning to the style property does not go through HTML, so use cssUrlRaw, which does not HTML-escape. */
+function applyBackgrounds(root) {
+  for (const el of root.querySelectorAll('[data-bg]')) {
+    el.style.backgroundImage = cssUrlRaw(el.dataset.bg);
+    el.removeAttribute('data-bg');
+  }
+}
+
+/** Inject the HTML and apply the backgrounds in one step. */
+function setHtml(el, html) {
+  el.innerHTML = html;
+  applyBackgrounds(el);
+}
+
+/** Show the text and reveal the area. An empty .body would leave nothing but padding sitting there, so hidden is cleared only when there is something to show. */
+function showNotice(el, text, kind) {
+  el.innerHTML = noticeHtml(text, kind);
+  el.hidden = false;
+}
+
+/**
+ * Thumbnail for the sidebar rankings. An article with no cover image is left as the grey box (do not fill it with some other image).
+ * The ranking box is 52px, well under 400px, so pull 400w rather than the original size. A cover is a full-size image shot as the primary element of the article page, and making a 52px box download the original would hand the reader several times the bytes of the picture they can actually see, every time.
+ */
+function thumbHtml(article, cls) {
+  const url = mediaVariant(article.cover_image_url, '400w');
+  if (url) return `<div class="${cls} ph" data-bg="${escapeHtml(url)}"></div>`;
+  return `<div class="${cls}"></div>`;
+}
+
+/** The publication time. Seconds are shown so that the order of articles falling within the same minute can be read. */
+function timeHtml(iso) {
+  if (!iso) return '';
+  return `<time datetime="${escapeHtml(iso)}">${escapeHtml(formatDateTime(iso))}</time>`;
+}
+
+/* Article listing rows */
+
+/** The sponsored-article disclosure. The Sponsored label on its own does not say whose ad it is and so is not a disclosure, which is why the advertiser's name is always attached. When the name is missing, render the omission itself rather than dropping it silently: a defective disclosure is not something to hide. */
+function sponsorHtml(article) {
+  if (article.sponsor_name) return `<span>提供: ${escapeHtml(article.sponsor_name)}</span>`;
+  return '<span>提供元の表示がありません</span>';
+}
+
+/** The meta for one listing row. The publisher goes near the front to secure member publishers' prominence in the listing too. */
+function metaHtml(article) {
+  const parts = [];
+  if (article.is_breaking) parts.push('<span class="badge breaking">速報</span>');
+  if (article.is_sponsored) parts.push('<span class="badge sponsored">広告</span>');
+  if (article.publisher) {
+    const state = article.publisher.stance === 'state' ? '<span class="state">国営</span>' : '';
+    parts.push(`<a class="publisher" href="/publishers/${encodeURIComponent(article.publisher.slug)}">${pubLogoHtml(article.publisher)}${escapeHtml(article.publisher.name)}${state}</a>`);
+  }
+  if (article.category) parts.push(`<a class="cat-chip" href="/categories/${encodeURIComponent(article.category.slug)}">${escapeHtml(article.category.name)}</a>`);
+  for (const tag of (article.tags || []).slice(0, TAGS_PER_ROW)) parts.push(`<a class="tag-chip" href="/tags/${encodeURIComponent(tag.slug)}">#${escapeHtml(tag.name)}</a>`);
+  if (article.is_sponsored) parts.push(sponsorHtml(article));
+  // An article with byline_mode='publisher' is bylined with the publisher name alone; the author is retained for audit but never surfaced.
+  if (article.byline_mode !== 'publisher' && article.author) parts.push(`<span class="author">${avatarHtml(article.author)}${escapeHtml(displayName(article.author))}</span>`);
+  if (article.comment_count) parts.push(`<span class="thread">${article.comment_count}</span>`);
+  // 0 means nobody has voted yet, so it is not shown; a negative score is, because hiding it would make an article with split votes look uncontroversial.
+  if (article.score) parts.push(`<span class="react">${article.score > 0 ? '▲' : '▼'}${Math.abs(article.score)}</span>`);
+  const vis = VISIBILITY_BADGE[article.visibility];
+  if (vis) parts.push(`<span class="badge ${vis.cls}">${vis.label}</span>`);
+  parts.push(timeHtml(article.published_at));
+  return `<div class="meta">${parts.join('')}</div>`;
+}
+
+/** One row of the article listing. Only the title links to the article; the publisher, category and tags each link to their own page (a listing filtered by them). The row is a plain container, not a link, so those nested links are valid HTML. The listing carries no thumbnail, so the row is the headline followed by the meta line. */
+function articleRowHtml(article) {
+  return `<li><div class="article-row"><p class="title"><a href="${escapeHtml(articleUrl(article.slug))}">${escapeHtml(article.title)}</a></p>${metaHtml(article)}</div></li>`;
+}
+
+/* Deciding which listing to show */
+
+/**
+ * Decide from the URL what the article listing shows.
+ * /categories/{slug} is a section page; latest_only is not applied there, so articles of a section excluded from the latest listing still appear on that section's own page.
+ * Search (?q=) and series (?series=) have no dedicated route, so they are expressed as states of the home page.
+ */
+function resolveView() {
+  const params = new URLSearchParams(location.search);
+  const parsed = Number.parseInt(params.get('page') || '1', 10);
+  const page = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+
+  const matched = location.pathname.match(/^\/categories\/([^/]+)\/?$/);
+  if (matched) return { kind: 'category', slug: decodeURIComponent(matched[1]), page };
+
+  const q = (params.get('q') || '').trim();
+  if (q) return { kind: 'search', q, page };
+
+  const series = (params.get('series') || '').trim();
+  if (series) return { kind: 'series', slug: series, page };
+
+  return { kind: 'latest', page };
+}
+
+/** Where the listing to show is fetched from. */
+function listUrl(view) {
+  switch (view.kind) {
+    case 'category': return '/api/articles' + qs({ category: view.slug, page: view.page, per_page: PER_PAGE });
+    case 'search': return '/api/search' + qs({ q: view.q, page: view.page });
+    case 'series': return '/api/articles' + qs({ series: view.slug, page: view.page, per_page: PER_PAGE });
+    default: return '/api/articles' + qs({ latest_only: 1, page: view.page, per_page: PER_PAGE });
+  }
+}
+
+/** Where the pager goes. Keeps the current filter (section, query, series) and replaces only the page number. */
+function pageHref(page) {
+  const url = new URL(location.href);
+  if (page <= 1) url.searchParams.delete('page');
+  else url.searchParams.set('page', String(page));
+  return url.pathname + url.search;
+}
+
+/** The listing heading. A series title is taken from the series info the article already carries, which avoids adding a request to look the one series up. */
+function headingFor(view, categories, items) {
+  if (view.kind === 'category') {
+    const found = categories.find((c) => c.slug === view.slug);
+    return found ? found.name : view.slug;
+  }
+  if (view.kind === 'search') return `「${view.q}」の検索結果`;
+  if (view.kind === 'series') {
+    const withSeries = items.find((a) => a.series && a.series.title);
+    return `連載「${withSeries ? withSeries.series.title : view.slug}」`;
+  }
+  return '新着記事';
+}
+
+/** The text for a listing with 0 items. */
+function emptyTextFor(view) {
+  if (view.kind === 'category') return 'この欄の記事はまだありません。';
+  if (view.kind === 'search') return `「${view.q}」に一致する記事はありません。`;
+  if (view.kind === 'series') return 'この連載の記事はまだありません。';
+  return '新着の記事はまだありません。新着一覧に含めない設定の欄(相場のような定期記事の欄)の記事は、その欄のページに出ます。';
+}
+
+/* Rendering each area */
+
+/**
+ * js/chrome.js builds the header's account area, the admin entry point and the nav categories. All this adds is the handling of the sidebar login invitation, which exists only on this page.
+ * When already logged in that invitation is meaningless, so it is removed; when not, it gets a login URL whose post-login redirect target is the current page.
+ * The categories are used by the article listing as well, so the same Promise is passed in rather than repeating the request. On a section page, that section is shown as the current location.
+ */
+async function mountAccountAndNav(view, categoriesP) {
+  const viewer = await mountChrome(undefined, {
+    activeCategory: view.kind === 'category' ? view.slug : null,
+    categories: categoriesP,
+  });
+
+  const card = document.getElementById('login-card');
+  if (!card) return;
+  // GET /api/me returns null when not logged in (api.js folds the 401 away). If anything came back the caller is logged in, and user is always present.
+  if (viewer) {
+    card.remove();
+    return;
+  }
+  for (const a of card.querySelectorAll('[data-login]')) a.href = '/auth/login' + qs({ redirect_to: location.pathname + location.search });
+}
+
+/** The article listing. */
+async function mountArticles(view, listP, categoriesP) {
+  const titleEl = document.getElementById('articles-title');
+  const countEl = document.getElementById('articles-count');
+  const listEl = document.getElementById('articles-list');
+  const statusEl = document.getElementById('articles-status');
+  const pagerEl = document.getElementById('articles-pager');
+
+  let data;
+  try {
+    data = await listP;
+  } catch (e) {
+    showNotice(statusEl, `記事一覧を読み込めませんでした(${reasonOf(e)})`, 'error');
+    return;
+  }
+  const items = listOf(data);
+
+  let categories = [];
+  try {
+    categories = listOf(await categoriesP);
+  } catch (e) {
+    // Only the section name fails to resolve; the listing itself can still be shown, with the slug left as the heading.
+    console.error('カテゴリを取得できませんでした', e);
+  }
+
+  const heading = headingFor(view, categories, items);
+  titleEl.textContent = heading;
+  document.title = view.kind === 'latest' ? 'instant-news' : `${heading} — instant-news`;
+
+  if (Number.isFinite(data && data.total)) {
+    countEl.textContent = `全 ${data.total} 件`;
+    countEl.hidden = false;
+  }
+
+  if (!items.length) {
+    showNotice(statusEl, emptyTextFor(view), 'info');
+    return;
+  }
+  setHtml(listEl, items.map(articleRowHtml).join(''));
+
+  const prev = view.page > 1 ? `<a href="${escapeHtml(pageHref(view.page - 1))}">← 前のページ</a>` : '';
+  const next = data && data.has_next ? `<a href="${escapeHtml(pageHref(view.page + 1))}">次のページ →</a>` : '';
+  if (prev || next) {
+    pagerEl.innerHTML = prev + (prev && next ? ' ・ ' : '') + next;
+    pagerEl.hidden = false;
+  }
+}
+
+/** The breaking-news band. If there is no breaking news the band itself is not rendered: an empty band would falsely signal that breaking news exists. */
+function renderBreaking(items) {
+  const el = document.getElementById('breaking');
+  const article = items.find((a) => a.is_breaking);
+  if (!article) {
+    el.remove();
+    return;
+  }
+  el.innerHTML = `<span class="label">速報</span><a class="headline" href="${escapeHtml(articleUrl(article.slug))}">${escapeHtml(article.title)}</a>${timeHtml(article.published_at)}`;
+  el.hidden = false;
+}
+
+/** One row of a sidebar article ranking. */
+function rankingRowHtml(article, index, metaText) {
+  return `<li><span class="rank-badge">${index + 1}</span><div><a class="r-title" href="${escapeHtml(articleUrl(article.slug))}">${escapeHtml(article.title)}</a><div class="r-meta">${escapeHtml(metaText)}</div></div>${thumbHtml(article, 'r-thumb')}</li>`;
+}
+
+/** Render a server-ordered article ranking into its sidebar card. The server returns the articles already ranked; the client only lays them out. */
+function renderRankingRows(el, items, meta, empty) {
+  if (!items.length) {
+    el.innerHTML = `<div class="body">${noticeHtml(empty, 'info')}</div>`;
+    return;
+  }
+  setHtml(el, `<ol class="ranking">${items.map((a, i) => rankingRowHtml(a, i, meta(a))).join('')}</ol>`);
+}
+
+/**
+ * Fetch one of the server-side article rankings (GET /api/rankings/articles) and render it.
+ * The server applies the recency weight and the visibility filter and returns the rows already in order, so each ranking is one request and the browser never re-sorts. limit is carried in the URL the caller builds.
+ */
+async function mountArticleRanking(bodyId, url, meta, empty) {
+  const el = document.getElementById(bodyId);
+  let items;
+  try {
+    items = listOf(await get(url));
+  } catch (e) {
+    el.innerHTML = `<div class="body">${noticeHtml(`ランキングを読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
+    return;
+  }
+  renderRankingRows(el, items, meta, empty);
+}
+
+/** The breaking-news band, from the shared fetch of the latest articles. */
+async function mountBreaking(latestP) {
+  let items;
+  try {
+    items = listOf(await latestP);
+  } catch (e) {
+    // renderBreaking removes the band when there is no breaking article; a failed fetch removes it for the same reason (an empty band would falsely signal breaking news).
+    document.getElementById('breaking').remove();
+    return;
+  }
+  renderBreaking(items);
+}
+
+/** The article count. Not shown when the response omits it: do not manufacture a value posing as a count. */
+function tagCount(tag) {
+  return Number.isFinite(tag.article_count) ? tag.article_count : null;
+}
+
+/** Build the sidebar tag index (タグ一覧) from a fetch of every tag. */
+async function mountTags() {
+  const cloudEl = document.getElementById('tagcloud-body');
+
+  let tags;
+  try {
+    tags = listOf(await get('/api/tags'));
+  } catch (e) {
+    cloudEl.innerHTML = `<div class="body">${noticeHtml(`タグを読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
+    return;
+  }
+
+  if (!tags.length) {
+    cloudEl.innerHTML = `<div class="body">${noticeHtml('タグはまだありません。', 'info')}</div>`;
+    return;
+  }
+
+  const shown = tags.slice(0, TAGCLOUD_LIMIT);
+  const chips = shown.map((tag) => {
+    const count = tagCount(tag);
+    const countHtml = count === null ? '' : ` <b>${count}</b>`;
+    return `<a href="/tags/${encodeURIComponent(tag.slug)}">${tagIconHtml(tag)}#${escapeHtml(tag.name)}${countHtml}</a>`;
+  }).join('');
+  const rest = tags.length - shown.length;
+  const restHtml = rest > 0 ? `<div class="body">${noticeHtml(`ほかに ${rest} 件のタグがあります。記事のタグから辿れます。`, 'info')}</div>` : '';
+  setHtml(cloudEl, `<div class="tagcloud">${chips}</div>${restHtml}`);
+}
+
+/** Series. There is no route for a series page of its own, so the title links to the home listing filtered by that series (/?series=). */
+async function mountSeries() {
+  const el = document.getElementById('series-body');
+  let series;
+  try {
+    series = listOf(await get('/api/series'));
+  } catch (e) {
+    el.innerHTML = `<div class="body">${noticeHtml(`連載を読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
+    return;
+  }
+  if (!series.length) {
+    el.innerHTML = `<div class="body">${noticeHtml('連載はまだありません。', 'info')}</div>`;
+    return;
+  }
+  setHtml(el, `<ul class="series">${series.slice(0, 5).map((s) => {
+    const coverUrl = mediaVariant(s.cover_image_url, '400w');
+    const cover = coverUrl ? `<div class="cover ph" data-bg="${escapeHtml(coverUrl)}"></div>` : '<div class="cover"></div>';
+    const href = '/' + qs({ series: s.slug });
+    return `<li>${cover}<div><a class="s-title" href="${escapeHtml(href)}">${escapeHtml(s.title)}</a><div class="s-count">${escapeHtml(displayName(s.owner))}</div></div></li>`;
+  }).join('')}</ul>`);
+}
+
+/** The publisher ranking. score is the value the server computed with its per-article rule (for the rule see docs/api.md); the up-vote and comment counts attached to each row are raw totals, not a breakdown of that score. */
+async function mountPublisherRanking() {
+  const el = document.getElementById('publisher-ranking-body');
+  let rows;
+  try {
+    rows = listOf(await get('/api/rankings/publishers' + qs({ days: 7, limit: 5 })));
+  } catch (e) {
+    el.innerHTML = `<div class="body">${noticeHtml(`報道社ランキングを読み込めませんでした(${reasonOf(e)})`, 'error')}</div>`;
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div class="body">${noticeHtml('今週はまだ集計できる記事がありません。', 'info')}</div>`;
+    return;
+  }
+  setHtml(el, `<ol class="pub-ranking">${rows.map((row, i) => {
+    const p = row.publisher;
+    const meta = `記事 ${row.article_count} ・ ▲ ${row.up_count} ・ 💬 ${row.comment_count}`;
+    return `<li><span class="rank-badge">${i + 1}</span>${pubLogoHtml(p)}<div><a class="p-name" href="/publishers/${encodeURIComponent(p.slug)}">${escapeHtml(p.name)}</a><div class="p-meta">${escapeHtml(meta)}</div></div><span class="p-score">${row.score}</span></li>`;
+  }).join('')}</ol>`);
+}
+
+/* Entry point */
+
+const view = resolveView();
+if (view.kind === 'search') document.getElementById('search-input').value = view.q;
+
+const categoriesP = share(get('/api/categories'));
+const latestP = share(get(LATEST_URL));
+// The home page's first page needs no more than the same fetch as the breaking-news band, so reuse the same Promise rather than repeating the request. The sidebar rankings no longer ride on this fetch: each is its own server-ordered request to /api/rankings/articles.
+const listP = listUrl(view) === LATEST_URL ? latestP : share(get(listUrl(view)));
+
+// Each area renders independently. If one fetch fails, the other areas survive and show text of their own.
+mountAccountAndNav(view, categoriesP);
+mountArticles(view, listP, categoriesP);
+mountBreaking(latestP);
+// アクセスランキング: ordered on the server by a recency-weighted view count. The count itself is deliberately not shown, so the meta line carries only the publisher or reporter.
+mountArticleRanking('view-ranking-body', '/api/rankings/articles' + qs({ metric: 'views', limit: 5 }),
+  (a) => (a.publisher ? a.publisher.name : displayName(a.author)),
+  '記事はまだありません。');
+// 注目: ordered on the server by a recency-weighted reaction score (up − down + replies).
+mountArticleRanking('featured-body', '/api/rankings/articles' + qs({ metric: 'featured', limit: 3 }),
+  (a) => `${a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')}${Math.abs(a.score)} ・ 💬 ${a.comment_count}`,
+  '記事はまだありません。');
+mountTags();
+mountSeries();
+mountPublisherRanking();
+renderAdSlot(document.getElementById('ad-header'), 'header');
+renderAdSlot(document.getElementById('ad-sidebar'), 'sidebar');
+</script>
+</body>
+</html>

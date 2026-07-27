@@ -1,0 +1,6 @@
+# Pinned to 2.x: the bot depends on gateway event names, the fields raw events carry, and the intents bits, all of which can change across a major version boundary.
+# Without an upper bound, a rebuild alone would silently stop events from arriving.
+discord.py>=2.7,<3
+pyyaml
+aiomysql
+cryptography

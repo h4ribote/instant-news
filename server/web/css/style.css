@@ -1,0 +1,1728 @@
+/*
+ * instant-news stylesheet. This one file covers all 7 pages (index / article / tag / publisher / editor / settings / admin), in plain HTML/CSS with no build step.
+ *
+ * The layout, palette and information hierarchy follow the Yahoo! News (news.yahoo.co.jp) home page, remapped onto the instant-news domain: Discord auth, publishers, categories, tags, visibility, Discord reactions/threads, ads.
+ *
+ * The global nav's primary element is categories (the article's primary classification, exactly one, mandatory); the utility links (tags / series / write an article) are pushed to the right. Tags vary in number and cannot be enumerated in the nav, so the entry points for browsing by topic are the sidebar's popular tags and the tags in an article's meta row.
+ *
+ * Light and dark palettes are both supported: the OS setting (prefers-color-scheme) decides, and the manual toggle on the data-theme attribute overrides it.
+ *
+ * Three width tiers. The desktop rules are the base, overridden in two steps as the viewport narrows.
+ *
+ * - 901px and up: the intended two columns (main + 300px sidebar).
+ * - 900px and down: the sidebar folds under the main column; tablet portrait (768-834px) lands here. The search field stays in the masthead at this tier too.
+ * - 600px and down: phone portrait. Real device widths sit within 360-430px on both iPhone and Android, and landscape (640px and up) never reaches this tier. The masthead is cut down to logo + 🔍 🌙 ☰ and the nav bar to categories only; the links dropped from them are taken over by the drawer (assembled by js/chrome.js).
+ *
+ * Media queries are not collected at the end; each sits immediately after the rule it overrides. Collected, whoever changes a desktop value never has the narrow-width value in front of them, and the two drift apart unnoticed. That is exactly what happened to the timeline (.timeline) rail: when the narrow-width columns were added only one side moved and the rail ended up off the dot centre.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Brand */
+  --brand-red: #ff0033;      /* logo */
+  --discord: #5865f2;        /* Discord brand colour (login entry point) */
+  --discord-hover: #4752c4;
+
+  /* Navigation */
+  --nav-bg: #44739c;         /* the blue global nav bar */
+  --nav-bg-hover: #3a648a;
+  --nav-bg-active: #2f5d86;  /* the active item */
+
+  /* Text and links */
+  --link: #0033cc;
+  --link-visited: #551a8b;
+  --ink: #333333;            /* body */
+  --ink-strong: #131924;     /* emphasized headings */
+  --muted: #767676;          /* meta such as source and timestamp */
+
+  /* Accents */
+  --rank: #f14b43;           /* ranking number, NEW badge */
+  --breaking: #d6001c;       /* breaking news */
+  --sponsored: #a15c00;      /* sponsored-article disclosure; filled rather than outlined so it is never mistaken for a visibility badge */
+
+  /* Surfaces and rules */
+  --page-bg: #f4f4f4;
+  --surface: #ffffff;
+  --surface-2: #fafafa;      /* the recessed surface used by quotes, input fields and the like */
+  --line: #e6e6e6;
+  --line-strong: #d6d6d6;
+  --chip-bg: #eef1f6;
+  --chip-bg-hover: #e2e8f2;
+  --code-bg: #f2f2f4;
+  --th-bg: #f5f5f5;
+  --ph-bg: #dfe3e8;          /* image placeholder */
+  --rank-badge-bg: #b8b8b8;
+  --accent-bg: #f7f5ff;      /* pale band, e.g. the series banner */
+  --accent-line: #e4defb;
+
+  /* visibility badges */
+  --vis-public: #2b8a3e;     /* public */
+  --vis-members: #6741d9;    /* members-only */
+  --vis-restricted: #e8590c; /* role-restricted */
+
+  /* Votes (:arrow_up: / :arrow_down:). Up/down votes are never carried by colour alone: the ▲▼ glyphs are set alongside so the direction reads regardless of colour vision. */
+  --vote-up: #2b8a3e;
+  --vote-down: #c92a2a;
+
+  /* Alerts (corrections, warnings) */
+  --warn-bg: #fff8e1;
+  --warn-line: #f0d68a;
+  --warn-ink: #8a6100;
+
+  --content-w: 990px;
+  --radius: 4px;
+
+  /*
+   * Minimum size for something pressed with a finger. 34px is smaller than a fingertip and catches the neighbouring item along with the intended one.
+   * Applied to controls only (buttons, chips, pagers). The dense listing is left alone: its title link is a headline tall enough on its own, and its meta chips (the publisher / category / tag links in .article-row) are kept compact on purpose, because applying it to everything stretches out the dense listings and fewer articles fit on one viewport.
+   */
+  --tap: 44px;
+}
+
+/*
+ * Dark theme, applied from both the OS setting and the manual toggle.
+ * The same values are written in two places because a media query and an attribute selector cannot be folded into one rule.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --nav-bg: #22384a;
+    --nav-bg-hover: #2c485e;
+    --nav-bg-active: #35576f;
+    --link: #7db3ff;
+    --link-visited: #c4a5e8;
+    --ink: #d6d9de;
+    --ink-strong: #f2f4f7;
+    --muted: #8f959e;
+    --rank: #ff6b62;
+    --breaking: #ff4d5e;
+    --sponsored: #e0a94a;
+    --page-bg: #0f1216;
+    --surface: #171b21;
+    --surface-2: #1e232b;
+    --line: #2a3038;
+    --line-strong: #3a424c;
+    --chip-bg: #232b35;
+    --chip-bg-hover: #2c3742;
+    --code-bg: #232830;
+    --th-bg: #1f242c;
+    --ph-bg: #2a3038;
+    --rank-badge-bg: #4a525c;
+    --accent-bg: #1e1b2b;
+    --accent-line: #322c48;
+    --vis-public: #5cc26e;
+    --vis-members: #a58bf0;
+    --vis-restricted: #ff9248;
+    --vote-up: #5cc26e;
+    --vote-down: #ff6b6b;
+    --warn-bg: #2b2415;
+    --warn-line: #55431c;
+    --warn-ink: #e8c169;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --nav-bg: #22384a;
+  --nav-bg-hover: #2c485e;
+  --nav-bg-active: #35576f;
+  --link: #7db3ff;
+  --link-visited: #c4a5e8;
+  --ink: #d6d9de;
+  --ink-strong: #f2f4f7;
+  --muted: #8f959e;
+  --rank: #ff6b62;
+  --breaking: #ff4d5e;
+  --sponsored: #e0a94a;
+  --page-bg: #0f1216;
+  --surface: #171b21;
+  --surface-2: #1e232b;
+  --line: #2a3038;
+  --line-strong: #3a424c;
+  --chip-bg: #232b35;
+  --chip-bg-hover: #2c3742;
+  --code-bg: #232830;
+  --th-bg: #1f242c;
+  --ph-bg: #2a3038;
+  --rank-badge-bg: #4a525c;
+  --accent-bg: #1e1b2b;
+  --accent-line: #322c48;
+  --vis-public: #5cc26e;
+  --vis-members: #a58bf0;
+  --vis-restricted: #ff9248;
+  --vote-up: #5cc26e;
+  --vote-down: #ff6b6b;
+  --warn-bg: #2b2415;
+  --warn-line: #55431c;
+  --warn-ink: #e8c169;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--page-bg);
+  color: var(--ink);
+  font-family: "ヒラギノ角ゴ Pro W3", "Hiragino Kaku Gothic Pro", メイリオ, Meiryo, "Segoe UI", Osaka, "MS PGothic", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+img { max-width: 100%; display: block; }
+
+.container {
+  width: var(--content-w);
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 0 15px;
+}
+
+/* Header */
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+.topbar .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+}
+.topbar .promo { color: var(--ink); }
+.topbar nav a { color: var(--muted); margin-left: 16px; }
+
+/* The promo line folds away on phones. The reader is already on the site, so this explains rather than guides, and at narrow widths it only takes 2-3 lines and pushes the articles down. */
+@media (max-width: 600px) {
+  .topbar { display: none; }
+}
+
+.masthead { background: var(--surface); }
+.masthead .container {
+  display: flex;
+  align-items: center;
+  /* Allow wrapping. Forbid it and the account area falls outside the box the moment the unshrinkable logo (.logo is white-space: nowrap) uses up the content width. On phones the search field takes a line of its own through this wrap. */
+  flex-wrap: wrap;
+  gap: 20px;
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+.logo {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  /* The logo does not shrink, so in exchange it bows out of the contest for the spare space. Growing lets it push .actions to the right edge. */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.logo .mark {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  color: var(--brand-red);
+}
+.logo .mark span { color: var(--ink-strong); }
+.logo .tag {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* The tagline drops on phones. The logo is the only element in the masthead that cannot be shrunk, and its minimum width with the tagline included (about 320px) all but uses up the phone content width (330px on a 360px device), leaving the account area nowhere to sit. The name on its own fits in about 150px. */
+@media (max-width: 600px) {
+  .logo .tag { display: none; }
+  .logo .mark { font-size: 21px; }
+}
+
+.search {
+  flex: 1;
+  display: flex;
+  max-width: 520px;
+}
+.search input {
+  flex: 1;
+  height: 34px;
+  border: 2px solid var(--nav-bg);
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  padding: 0 12px;
+  font-size: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  outline: none;
+}
+.search button {
+  width: 46px;
+  border: none;
+  background: var(--nav-bg);
+  color: #fff;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+/*
+ * On phones the search field folds away until 🔍 is pressed: the logo and the account area fill the masthead, so it cannot stay up permanently.
+ * The opened field wraps at flex-basis:100% and takes a line of its own below the logo (.masthead .container's flex-wrap is what makes this possible).
+ * At 601px and up it stays permanent. This used to be a blanket display:none for everything 900px and down, but a 768px device still has 340px left after the logo (about 320px) and the account area (about 78px). Folding it away when there is room to show it means a reader who opened a /?q= result is shown nothing but the "search results for X" heading, unable to see the search term or correct it.
+ */
+@media (max-width: 600px) {
+  .search { display: none; }
+  .search input { font-size: 16px; }
+  [data-search-open] .search {
+    display: flex;
+    flex-basis: 100%;
+    max-width: none;
+    order: 3;
+  }
+}
+
+.masthead .actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  flex: none;
+}
+.btn-discord {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* Height comes from min-height. Fixing it with height makes a Japanese label break onto two lines and overflow the box when squeezed (CJK can break mid-word, so it breaks sooner than an English label). */
+  min-height: 34px;
+  padding: 0 14px;
+  background: var(--discord);
+  color: #fff;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 700;
+}
+.btn-discord:hover { text-decoration: none; background: var(--discord-hover); }
+.icon-btn {
+  width: 34px; height: 34px;
+  flex: none;
+  display: grid; place-items: center;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  font-size: 16px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.icon-btn:hover { text-decoration: none; background: var(--chip-bg); }
+
+/* js/chrome.js owns opening and closing the search and the drawer, and their entry points appear on phones only. Hidden by default and shown at narrow widths: the other way round leaves a ☰ that cannot be pressed on a wide screen where JavaScript is disabled. */
+[data-search-toggle], [data-drawer-toggle] { display: none; }
+
+@media (max-width: 600px) {
+  .masthead .container { gap: 10px; }
+  /* The account area (user name, log out, log in, settings) moves into the drawer. Only 🔍 🌙 ☰ stay in the masthead. */
+  .masthead .actions .acct { display: none; }
+  [data-search-toggle], [data-drawer-toggle] {
+    display: grid;
+    width: var(--tap);
+    height: var(--tap);
+  }
+  .masthead .actions .icon-btn { width: var(--tap); height: var(--tap); }
+}
+
+/* The global nav (one blue bar). Categories are the primary element (the article's primary classification); the utility links are pushed to the right.
+   The current location is marked twice over: a darker blue background and an underline. */
+.globalnav { background: var(--nav-bg); }
+.globalnav .container {
+  display: flex;
+  gap: 2px;
+  padding: 0 15px;
+  overflow-x: auto;
+  /* The number of categories differs per deployment and always overflows at narrow widths. The overflow is reachable by scrolling sideways, but the scrollbar itself is not drawn: it eats into the bar height and cannot even be grabbed on a touch device. The fades at the edges (.fade-start / .fade-end below) are what show there is more. */
+  scrollbar-width: none;
+}
+.globalnav .container::-webkit-scrollbar { display: none; }
+/*
+ * The edge fades. js/chrome.js watches the scroll position and adds or removes them.
+ * The blue background belongs to .globalnav, so only .container's contents (the links) are masked and the bar itself never breaks. Links dissolving into the blue is what shows there is more beyond.
+ * When there is room and nothing to scroll, chrome.js adds neither class. Fading unconditionally would suggest more where there is none.
+ */
+.globalnav .container.fade-end { mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+.globalnav .container.fade-start { mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent); }
+.globalnav .container.fade-start.fade-end {
+  mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+}
+.globalnav a {
+  color: #fff;
+  padding: 10px 18px;
+  font-size: 15px;
+  font-weight: 700;
+  border-bottom: 3px solid transparent;
+  white-space: nowrap;
+}
+.globalnav a:hover { background: var(--nav-bg-hover); text-decoration: none; }
+.globalnav a.active {
+  background: var(--nav-bg-active);
+  border-bottom-color: #fff;
+}
+.globalnav .spacer { flex: 1; }
+/* Utility links. They sit in the same bar as the categories, but a separator marks them as a different kind. */
+.globalnav a.util {
+  font-weight: 400;
+  font-size: 13px;
+  opacity: 0.9;
+}
+.globalnav a.write { font-weight: 700; }
+
+@media (max-width: 900px) {
+  .globalnav a { padding: 10px 14px; }
+}
+
+/*
+ * On phones the bar carries categories only; the utility links (tags, series, write an article, admin) move into the drawer.
+ * Left mixed into the bar they hide past the end of the scroll and are effectively unreachable, and a finger swiping in search of a category lands on a link of another kind.
+ * .spacer folds away too. In an overflowing bar its flex:1 resolves to 0 and means nothing, but leaving it in makes a single gap appear between two categories.
+ */
+@media (max-width: 600px) {
+  .globalnav a.util, .globalnav a.write, .globalnav .spacer { display: none; }
+  .globalnav a { padding: 12px 14px; font-size: 14px; }
+}
+
+/* Drawer (the phone's utility links and account area).
+   Where the utility links dropped from the nav bar and the account area dropped from the masthead end up. js/chrome.js assembles it.
+   At 601px and up it is removed altogether. Merely leaving it closed would let a user tabbing on a wide viewport wander into links they cannot see. */
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 50;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.18s ease, visibility 0.18s ease;
+}
+.drawer-overlay.open { opacity: 1; visibility: visible; }
+
+.drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  z-index: 51;
+  width: min(82vw, 320px);
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+  /* Keeps the last item from slipping under the rounded bottom of the device or the home bar. Resolves to 0 where it is unsupported. */
+  padding-bottom: env(safe-area-inset-bottom);
+  transform: translateX(100%);
+  visibility: hidden;
+  transition: transform 0.18s ease, visibility 0.18s ease;
+}
+.drawer.open { transform: none; visibility: visible; }
+
+/* No sliding in for users who ask for reduced motion. Opening and closing themselves remain: the motion is decoration, but whether it is open is information. */
+@media (prefers-reduced-motion: reduce) {
+  .drawer, .drawer-overlay { transition: none; }
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-strong);
+}
+.drawer-head .icon-btn { width: var(--tap); height: var(--tap); }
+
+/* Account area. Who you are viewing as has to be checkable before you press log out. */
+.drawer-acct {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.drawer-acct .avatar { width: 36px; height: 36px; font-size: 15px; }
+.drawer-acct .name {
+  font-weight: 700;
+  color: var(--ink-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drawer-acct .btn-discord { width: 100%; justify-content: center; min-height: var(--tap); }
+
+.drawer-nav { display: flex; flex-direction: column; padding: 6px 0; }
+.drawer-nav a, .drawer-nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--tap);
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  background: none;
+  border: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.drawer-nav a:hover, .drawer-nav button:hover { text-decoration: none; background: var(--chip-bg); }
+.drawer-nav .sep { border-top: 1px solid var(--line); margin: 6px 0; }
+.drawer-nav .logout { color: var(--breaking); font-weight: 400; }
+
+@media (min-width: 601px) {
+  .drawer, .drawer-overlay { display: none; }
+}
+
+/* Ad slots.
+   The core always draws the "Sponsored" label, and no external ad-management app or advertiser can remove it.
+   This is news, and it is a place several publishers are members of, so an ad that cannot be told apart from a headline damages the articles' credibility directly. A requirement, not decoration. */
+.adslot {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.adslot::after {
+  content: "広告";
+  position: absolute;
+  right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 2px 0 0 0;
+  pointer-events: none;
+}
+.adslot .creative {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+/* Recommended size per slot, matching ad_slots' recommended_width / recommended_height. */
+.adslot.header .creative { height: 90px; }
+.adslot.article-inline .creative { height: 120px; }
+.adslot.sidebar .creative { height: 250px; }
+
+.adslot.header { margin: 20px 0 0; }
+.adslot.article-inline { margin: 28px 0; }
+
+/* Main layout (left: main / right: sidebar) */
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 24px;
+  padding: 20px 0 48px;
+  align-items: start;
+}
+/*
+ * Zero the columns' minimum width. A grid item defaults to min-width: auto, which means "never narrower than the content's min-content".
+ * With unshrinkable content in a column (the one-word scope in the API key listing, a 19-digit role ID, a table in an article body) the column widens to fit it, punches through the outer .container's max-width: 100% and makes the whole page run sideways. Giving the inner box (.table-scroll) an overflow-x achieves nothing, because the box itself widens too.
+ * So this is the premise that confines horizontal scrolling inside a column in this design, not a fine adjustment.
+ */
+.layout > .main, .layout > .side { min-width: 0; }
+
+/* Fold the sidebar and send it below the main column. From here down the sidebar's 300px is gone and the main column uses the whole content width. */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+}
+.card > .body { padding: 8px 16px 16px; }
+
+/*
+ * On phones the cards span the full viewport and give up their left and right rules and their rounded corners.
+ * Subtracting .container's 15px and .card's 1px leaves only 328px for content. Rather than take content away for the 1px that separates a card's inside from its outside, the surface reaching the edge of the viewport reads better. The top and bottom rules stay: where one card ends is still information.
+ */
+@media (max-width: 600px) {
+  .container { padding: 0 12px; }
+  /* The left and right padding is repeated here. .layout sits on the same element as .container (main class="container layout") and overwrites padding wholesale, so the .container declaration never lands. Omit it and the padding becomes 0, the negative margins on the cards below lose what they were cancelling, and they spill 12px outside the viewport. */
+  .layout { padding: 12px 12px 32px; gap: 16px; }
+  .layout > .main > .card, .layout > .side > .card {
+    margin-left: -12px;
+    margin-right: -12px;
+    border-left: none;
+    border-right: none;
+    border-radius: 0;
+  }
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.section-head h2 {
+  margin: 0;
+  font-size: 17px;
+  color: var(--ink-strong);
+}
+.section-head .more { font-size: 13px; }
+/* "Read more" and the like are bare 13px links, too small as a tap target for a finger. Give them a pressable height. */
+@media (max-width: 600px) {
+  .section-head .more {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--tap);
+    padding-left: 8px;
+  }
+}
+
+/* Breaking-news band.
+   A badge inside the listing alone gets buried, so the home page carries a dedicated band. */
+.breaking-band {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--breaking);
+  border-left: 5px solid var(--breaking);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+.breaking-band .label {
+  flex: none;
+  background: var(--breaking);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  padding: 4px 10px;
+  border-radius: 2px;
+}
+.breaking-band .headline {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink-strong);
+  line-height: 1.4;
+}
+.breaking-band .headline:hover { color: var(--link); }
+.breaking-band time { margin-left: auto; font-size: 12px; color: var(--muted); flex: none; }
+
+@media (max-width: 900px) {
+  .breaking-band { flex-wrap: wrap; }
+  .breaking-band time { margin-left: 0; }
+}
+@media (max-width: 600px) {
+  .breaking-band {
+    margin-left: -12px;
+    margin-right: -12px;
+    border-left-width: 5px;
+    border-radius: 0;
+    padding: 10px 12px;
+    gap: 8px 10px;
+  }
+  /* The headline runs to one line or two depending on width. Two lines are tall enough; one line is only 21px. Padding raises the floor so the tap target does not change size with the wrap. */
+  .breaking-band .headline { font-size: 15px; padding: 4px 0; }
+}
+
+/* Badges.
+   Visibility is outline only; the disclosure (Sponsored) and breaking news are filled.
+   The two are handled apart because a sponsored-article disclosure must not get buried in the row of visibility badges. */
+.badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 2px;
+  vertical-align: middle;
+  white-space: nowrap;  /* a label such as members-only breaking onto two lines would disturb the headline leading */
+}
+.badge.breaking { background: var(--breaking); color: #fff; letter-spacing: 0.5px; }
+.badge.sponsored { background: var(--sponsored); color: #fff; }
+:root[data-theme="dark"] .badge.sponsored { color: #1a1204; }
+.badge.vis-public { color: var(--vis-public); border: 1px solid currentColor; }
+.badge.vis-members { color: var(--vis-members); border: 1px solid currentColor; }
+.badge.vis-restricted { color: var(--vis-restricted); border: 1px solid currentColor; }
+
+/* Publisher branding.
+   An article carries a dual byline of publisher x reporter, drawn with the publisher primary and the reporter secondary.
+   Affiliation is decided by a Discord role, but the byline is frozen at publication time (a reporter's transfer never changes the byline on past articles). */
+.publisher {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-weight: 700;
+}
+.publisher:hover { color: var(--link); text-decoration: none; }
+.pub-logo {
+  width: 20px; height: 20px;
+  border-radius: 3px;
+  display: grid; place-items: center;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  flex: none;
+}
+.publisher .state {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  padding: 1px 4px;
+}
+
+/* Article listing (headline + meta) */
+.articles { list-style: none; margin: 0; padding: 0; }
+.articles > li { border-bottom: 1px solid var(--line); }
+.articles > li:last-child { border-bottom: none; }
+.article-row {
+  display: block;
+  padding: 14px 6px;
+}
+.article-row .title {
+  font-size: 16px;
+  line-height: 1.5;
+  margin: 0 0 8px;
+  font-weight: 400;
+}
+/* Only the title text is the article link now (the row is no longer a link), so the colour and hover underline come from the base a rules on the nested anchor. */
+.article-row .title a { color: var(--link); }
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.meta .author {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink);
+}
+.meta .publisher { font-size: 12px; }
+.avatar {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  flex: none;
+}
+.meta .thread::before { content: "💬 "; }
+
+/*
+ * The listing row on phones. The meta row lines up publisher, category, three tags, reporter, comment count, score, visibility and timestamp, and at narrow widths it stands taller than the headline, so the tag chips are dropped.
+ * Tags were picked as the thing to drop because tags are reachable from other entry points (the article page's tag row, the tag listing) while the publisher and the visibility appear nowhere else. The disclosure (.badge.sponsored) and breaking news stay: an ad that cannot be told apart from a headline damages the articles' credibility directly.
+ */
+@media (max-width: 600px) {
+  .article-row { padding: 12px 6px; }
+  .article-row .title { font-size: 15px; margin-bottom: 6px; }
+  .article-row .meta { gap: 4px 8px; }
+  .article-row .meta .tag-chip { display: none; }
+}
+
+.cat-chip {
+  color: var(--nav-bg);
+  border: 1px solid var(--nav-bg);
+  padding: 1px 7px;
+  border-radius: 2px;
+  font-size: 11px;
+  font-weight: 700;
+}
+:root[data-theme="dark"] .cat-chip { color: var(--link); border-color: var(--link); }
+.cat-chip:hover { text-decoration: none; background: var(--chip-bg); }
+.tag-chip {
+  color: var(--nav-bg);
+  background: var(--chip-bg);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+:root[data-theme="dark"] .tag-chip { color: var(--link); }
+.tag-chip:hover { text-decoration: none; background: var(--chip-bg-hover); }
+
+/* Sidebar */
+.side .card { margin-bottom: 20px; }
+
+.login-card { text-align: center; }
+.login-card .body { padding: 18px 16px; }
+.login-card p { margin: 0 0 12px; font-size: 13px; color: var(--ink); }
+.login-card .btn-discord { width: 100%; justify-content: center; height: 40px; }
+
+/* Popular tags. Tags vary in number and cannot be enumerated in the nav, so this is the entry point for browsing by topic.
+   Countries are tags too, so an icon (the flag) comes with them. */
+.tagcloud { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 16px 16px; }
+.tagcloud a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--nav-bg);
+  background: var(--chip-bg);
+  padding: 5px 10px;
+  border-radius: 14px;
+}
+:root[data-theme="dark"] .tagcloud a { color: var(--link); }
+.tagcloud a:hover { text-decoration: none; background: var(--chip-bg-hover); }
+.tagcloud a b { color: var(--muted); font-weight: 400; margin-left: 3px; }
+
+/*
+ * Chips are not raised to 44px. A tag cloud puts dozens of them on one surface, so at 44px each the cloud alone fills the viewport and the very tag being looked for drops out of sight.
+ * A mis-tap is decided by the spacing between tap targets as much as by their size, so the height stays at 36px and the gaps widen instead. That clears WCAG 2.2's floor (24px) with room to spare.
+ * Controls that stand alone (buttons, pagers, drawer items) use --tap, paying in size for what spacing cannot make up.
+ */
+@media (max-width: 600px) {
+  .tagcloud { gap: 10px; padding: 14px 16px 18px; }
+  .tagcloud a { min-height: 36px; padding: 7px 12px; font-size: 13px; }
+}
+.tag-icon {
+  width: 14px; height: 10px;
+  border-radius: 1px;
+  flex: none;
+}
+
+/* Numbered ranking */
+.ranking { list-style: none; margin: 0; padding: 0; }
+.ranking li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.ranking li:last-child { border-bottom: none; }
+.rank-badge {
+  width: 20px; height: 20px;
+  background: var(--rank-badge-bg);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 2px;
+  display: grid; place-items: center;
+}
+.ranking li:nth-child(-n+3) .rank-badge { background: var(--rank); }
+.ranking .r-title {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.ranking .r-title:hover { color: var(--link); }
+.ranking .r-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.ranking .r-thumb { width: 52px; height: 52px; border-radius: var(--radius); }
+
+/*
+ * Give the headlines in the ranking and series listings a height a finger can press.
+ * What gets pressed is the <a>, not the row, so widening the row's (li's) padding does not enlarge the tap target. A finger landing on that padding goes nowhere and all that happens is that the press draws no response. Make the headline itself a block and give it vertical padding.
+ * The type is not enlarged: 13px is already readable, and enlarging it stretches the ranking listing vertically so fewer entries fit on one viewport. What is wanted here is a tap target, not legibility.
+ */
+@media (max-width: 600px) {
+  .ranking li, .series li { padding: 10px 16px; }
+  .pub-ranking li { padding: 9px 16px; }
+  .ranking .r-title, .pub-ranking .p-name, .s-title { display: block; padding: 5px 0; }
+}
+
+/* The publisher ranking.
+   Both votes and comments are delegated to Discord, so the ranking falls out of a tally over the mirror.
+   The competition between publishers is itself a source of engagement. */
+.pub-ranking { list-style: none; margin: 0; padding: 0; }
+.pub-ranking li {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.pub-ranking li:last-child { border-bottom: none; }
+.pub-ranking .rank-badge { align-self: center; }
+.pub-ranking .pub-logo { width: 28px; height: 28px; font-size: 12px; border-radius: 4px; }
+.pub-ranking .p-name { font-size: 13px; font-weight: 700; color: var(--ink); line-height: 1.3; }
+.pub-ranking .p-name:hover { color: var(--link); }
+.pub-ranking .p-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.pub-ranking .p-score { font-size: 13px; font-weight: 800; color: var(--rank); }
+
+/* Series */
+.series { list-style: none; margin: 0; padding: 0; }
+.series li {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.series li:last-child { border-bottom: none; }
+.series .cover { width: 64px; height: 44px; border-radius: var(--radius); }
+/*
+ * A headline, and the small count or timestamp set beneath it.
+ * These two must not be shut inside .series. Besides the series listing they carry the same meaning in the settings page's API key listing and tag subscriptions, the article page's sidebar publisher and writer, and the admin screen's taxonomy listing; while they were shut in, all of those were drawn at the parent's 14px because the declarations never reached them. Rather than adding a selector every time another caller appears, they take effect everywhere, as their names say.
+ */
+.s-title { font-size: 13px; color: var(--ink); font-weight: 700; line-height: 1.4; }
+.s-title:hover { color: var(--link); }
+.s-count { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* Article detail (article.html) */
+.breadcrumb {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 0 12px;
+}
+.breadcrumb a { color: var(--muted); }
+.breadcrumb span { margin: 0 6px; }
+
+.article { padding: 24px 28px 32px; }
+.article h1 {
+  font-size: 26px;
+  line-height: 1.4;
+  color: var(--ink-strong);
+  margin: 6px 0 12px;
+}
+
+/* 28px left and right leaves the body only 272px on a 360px device. Tightening the padding to 16px returns 24px to the body. The headline drops too: at 26px it breaks into 3-4 lines. */
+@media (max-width: 600px) {
+  .article { padding: 16px 16px 24px; }
+  .article h1 { font-size: 21px; margin: 4px 0 10px; }
+  .lede { font-size: 14px; }
+}
+/* The lede (excerpt), placed between the headline and the meta information. */
+.lede {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+
+/* Publisher branding at the head of the article.
+   Placing a large logo + publisher name at the head of an article, and that is what gives it the bearing of a news agency. */
+.pub-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 18px;
+}
+.pub-head .pub-logo { width: 40px; height: 40px; font-size: 15px; border-radius: 6px; }
+.pub-head .label { font-size: 11px; color: var(--muted); }
+.pub-head .name { font-size: 16px; font-weight: 800; color: var(--ink-strong); line-height: 1.3; }
+.pub-head .name:hover { color: var(--link); }
+/* Without flex: none, squeezing this band crushes the button alone: its "articles from this publisher" label breaks onto two lines and overflows the box. Let it wrap rather than shrink (flex-wrap below). */
+.pub-head .follow { margin-left: auto; flex: none; }
+
+/* Logo + publisher name + button come to about 286px minimum, which barely fits the body width of a 360px device (about 296px), but a publisher with a long name overflows it. Wrapping is allowed, and when it overflows the button drops to the next line. */
+@media (max-width: 600px) {
+  .pub-head { flex-wrap: wrap; gap: 10px; }
+  .pub-head .follow { margin-left: 0; width: 100%; justify-content: center; }
+}
+
+.byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--muted);
+}
+.byline .author { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 700; }
+.byline .author .avatar { width: 28px; height: 28px; font-size: 13px; }
+
+/* The sponsored-article disclosure.
+   Not modelling it would not prevent sponsored articles, only the disclosure of them, so it is handled explicitly and the core guarantees the disclosure.
+   It is drawn as a band because it must not get buried. */
+.sponsor-disclosure {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  padding: 12px 16px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-left: 5px solid var(--sponsored);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--warn-ink);
+}
+.sponsor-disclosure .badge { flex: none; }
+.sponsor-disclosure b { color: var(--ink-strong); }
+
+/* Stating the correction.
+   A corrected article says so at the head of the body rather than at the end (journalistic accountability is why a plain update and a correction are told apart). */
+.correction {
+  margin: 18px 0;
+  padding: 12px 16px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-left: 5px solid var(--vis-restricted);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--warn-ink);
+}
+.correction .head { font-weight: 800; color: var(--ink-strong); margin-bottom: 4px; }
+.correction .head::before { content: "⚠ "; }
+.correction a { color: var(--link); }
+
+.series-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 18px 0;
+  padding: 12px 16px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-line);
+  border-left: 4px solid var(--vis-members);
+  border-radius: var(--radius);
+}
+.series-banner .cover { width: 56px; height: 40px; border-radius: 3px; }
+.series-banner .label { font-size: 11px; color: var(--vis-members); font-weight: 700; }
+.series-banner .name { font-size: 15px; font-weight: 700; color: var(--ink-strong); }
+.series-banner .pos { font-size: 12px; color: var(--muted); }
+
+/* Article body (rendered GFM) */
+.prose { font-size: 16px; line-height: 1.9; color: var(--ink); padding-top: 20px; }
+.prose > * { margin: 0 0 1.2em; }
+.prose h2 {
+  font-size: 21px;
+  color: var(--ink-strong);
+  border-bottom: 2px solid var(--line-strong);
+  padding-bottom: 8px;
+  margin-top: 1.8em;
+}
+.prose h3 { font-size: 18px; color: var(--ink-strong); margin-top: 1.6em; }
+.prose a { color: var(--link); text-decoration: underline; }
+.prose ul, .prose ol { padding-left: 1.6em; }
+.prose li { margin-bottom: 0.4em; }
+.prose blockquote {
+  margin-left: 0;
+  padding: 4px 16px;
+  border-left: 4px solid var(--line-strong);
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.prose code {
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.88em;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+.prose pre {
+  background: #1f2430;
+  color: #e6e6e6;
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+.prose pre code { background: none; padding: 0; color: inherit; font-size: 13.5px; }
+.prose img.figure { width: 100%; height: 260px; border-radius: 6px; }
+.prose figcaption { font-size: 12px; color: var(--muted); text-align: center; margin-top: 6px; }
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+}
+.prose th, .prose td { border: 1px solid var(--line-strong); padding: 8px 12px; text-align: left; }
+.prose th { background: var(--th-bg); }
+
+/*
+ * A table in an article body is the one thing whose column count we do not decide. If a writer writes a 4-column table, nothing will make it fit at narrow widths.
+ * Making the table a block lets the table scroll horizontally on its own and keeps the whole page from running sideways. Code blocks (.prose pre) already have overflow-x: auto; the table was the last hole.
+ * A wrapper element is not an option. markdown.py runs the body HTML through nh3 and trims it down to the allowed elements (neither div nor the class attribute is on the allow list), and widening that list just to wrap a table would widen the injection surface for the sake of appearance.
+ * Desktop is left out. display: block shrinks the table to its content width, so a table with few columns stops filling the column. Everything from the point the sidebar folds is enough.
+ */
+@media (max-width: 900px) {
+  .prose table { display: block; overflow-x: auto; }
+}
+@media (max-width: 600px) {
+  .prose { font-size: 15px; line-height: 1.8; }
+  .prose img.figure { height: auto; aspect-ratio: 16 / 9; }
+  .prose pre { padding: 12px; }
+  .prose h2 { font-size: 18px; }
+  .prose h3 { font-size: 16px; }
+}
+
+.tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0; }
+.tags a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--nav-bg);
+  background: var(--chip-bg);
+  padding: 5px 12px;
+  border-radius: 14px;
+}
+:root[data-theme="dark"] .tags a { color: var(--link); }
+.tags a:hover { text-decoration: none; background: var(--chip-bg-hover); }
+
+/* The tags at the end of an article are the main entry point to that tag's articles (they are dropped from the listing meta row on phones). Give them the same 36px as the tag cloud. */
+@media (max-width: 600px) {
+  .tags { gap: 10px; }
+  .tags a { min-height: 36px; padding: 7px 14px; }
+}
+
+/* Discord reactions and thread */
+.discord-box {
+  margin-top: 24px;
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.discord-box .head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--discord);
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+}
+.discord-box .stats {
+  display: flex;
+  gap: 24px;
+  padding: 16px;
+  align-items: center;
+  background: var(--surface);
+}
+.discord-box .stat { text-align: center; flex: none; }
+.discord-box .stat b { display: block; font-size: 22px; color: var(--ink-strong); }
+.discord-box .stat span { font-size: 11px; color: var(--muted); }
+.discord-box .cta { margin-left: auto; flex: none; }
+
+/* The two pairs of figures (up/down votes and comment count) plus the entry point to the thread come to about 352px minimum, which does not fit the body width of a 360px device (about 264px), so they wrap. The entry point is laid out full width to set it apart from the row of numbers. */
+@media (max-width: 600px) {
+  .discord-box .stats { flex-wrap: wrap; gap: 16px 24px; }
+  .discord-box .cta { margin-left: 0; width: 100%; }
+  .discord-box .cta .btn-discord { width: 100%; justify-content: center; min-height: var(--tap); }
+}
+/* An article notified to several channels has an independent thread and reactions per notification post.
+   The article's reaction counts are the sum over them. */
+.discord-box .channels {
+  padding: 0 16px 14px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface);
+}
+
+/* The up/down subtraction. The direction is shown by both the glyph (▲▼±) and the colour. */
+.score { font-variant-numeric: tabular-nums; }
+.score.up { color: var(--vote-up); }
+.score.down { color: var(--vote-down); }
+.score.zero { color: var(--muted); }
+
+/* Comments. The real comments live in the Discord thread and this is a read-only mirror (the entry point for writing sends you to Discord). */
+.comments { margin-top: 24px; }
+.comments h2 {
+  font-size: 15px;
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--line-strong);
+  color: var(--ink-strong);
+}
+.c-list { display: flex; flex-direction: column; gap: 2px; }
+.c-item {
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.c-item + .c-item { border-top: none; }
+.c-body { min-width: 0; flex: 1; }
+.c-head { display: flex; align-items: baseline; gap: 8px; font-size: 11px; color: var(--muted); }
+.c-name { font-weight: 700; color: var(--ink-strong); font-size: 12px; }
+.c-edited { font-size: 10px; }
+/* Discord markup is not interpreted; it is emitted as-is. Only line breaks are honoured, and even a long URL must not overflow the column. */
+.c-text {
+  margin: 4px 0 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.c-foot { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.c-votes { color: var(--muted); }
+.c-empty { color: var(--muted); font-size: 13px; padding: 12px; background: var(--surface); border: 1px solid var(--line); }
+#comment-more { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+#comment-more button {
+  font: inherit;
+  font-size: 12px;
+  padding: 8px 14px;
+  color: var(--link);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  cursor: pointer;
+}
+#comment-more button:hover { background: var(--chip-bg); }
+
+.revision {
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.revision a { color: var(--link); }
+
+/* The entry point for reading more comments, the entry point to a revision diff, and the breadcrumb. All are bare links in small type and need a size that shows they can be pressed. The breadcrumb is a control for walking the hierarchy rather than a link inside prose, so it is not left buried in the line. */
+@media (max-width: 600px) {
+  #comment-more button { min-height: var(--tap); padding: 8px 18px; }
+  .revision a { display: inline-flex; align-items: center; min-height: 32px; }
+  .breadcrumb { padding: 4px 0 10px; }
+  .breadcrumb a { display: inline-block; padding: 4px 0; }
+  .pub-head .name { display: inline-block; padding: 3px 0; }
+}
+
+/* Publisher page (publisher.html) */
+.pub-hero {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 24px 28px;
+}
+.pub-hero .pub-logo { width: 72px; height: 72px; font-size: 26px; border-radius: 10px; }
+.pub-hero h1 { margin: 0 0 4px; font-size: 24px; color: var(--ink-strong); }
+.pub-hero .desc { font-size: 13px; color: var(--muted); margin: 0 0 8px; }
+.pub-hero .role-note {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--chip-bg);
+  border-radius: 3px;
+  padding: 3px 8px;
+  display: inline-block;
+}
+.pub-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid var(--line);
+}
+.pub-stats div {
+  text-align: center;
+  padding: 14px 8px;
+  border-right: 1px solid var(--line);
+}
+.pub-stats div:last-child { border-right: none; }
+.pub-stats b { display: block; font-size: 20px; color: var(--ink-strong); }
+.pub-stats span { font-size: 11px; color: var(--muted); }
+
+/* At 300px, four columns wrap the numbers mid-digit. Rearrange into 2 x 2 and drop the vertical rule at the right of the first row (with two columns the second cell is the right edge). */
+@media (max-width: 900px) {
+  .pub-stats { grid-template-columns: repeat(2, 1fr); }
+  .pub-stats div:nth-child(2) { border-right: none; }
+  /* 2 x 2 needs a divider between the first and second rows. With four columns there was only one row, so none was drawn. */
+  .pub-stats div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+}
+
+/* Subtracting the 72px logo and the 18px gap leaves only 182px for the publisher name, description and role note. Dropping the logo to 56px keeps them side by side. Stacking them vertically would stop a reader arriving from the publisher listing seeing at a glance which publisher they are looking at. */
+@media (max-width: 600px) {
+  .pub-hero { padding: 16px; gap: 12px; align-items: flex-start; }
+  .pub-hero .pub-logo { width: 56px; height: 56px; font-size: 20px; }
+  .pub-hero h1 { font-size: 19px; }
+}
+
+.member-list { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 16px 16px; }
+.member-list .m {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  background: var(--chip-bg);
+  border-radius: 14px;
+  padding: 4px 10px 4px 4px;
+  color: var(--ink);
+}
+
+/* Tag page (tag.html). Also used as a country profile. */
+.tag-hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 22px 28px;
+}
+.tag-hero .flag {
+  width: 72px; height: 48px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  flex: none;
+}
+.tag-hero h1 { margin: 0 0 4px; font-size: 24px; color: var(--ink-strong); }
+.tag-hero .desc { font-size: 13px; color: var(--muted); margin: 0; }
+.tag-hero .subscribe { margin-left: auto; flex: none; }
+
+/*
+ * The subscribe entry point is flex: none and does not shrink, so its minimum width together with the 72px flag (about 302px) always exceeds the body width (about 272px).
+ * Shrinking is not the fix: the "get the latest by DM" label would just break onto two lines and spill out of the button without ever fitting. Let it wrap and take a line of its own.
+ */
+@media (max-width: 600px) {
+  .tag-hero { flex-wrap: wrap; padding: 16px; gap: 12px; }
+  .tag-hero .flag { width: 56px; height: 38px; }
+  .tag-hero h1 { font-size: 19px; }
+  .tag-hero .subscribe {
+    margin-left: 0;
+    width: 100%;
+    justify-content: center;
+    min-height: var(--tap);
+  }
+}
+
+/* The tag timeline: articles filtered by the tag, laid out in chronological order. */
+.timeline {
+  list-style: none;
+  margin: 0;
+  position: relative;
+
+  /*
+   * The column allowances are decided in one place. The rail's position is derived from the date column, the gap and the dot column, so changing the width means touching only those three.
+   * The rail's left and the column widths used to be written as separate numbers, and when the narrow-width values were added (date 68px -> 52px) only one of them moved, leaving the rail off the dot centre. Never write down a value that can be derived.
+   */
+  --tl-pad: 16px;
+  --tl-date-w: 68px;
+  --tl-gap: 8px;
+  --tl-dot-w: 24px;
+
+  padding: var(--tl-pad) var(--tl-pad) 20px;
+}
+.timeline::before {
+  content: "";
+  position: absolute;
+  /* The centre of the dot column. Each dot is ringed in the surface colour (.t-dot::before's border), and the rail running directly beneath it makes the rail look as if it breaks inside the ring. */
+  left: calc(var(--tl-pad) + var(--tl-date-w) + var(--tl-gap) + var(--tl-dot-w) / 2 - 1px);
+  top: var(--tl-pad); bottom: 20px;
+  width: 2px;
+  background: var(--line-strong);
+}
+.timeline li {
+  display: grid;
+  grid-template-columns: var(--tl-date-w) var(--tl-dot-w) 1fr;
+  gap: 0 var(--tl-gap);
+  align-items: baseline;
+  padding: 8px 0;
+}
+.timeline .t-date { font-size: 11px; color: var(--muted); text-align: right; }
+.timeline .t-dot { justify-self: center; position: relative; }
+.timeline .t-dot::before {
+  content: "";
+  position: absolute;
+  left: 50%; top: 6px;
+  transform: translateX(-50%);
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--nav-bg);
+  border: 2px solid var(--surface);
+}
+.timeline li.major .t-dot::before { background: var(--breaking); width: 12px; height: 12px; }
+.timeline .t-title { font-size: 14px; color: var(--link); line-height: 1.45; }
+.timeline .t-meta { font-size: 11px; color: var(--muted); }
+
+/*
+ * The date column has to hold the Japanese form of a date such as December 31, which needs about 66px at 11px type. Tightened to 52px it wraps inside the fixed column, and a row that crosses a year runs to three lines.
+ * In a timeline the run of dates is itself what is read, so the column keeps the smallest width that avoids wrapping a date (60px) and what has to be given up is taken from the gap and the dot column.
+ */
+@media (max-width: 600px) {
+  .timeline {
+    --tl-pad: 12px;
+    --tl-date-w: 60px;
+    --tl-gap: 6px;
+    --tl-dot-w: 18px;
+  }
+  /* Make the headline a block so it can carry vertical padding. min-height has no effect on an inline element, and a one-line headline would stay at 21px. */
+  .timeline .t-title { display: block; padding: 4px 0; }
+}
+
+/* Forms (editor, settings) */
+.form-row { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.form-row:last-child { border-bottom: none; }
+.form-row > label.lbl {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-strong);
+  margin-bottom: 6px;
+}
+.form-row .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.form-row .cols { display: flex; gap: 12px; flex-wrap: wrap; }
+.form-row .cols > * { flex: 1; min-width: 160px; }
+
+input[type="text"], input[type="datetime-local"], select, textarea {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--nav-bg); }
+textarea { resize: vertical; line-height: 1.7; }
+textarea.md {
+  min-height: 300px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+}
+
+/*
+ * Raise the type in input fields to 16px. iOS Safari zooms the page the moment focus moves to a field below 16px, and the zoom never comes back.
+ * Once zoomed, horizontal scrolling appears and every screen from then on runs sideways. This is behind most of the sense that the viewport is somehow off at narrow widths; it is not a layout problem.
+ * The body input (textarea.md) goes up for the same reason. Monospace at 13px is too small to write with a finger to begin with.
+ */
+@media (max-width: 600px) {
+  input[type="text"], input[type="datetime-local"], select, textarea { font-size: 16px; }
+  textarea.md { font-size: 14px; min-height: 240px; }
+  .form-row { padding: 12px; }
+  .form-row .cols { gap: 10px; }
+  /* min-width: 160px cannot fit two side by side within 296px, so they stack one at a time regardless. Stating the stacking explicitly avoids a half-hearted gap. */
+  .form-row .cols > * { flex-basis: 100%; min-width: 0; }
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  /* Height comes from min-height. Fixing it with height makes a Japanese label break onto two lines inside the box when squeezed, putting the lower half outside it. */
+  min-height: 34px;
+  padding: 4px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+}
+.btn:hover { text-decoration: none; background: var(--chip-bg); }
+.btn.primary { background: var(--nav-bg); border-color: var(--nav-bg); color: #fff; }
+.btn.primary:hover { background: var(--nav-bg-hover); }
+.btn.danger { color: var(--breaking); border-color: var(--breaking); }
+.btn.danger:hover { background: var(--warn-bg); }
+
+@media (max-width: 600px) {
+  .btn { min-height: var(--tap); }
+}
+
+.radio-set { display: flex; flex-direction: column; gap: 8px; }
+.radio-set label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.radio-set .note { font-size: 11px; color: var(--muted); }
+
+.form-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 14px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.form-actions .spacer { flex: 1; }
+
+/* Editor ordering (narrow widths).
+   Desktop is two columns of body | publishing settings, with the settings to the right of the body and always in view. Folding the columns at narrow widths drops that whole right column below the body. The body input is at least 240px tall and five cards follow it, so neither the category (mandatory) nor publish is met until the writing is done and a long scroll away.
+
+   So the order is rearranged to headline -> publishing settings -> body -> publish. The mandatory fields are in view before writing starts, and publish waits at the end of it.
+   .main and .side become display: contents so the cards are lifted to direct items and then ordered with order. There is no other way to change the order alone while keeping the two columns (order works only within one parent, and the cards are split across .main and .side).
+   order goes in steps of 10, so slipping in one card does not mean renumbering every one of them. */
+@media (max-width: 600px) {
+  .editor-layout { display: flex; flex-direction: column; }
+  .editor-layout > .main, .editor-layout > .side { display: contents; }
+  .editor-layout .ed-head { order: 10; }
+  .editor-layout .ed-publishing { order: 20; }
+  .editor-layout .ed-visibility { order: 30; }
+  .editor-layout .ed-cover { order: 40; }
+  .editor-layout .ed-promo { order: 50; }
+  .editor-layout .ed-body { order: 60; }
+  .editor-layout .ed-publish { order: 70; }
+  /* The publish controls do not fit on one row (save draft, send to review and publish come to about 282px minimum). Squeezing them breaks the labels, so they wrap and all three get width. */
+  .editor-layout .form-actions { flex-wrap: wrap; }
+  .editor-layout .form-actions .btn { flex: 1 1 auto; }
+  .editor-layout .form-actions .spacer { display: none; }
+}
+
+/* Image ingest and upload */
+.dropzone {
+  border: 2px dashed var(--line-strong);
+  border-radius: 6px;
+  padding: 18px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.dropzone b { color: var(--ink-strong); display: block; margin-bottom: 4px; }
+
+/* Notices: ingest failure, a sensitive cover image, Discord URLs expiring, and the like. */
+.notice {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  color: var(--warn-ink);
+  margin-top: 10px;
+}
+.notice .ic { flex: none; }
+.notice b { color: var(--ink-strong); }
+.notice.info {
+  background: var(--chip-bg);
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
+/*
+ * The box that holds a table with many columns.
+ * The API key listing has 5 columns (name, key, scope, last used, actions) and the admin screen's taxonomy listing has 3, and neither can give one up.
+ * A scope (`articles:write:any`) and a Discord role ID (a 19-digit number) are each a single word that cannot break mid-way, so they do not shrink at narrow widths either. Placed without a box, the table's minimum width becomes the page's width and the whole UI, articles and settings alike, runs sideways.
+ * Confined to the box, only the table swings sideways.
+ */
+.table-scroll { overflow-x: auto; }
+
+/* API key listing */
+.keys { width: 100%; border-collapse: collapse; font-size: 13px; }
+.keys th, .keys td {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 16px;
+  text-align: left;
+}
+.keys th { font-size: 11px; color: var(--muted); font-weight: 700; }
+
+/*
+ * Inside the box the table takes its content width (left at width: 100% it tries to shrink to the box and the columns that cannot shrink crush each other).
+ * The padding tightens with it. 5 columns x 16px on each side is 160px of padding alone, and every pixel of it becomes horizontal scrolling distance.
+ */
+@media (max-width: 900px) {
+  .table-scroll .keys { width: max-content; min-width: 100%; }
+  .table-scroll .keys th, .table-scroll .keys td { padding: 10px 12px; }
+}
+.keys .prefix {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  color: var(--muted);
+}
+/* Scope display. Used outside the key listing too (in notices and the like), so it is not confined to .keys. */
+.scope {
+  display: inline-block;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--chip-bg);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 1px 6px;
+  margin: 2px 4px 2px 0;
+}
+/* A scope only an admin can issue, made distinguishable from an ordinary scope. */
+.scope.admin { color: var(--vis-restricted); border-color: currentColor; background: none; }
+
+.key-reveal {
+  margin: 0 16px 16px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--vis-public);
+  border-radius: var(--radius);
+}
+.key-reveal .head { font-size: 12px; font-weight: 700; color: var(--vis-public); margin-bottom: 6px; }
+.key-reveal .val {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+  color: var(--ink-strong);
+  word-break: break-all;
+}
+.key-reveal .note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+/* Admin screen (tabs, taxonomy table, role picker) */
+
+/* Tabs. Settings and taxonomy (categories / tags / publishers) are switched within one screen. The current location is marked by an underline and a darker colour. */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  border-bottom: 1px solid var(--line-strong);
+  margin-bottom: 14px;
+}
+.tabs a {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tabs a:hover { text-decoration: none; color: var(--ink); }
+.tabs a.active { color: var(--nav-bg-active); border-bottom-color: var(--nav-bg-active); }
+
+@media (max-width: 600px) {
+  .tabs a { display: inline-flex; align-items: center; min-height: var(--tap); padding: 0 12px; }
+}
+
+/* The input field of a changed setting. Shows that it is what will be saved, before save is pressed. */
+.field-changed { border-color: var(--nav-bg) !important; background: var(--accent-bg); }
+.form-row.changed > label.lbl::after {
+  content: "変更あり";
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--nav-bg-active);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-line);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+/* Role picker. Instead of typing an ID directly, the roles the bot imported are picked by name and colour. */
+.rolepick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.rolepick.single { max-height: none; }
+.rolepick label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.rolepick label.orphan { color: var(--muted); }
+.rolepick input { width: auto; }
+.role-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  flex: none;
+}
+.role-admin {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--vis-restricted);
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.rolepick-empty { font-size: 12px; color: var(--muted); }
+.rolepick-raw { margin-top: 8px; }
+
+/*
+ * The role picker is already a box that scrolls vertically inside itself (max-height: 220px), and at narrow widths that doubles up with the page's own scrolling until a finger cannot tell which one it is moving.
+ * The height limit loosens and the options themselves get a size a finger can press. Dozens of roles line up, so they stack in one column (flowing them horizontally makes a role with a long name unreadable).
+ */
+@media (max-width: 600px) {
+  .rolepick { max-height: 320px; flex-direction: column; flex-wrap: nowrap; gap: 0; }
+  .rolepick label { min-height: var(--tap); padding: 4px; }
+}
+
+/* The editing area opened from a row of the taxonomy listing. Existing .form-row items stack vertically. */
+.tax-edit {
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  margin: 4px 0 10px;
+}
+.tax-edit .form-actions { border-radius: 0 0 var(--radius) var(--radius); }
+.tax-name { display: flex; align-items: center; gap: 8px; }
+.tax-slug { font-size: 11px; color: var(--muted); font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+
+/* Footer */
+.site-footer {
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+}
+.site-footer .container { padding-top: 24px; padding-bottom: 32px; }
+.site-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+.site-footer nav a { color: var(--ink); }
+.site-footer .copy { font-size: 12px; color: var(--muted); }
+
+/* Seven bare 13px links line up with an 8px gap. A finger cannot aim at them, so each takes its own row to make a tap target. */
+@media (max-width: 600px) {
+  .site-footer nav { gap: 0; flex-direction: column; margin-bottom: 10px; }
+  .site-footer nav a {
+    display: flex;
+    align-items: center;
+    min-height: var(--tap);
+    border-bottom: 1px solid var(--line);
+  }
+  .site-footer .container { padding-top: 12px; padding-bottom: 24px; }
+}
+
+/* Thumbnail and avatar placeholders (so the layout can be checked with no images wired up) */
+.cover, .r-thumb, .figure, .flag { background: var(--ph-bg); }
+.ph { background-size: cover; background-position: center; }
+.g1 { background: linear-gradient(135deg, #5b8def, #7f53ac); }
+.g2 { background: linear-gradient(135deg, #f7971e, #ffd200); }
+.g3 { background: linear-gradient(135deg, #11998e, #38ef7d); }
+.g4 { background: linear-gradient(135deg, #ee0979, #ff6a00); }
+.g5 { background: linear-gradient(135deg, #2193b0, #6dd5ed); }
+.g6 { background: linear-gradient(135deg, #cc2b5e, #753a88); }
+.g7 { background: linear-gradient(135deg, #334d50, #cbcaa5); }
+.g8 { background: linear-gradient(135deg, #42275a, #734b6d); }
+.a1 { background: #5865f2; }
+.a2 { background: #2b8a3e; }
+.a3 { background: #e8590c; }
+.a4 { background: #1971c2; }
+.a5 { background: #c2255c; }
+/* Publisher logo and flag placeholders */
+.p1 { background: #1d4ed8; }
+.p2 { background: #b91c1c; }
+.p3 { background: #047857; }
+.p4 { background: #7c3aed; }
+.f-eng { background: linear-gradient(180deg, #fff 0 33%, #cf142b 33% 66%, #00247d 66%); }
+.f-jpn { background: radial-gradient(circle at 50% 50%, #bc002d 0 30%, #fff 30%); }
+.f-ned { background: linear-gradient(180deg, #ae1c28 0 33%, #fff 33% 66%, #21468b 66%); }
+.f-yar { background: linear-gradient(135deg, #f59e0b, #7c3aed); }
+
+/* Ad slot sizes (narrow widths).
+   The recommended sizes (ad_slots' recommended_width / recommended_height) assume the desktop slot and cannot be used as-is at narrow widths.
+   Once folded, the sidebar slot widens from 300px to the full content width, so a height left at 250px stretches out. */
+@media (max-width: 600px) {
+  .adslot.header { margin-top: 12px; }
+  .adslot.header .creative { height: 60px; }
+  .adslot.article-inline { margin: 20px 0; }
+  .adslot.sidebar .creative { height: 200px; }
+}

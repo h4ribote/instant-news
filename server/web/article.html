@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  The article page renderer replaces this placeholder with the og meta tags and a <title>. Move it or misspell it and the og tags stop being emitted.
+  Injection happens only for public + published articles; nothing is injected for anything else, so unpublished and limited-visibility content never leaks to crawlers.
+  The <title> below is the fallback for that case. An injected <title> lands here, ahead of the fallback, so crawlers and browsers take the injected one.
+  For an article the reader can actually view, JavaScript puts the title back into document.title after load.
+-->
+<!-- og:meta -->
+<title>instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="container">
+    <span class="promo">Discord のメンバーシップとロールに基づくニュースプラットフォームです</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord の報道社連合</span>
+    </a>
+    <!-- Search is handled by the home page listing: it reads /?q= and queries /api/search. A plain GET form, so submitting it still navigates to search when JavaScript does not run. -->
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" placeholder="記事・タグ・報道社を検索" aria-label="記事を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <div class="actions" data-actions>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<!-- js/chrome.js adds the categories (the article's primary classification) from GET /api/categories in position order, ahead of the spacer. The category set differs per deployment, so not one of them is written into this HTML. -->
+<nav class="globalnav">
+  <div class="container" data-globalnav>
+    <a href="/">トップ</a>
+    <span class="spacer"></span>
+  </div>
+</nav>
+
+<main class="container layout">
+  <div class="main">
+    <article class="card article" id="article">
+      <p class="lede">記事を読み込んでいます…</p>
+    </article>
+  </div>
+  <aside class="side" id="side"></aside>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="/#articles">新着記事</a>
+      <a href="/#publisher-ranking">報道社ランキング</a>
+      <a href="/#tags">タグ一覧</a>
+      <a href="/#series">連載</a>
+      <a href="/editor">記事を書く</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">このサイトは Discord サーバーのメンバー・ロールに基づいて閲覧範囲を制御しています。所属報道社はサーバー内のロールで割り当てられます。</div>
+  </div>
+</footer>
+
+<script type="module">
+import { ApiError, get, escapeHtml, formatDateTime, articleUrl, qs, renderAdSlot, mediaVariant } from '/static/js/api.js';
+import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, cssUrlRaw, errorMessage } from '/static/js/chrome.js';
+
+/* Presentation helpers */
+
+const STATUS_LABELS = { draft: '下書き', in_review: 'レビュー中', scheduled: '予約公開', published: '公開済み', archived: 'アーカイブ' };
+const VISIBILITY_LABELS = { public: '全体公開', members: 'メンバー限定', restricted: 'ロール限定' };
+const STANCE_LABELS = { independent: '独立系', state: '国営' };
+
+/**
+ * A user's display name, for the places that must show one. The shared displayName returns an empty string when there is no name, but in the article byline, the revision's editor line and the writer card, an empty string does not read as "someone with no name" — it reads as if the whole area had vanished.
+ * Anyone not in `users` (a user who left the guild, another bot, a webhook) comes back with username and global_name both null, so this always emits something.
+ */
+function userLabel(user) {
+  return displayName(user) || '不明';
+}
+
+/** The visibility badge. Drawn as an outline only, to keep it apart from the filled sponsored-disclosure and breaking-news badges. */
+function visibilityBadgeHtml(visibility) {
+  const label = VISIBILITY_LABELS[visibility] || visibility;
+  return `<span class="badge vis-${escapeHtml(visibility)}">${escapeHtml(label)}</span>`;
+}
+
+/* The article itself */
+
+const slug = decodeURIComponent((location.pathname.split('/').filter(Boolean).pop() || ''));
+
+/**
+ * Draws the net of the up/down votes. Colour separates 0 as neutral, positive as leaning up-vote, negative as leaning down-vote.
+ * The sign is spelled out so that a reader cannot misread -3 and 3 for each other where the two sit side by side.
+ */
+function scoreHtml(score) {
+  const n = Number(score) || 0;
+  const cls = n > 0 ? 'up' : (n < 0 ? 'down' : 'zero');
+  const sign = n > 0 ? '▲' : (n < 0 ? '▼' : '±');
+  return `<b class="score ${cls}">${escapeHtml(sign)}${escapeHtml(Math.abs(n))}</b>`;
+}
+
+/**
+ * One comment.
+ * The body arrives as Discord's raw markup, so it is always escaped before insertion; only newlines are honoured, through CSS white-space.
+ * Discord's markup is deliberately not interpreted here: interpreting it would mean carrying a second implementation that drifts from how Discord itself renders the same text.
+ */
+function commentHtml(c) {
+  const author = c.author || {};
+  const name = author.global_name || author.username;
+  // Names cannot be resolved for anyone not in `users` (a user who left the guild, another bot); the comment itself is still shown.
+  const shown = name ? escapeHtml(name) : '不明な利用者';
+  const edited = c.edited_at ? ' <span class="c-edited">(編集済み)</span>' : '';
+  return `<article class="c-item">${avatarHtml(author)}<div class="c-body"><div class="c-head"><span class="c-name">${shown}</span><time datetime="${escapeHtml(c.posted_at)}">${escapeHtml(formatDateTime(c.posted_at))}</time>${edited}</div><div class="c-text">${escapeHtml(c.body)}</div><div class="c-foot">${scoreHtml(c.score)}<span class="c-votes">賛成 ${escapeHtml(c.up_count)} ・ 反対 ${escapeHtml(c.down_count)}</span></div></div></article>`;
+}
+
+/** Loads and draws the comments. If the article is readable so are its comments — visibility is the article's. */
+async function loadComments(slug, page, appending) {
+  const list = document.getElementById('comment-list');
+  const more = document.getElementById('comment-more');
+  if (!list) return;
+  let data;
+  try {
+    data = await get(`/api/articles/${encodeURIComponent(slug)}/comments${qs({ page })}`);
+  } catch (e) {
+    list.innerHTML = '<p class="c-empty">コメントを読み込めませんでした。</p>';
+    return;
+  }
+  const items = Array.isArray(data.items) ? data.items : [];
+  const html = items.map(commentHtml).join('');
+  if (appending) list.insertAdjacentHTML('beforeend', html);
+  // On an article with no comments yet, unless we point at where comments can be written the reader cannot tell that this is a read-only mirror; the CTA below supplies the entry point for writing.
+  else list.innerHTML = html || `<p class="c-empty">まだコメントはありません。${data.thread_url ? 'Discord のスレッドが最初のコメントを待っています。' : ''}</p>`;
+
+  const shown = list.querySelectorAll('.c-item').length;
+  if (more) {
+    const cta = data.thread_url
+      ? `<a class="btn-discord" href="${escapeHtml(data.thread_url)}" target="_blank" rel="noopener noreferrer">Discord でコメントする</a>`
+      : '';
+    const rest = data.total - shown;
+    const moreBtn = rest > 0 ? `<button type="button" id="c-more" data-page="${escapeHtml(page + 1)}">残り ${escapeHtml(rest)} 件を読む</button>` : '';
+    more.innerHTML = `${moreBtn}${cta}`;
+  }
+}
+
+function articleHtml(a, revisions) {
+  const parts = [];
+
+  const crumbs = ['<a href="/">トップ</a>', `<a href="/categories/${encodeURIComponent(a.category.slug)}">${escapeHtml(a.category.name)}</a>`];
+  // A series has no page of its own, so the breadcrumb shows it as text only; the other articles in the series are reachable from the sidebar.
+  if (a.series) crumbs.push(`連載「${escapeHtml(a.series.title)}」`);
+  crumbs.push(escapeHtml(a.title));
+  parts.push(`<div class="breadcrumb">${crumbs.join('<span>›</span>')}</div>`);
+
+  // The publisher's brand goes large at the head of the article. An article carries a dual byline of publisher × reporter, publisher primary and reporter secondary. The byline is frozen at publication, so a reporter's later transfer never moves this display on past articles.
+  if (a.publisher) {
+    const p = a.publisher;
+    const label = p.stance === 'state' ? '配信 ・ 国営メディア' : '配信';
+    const state = p.stance === 'state' ? `<span class="state">${escapeHtml(STANCE_LABELS.state)}</span>` : '';
+    parts.push(`<div class="pub-head">${pubLogoHtml(p)}<div><div class="label">${escapeHtml(label)}</div><span class="publisher"><a class="name" href="/publishers/${encodeURIComponent(p.slug)}">${escapeHtml(p.name)}</a>${state}</span></div><a class="btn follow" href="/publishers/${encodeURIComponent(p.slug)}">この社の記事</a></div>`);
+  }
+
+  parts.push(`<h1>${escapeHtml(a.title)}</h1>`);
+  if (a.excerpt) parts.push(`<p class="lede">${escapeHtml(a.excerpt)}</p>`);
+
+  // The byline. byline_mode='publisher' articles omit the reporter's name, since a personal name reads oddly on something like a market-price table. author_id is retained regardless, so an audit can still trace it.
+  const byline = [];
+  if (a.byline_mode !== 'publisher') {
+    byline.push(`<span class="author">${avatarHtml(a.author)}${escapeHtml(userLabel(a.author))}</span>`);
+  }
+  byline.push(visibilityBadgeHtml(a.visibility));
+  if (a.is_breaking) byline.push('<span class="badge breaking">速報</span>');
+  // The sponsored-article disclosure gets its own bar too, but a filled badge also sits on the byline row. It is styled apart from the outline visibility badge, so the disclosure is not buried among the visibility badges.
+  if (a.is_sponsored) byline.push('<span class="badge sponsored">広告</span>');
+  if (a.published_at) {
+    byline.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))} 公開</time>`);
+  }
+  if (a.status !== 'published') {
+    const label = STATUS_LABELS[a.status] || a.status;
+    const at = a.status === 'scheduled' && a.scheduled_at ? `(${escapeHtml(formatDateTime(a.scheduled_at))})` : '';
+    byline.push(`<span>${escapeHtml(label)}${at}</span>`);
+  }
+  if (revisions.length) byline.push(`<span>改版 ${escapeHtml(revisions[revisions.length - 1].revision_number)}</span>`);
+  parts.push(`<div class="byline">${byline.join('')}</div>`);
+
+  // Corrections are stated at the head of the body, separately from the revision line at the foot. Readers being able to detect a quiet rewrite is what trust rests on in a place where many publishers gather. A plain update and a correction are distinguished here.
+  const corrections = a.corrections || [];
+  if (corrections.length) {
+    const items = corrections.map((c) => {
+      const note = c.note ? escapeHtml(c.note) : 'この記事の記述を訂正しました。';
+      const diff = c.revision_number > 1 ? ` ・ <a href="#revisions" data-diff="${escapeHtml(c.revision_number)}">訂正前との差分を表示</a>` : '';
+      return `<div>${note}(${escapeHtml(formatDateTime(c.created_at))})${diff}</div>`;
+    }).join('');
+    parts.push(`<div class="correction"><div class="head">この記事は訂正されました</div>${items}</div>`);
+  }
+
+  // The sponsored-article disclosure. It only becomes a disclosure once the advertiser's name is shown as well, so both are always drawn. This bar lives outside the body HTML, where the writer's markup cannot remove it.
+  if (a.is_sponsored) {
+    parts.push(`<div class="sponsor-disclosure"><span class="badge sponsored">広告</span><div>この記事は <b>${escapeHtml(a.sponsor_name || '広告主')}</b> の提供による記事広告です。</div></div>`);
+  }
+
+  if (a.series) {
+    const pos = a.series_position ? `<div class="pos">第 ${escapeHtml(a.series_position)} 回</div>` : '';
+    parts.push(`<div class="series-banner"><div class="cover ph" id="series-cover"></div><div><div class="label">連載</div><div class="name">${escapeHtml(a.series.title)}</div>${pos}</div></div>`);
+  }
+
+  // The body. body_html is rendered by the server and sanitized with nh3, so dangerous tags, attributes and schemes are already gone; it is therefore inserted as raw HTML. Escaping it again here would print the article's headings and tables as literal text.
+  parts.push(`<div class="prose">${a.body_html || ''}</div>`);
+
+  // The in-article ad slot. The boundary that keeps it from being read as body text, and the "Sponsored" label, are drawn by .adslot in style.css.
+  parts.push('<div class="adslot article-inline" id="ad-inline"><div class="creative"></div></div>');
+
+  const tags = a.tags || [];
+  if (tags.length) {
+    const chips = tags.map((t) => {
+      const icon = tagIconHtml(t);
+      return `<a href="/tags/${encodeURIComponent(t.slug)}">${icon}# ${escapeHtml(t.name)}</a>`;
+    }).join('');
+    parts.push(`<div class="tags">${chips}</div>`);
+  }
+
+  // Discord up/down votes and comments. The real votes and comments live on Discord, and both counts are tallied per notification post, so an article notified to several channels shows the sum across all of its notification posts.
+  const posts = Array.isArray(a.discord_posts) ? a.discord_posts : [];
+  const thread = posts.find((p) => p && p.thread_url);
+  // The entry point to the thread appears only when the article response carries a reference to a notification post. A Discord thread URL needs the guild ID and the frontend has no way to know it, so the URL arrives pre-built from the server.
+  const cta = thread ? `<a class="btn-discord cta" href="${escapeHtml(thread.thread_url)}" target="_blank" rel="noopener noreferrer">スレッドを開く</a>` : '';
+  const channels = posts.length
+    ? `${escapeHtml(posts.length)} チャンネルへ通知されています。点数とコメント数は全通知の合計です。`
+    : '点数とコメント数は、この記事の通知メッセージ全ての合計です。';
+  parts.push(`<div class="discord-box"><div class="head">🎮 この記事への投票・コメントは Discord で</div><div class="stats"><div class="stat">${scoreHtml(a.score)}<span>賛成 ${escapeHtml(a.up_count)} ・ 反対 ${escapeHtml(a.down_count)}</span></div><div class="stat"><b>${escapeHtml(a.comment_count)}</b><span>💬 コメント</span></div>${cta}</div><div class="channels">${channels}</div></div>`);
+
+  parts.push('<section class="comments" id="comments"><h2>コメント</h2><div id="comment-list" class="c-list">読み込み中…</div><div id="comment-more"></div></section>');
+
+  if (revisions.length) {
+    const last = revisions[revisions.length - 1];
+    parts.push(`<div class="revision" id="revisions">最終更新: ${escapeHtml(formatDateTime(a.updated_at))}(改版 ${escapeHtml(last.revision_number)}) ・ <a href="#revisions" id="rev-toggle">改版履歴を見る</a></div><div id="rev-list" style="display:none"></div><div id="rev-diff" style="display:none"></div>`);
+  } else {
+    parts.push(`<div class="revision">最終更新: ${escapeHtml(formatDateTime(a.updated_at))}</div>`);
+  }
+
+  return parts.join('');
+}
+
+/** The revision history listing. Lays out whose name each revision was written under (editor — the byline author as of that revision, not whoever actually posted it; see RevisionListItem in server/app/schemas.py) and when and what was fixed (note / is_correction). */
+function revisionListHtml(revisions) {
+  const items = revisions.slice().reverse().map((r) => {
+    const bits = [`改版 ${escapeHtml(r.revision_number)}`, escapeHtml(formatDateTime(r.created_at)), escapeHtml(userLabel(r.editor))];
+    if (r.is_correction) bits.push('訂正');
+    if (r.note) bits.push(escapeHtml(r.note));
+    if (r.revision_number > 1) bits.push(`<a href="#revisions" data-diff="${escapeHtml(r.revision_number)}">差分</a>`);
+    return `<li>${bits.join(' ・ ')}</li>`;
+  }).join('');
+  return `<div class="revision"><ul>${items}</ul></div>`;
+}
+
+/** Shows the diff against the immediately preceding revision. It opens straight from the article page so that a reader can check for themselves what a correction rewrote. */
+async function showDiff(revisionNumber) {
+  const box = document.getElementById('rev-diff');
+  if (!box) return;
+  box.style.display = '';
+  box.innerHTML = '<div class="revision">差分を読み込んでいます…</div>';
+  try {
+    const d = await get(`/api/articles/${encodeURIComponent(slug)}/revisions/${encodeURIComponent(String(revisionNumber))}/diff`);
+    const head = d.previous_revision_number
+      ? `改版 ${escapeHtml(d.previous_revision_number)} → 改版 ${escapeHtml(d.revision_number)} の差分`
+      : `改版 ${escapeHtml(d.revision_number)}(初版)`;
+    const body = (d.diff || []).join('\n');
+    box.innerHTML = `<div class="revision">${head}</div><div class="prose"><pre><code>${escapeHtml(body)}</code></pre></div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="revision">差分を取得できませんでした: ${escapeHtml(errorMessage(e))}</div>`;
+  }
+  // Opened from the correction banner, the diff renders at the foot of the article, so carry the reader there — opening it must never look as though nothing happened.
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+/* Sidebar */
+
+async function renderSide(a) {
+  const cards = [];
+
+  // The publisher. The track record and the reporter count come from the publisher page's response.
+  if (a.publisher) {
+    let detail = null;
+    try {
+      detail = await get(`/api/publishers/${encodeURIComponent(a.publisher.slug)}`);
+    } catch (e) {
+      detail = null;
+    }
+    const bits = [STANCE_LABELS[a.publisher.stance] || a.publisher.stance];
+    if (detail && detail.stats) bits.push(`記事 ${detail.stats.article_count} 本`);
+    if (detail && detail.members) bits.push(`記者 ${detail.members.length} 人`);
+    cards.push(`<section class="card"><div class="section-head"><h2>報道社</h2></div><div style="display:flex; gap:12px; align-items:center; padding:14px 16px;">${pubLogoHtml(a.publisher)}<div><a class="s-title" href="/publishers/${encodeURIComponent(a.publisher.slug)}">${escapeHtml(a.publisher.name)}</a><div class="s-count">${escapeHtml(bits.join(' ・ '))}</div></div></div></section>`);
+  }
+
+  // The writer. Omitted where the byline is the publisher alone: on an article that deliberately dropped the reporter, the reporter's name would otherwise surface from the side.
+  if (a.byline_mode !== 'publisher') {
+    const sub = a.publisher ? escapeHtml(a.publisher.name) : '';
+    cards.push(`<section class="card"><div class="section-head"><h2>執筆者</h2></div><div style="display:flex; gap:12px; align-items:center; padding:14px 16px;">${avatarHtml(a.author)}<div><div class="s-title">${escapeHtml(userLabel(a.author))}</div><div class="s-count">${sub}</div></div></div></section>`);
+  }
+
+  // Articles in the same series. A series has no page of its own, so moving within a series is handled here.
+  if (a.series) {
+    // The series cover image is not part of the article response, so fetch the series and fill it into the banner at the head of the article afterwards.
+    try {
+      const series = await get(`/api/series/${encodeURIComponent(a.series.slug)}`);
+      const cover = document.getElementById('series-cover');
+      if (cover && series && series.cover_image_url) cover.style.backgroundImage = cssUrlRaw(mediaVariant(series.cover_image_url, '400w'));
+    } catch (e) {
+      // The banner still stands as a grey box when the cover cannot be fetched.
+    }
+    let siblings = [];
+    try {
+      siblings = listOf(await get('/api/articles' + qs({ series: a.series.slug, per_page: 20 })));
+    } catch (e) {
+      siblings = [];
+    }
+    if (siblings.length) {
+      siblings.sort((x, y) => (x.series_position || 0) - (y.series_position || 0));
+      const items = siblings.map((s) => {
+        const badge = s.series_position ? escapeHtml(s.series_position) : '−';
+        const when = s.published_at ? escapeHtml(formatDateTime(s.published_at)) : escapeHtml(STATUS_LABELS[s.status] || s.status);
+        return `<li><span class="rank-badge">${badge}</span><div><a class="r-title" href="${articleUrl(s.slug)}">${escapeHtml(s.title)}</a><div class="r-meta">${when}</div></div></li>`;
+      }).join('');
+      cards.push(`<section class="card"><div class="section-head"><h2>連載「${escapeHtml(a.series.title)}」</h2></div><ol class="ranking">${items}</ol></section>`);
+    }
+  }
+
+  cards.push('<div class="adslot sidebar card" id="ad-sidebar"><div class="creative"></div></div>');
+
+  // Popular tags. The count is shown only when the tag listing returns article_count; without it, neither an ordering nor a count is claimed.
+  try {
+    const tags = listOf(await get('/api/tags'));
+    if (tags.length) {
+      const hasCount = tags.some((t) => typeof t.article_count === 'number');
+      const sorted = hasCount ? tags.slice().sort((x, y) => (y.article_count || 0) - (x.article_count || 0)) : tags;
+      const chips = sorted.slice(0, 12).map((t) => {
+        const icon = tagIconHtml(t);
+        const count = typeof t.article_count === 'number' ? ` <b>${escapeHtml(t.article_count)}</b>` : '';
+        return `<a href="/tags/${encodeURIComponent(t.slug)}">${icon}#${escapeHtml(t.name)}${count}</a>`;
+      }).join('');
+      cards.push(`<section class="card"><div class="section-head"><h2>${hasCount ? '人気のタグ' : 'タグ'}</h2></div><div class="tagcloud">${chips}</div></section>`);
+    }
+  } catch (e) {
+    // The article still renders when the tags cannot be fetched.
+  }
+
+  // The publisher ranking. Votes and comments are both delegated to Discord, so this needs nothing beyond a tally over the mirror.
+  try {
+    const ranking = listOf(await get('/api/rankings/publishers' + qs({ days: 7, limit: 5 })));
+    if (ranking.length) {
+      const items = ranking.map((r, i) => {
+        const p = r.publisher;
+        const meta = `記事 ${escapeHtml(r.article_count)} 本 ・ ▲ ${escapeHtml(r.up_count)} ・ 💬 ${escapeHtml(r.comment_count)}`;
+        return `<li><span class="rank-badge">${i + 1}</span>${pubLogoHtml(p)}<div><a class="p-name" href="/publishers/${encodeURIComponent(p.slug)}">${escapeHtml(p.name)}</a><div class="p-meta">${meta}</div></div><span class="p-score">${escapeHtml(r.score)}</span></li>`;
+      }).join('');
+      cards.push(`<section class="card"><div class="section-head"><h2>報道社ランキング</h2><span class="more">過去 7 日</span></div><ol class="pub-ranking">${items}</ol></section>`);
+    }
+  } catch (e) {
+    // The article still renders when the ranking cannot be fetched.
+  }
+
+  document.getElementById('side').innerHTML = cards.join('');
+  await renderAdSlot(document.getElementById('ad-sidebar'), 'sidebar');
+}
+
+/* Loading */
+
+function renderError(e) {
+  const missing = e instanceof ApiError && (e.status === 401 || e.status === 404);
+  const back = location.pathname + location.search;
+  // An article the reader cannot view returns 404, so that its existence is never revealed. The hint offers that as one possibility without ever saying whether this article exists.
+  const hint = missing
+    ? `<p class="lede">URL が誤っているか、この記事が閲覧できる範囲にない可能性があります。</p><a class="btn-discord" href="/auth/login${qs({ redirect_to: back })}">🎮 Discord でログイン</a>`
+    : `<p class="lede">${escapeHtml(errorMessage(e))}</p>`;
+  document.getElementById('article').innerHTML = `<h1>記事を表示できません</h1>${hint}`;
+}
+
+async function main() {
+  let article = null;
+  try {
+    article = await get(`/api/articles/${encodeURIComponent(slug)}`);
+  } catch (e) {
+    renderError(e);
+    // Still render the chrome even when the article cannot be shown: without the nav the reader loses every entry point out of this page.
+    await mountChrome(undefined);
+    return;
+  }
+
+  document.title = `${article.title} | instant-news`;
+
+  // The revision history feeds the revision count, the last-updated line and the correction diff. The article itself still renders when the history cannot be fetched.
+  let revisions = [];
+  try {
+    revisions = listOf(await get(`/api/articles/${encodeURIComponent(slug)}/revisions`));
+  } catch (e) {
+    revisions = [];
+  }
+  revisions.sort((x, y) => x.revision_number - y.revision_number);
+
+  const root = document.getElementById('article');
+  root.innerHTML = articleHtml(article, revisions);
+
+  root.addEventListener('click', (ev) => {
+    const diffLink = ev.target.closest('[data-diff]');
+    if (diffLink) {
+      ev.preventDefault();
+      showDiff(diffLink.dataset.diff);
+      return;
+    }
+    if (ev.target.closest('#rev-toggle')) {
+      ev.preventDefault();
+      const list = document.getElementById('rev-list');
+      if (!list) return;
+      const opening = list.style.display === 'none';
+      list.style.display = opening ? '' : 'none';
+      if (opening && !list.innerHTML) list.innerHTML = revisionListHtml(revisions);
+    }
+  });
+
+  const more = document.getElementById('comment-more');
+  if (more) {
+    more.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('#c-more');
+      if (!btn) return;
+      await loadComments(slug, Number(btn.dataset.page) || 2, true);
+    });
+  }
+  // Comments are fetched after the article itself: there are many of them and no reason to delay the article appearing.
+  loadComments(slug, 1, false);
+
+  await Promise.all([
+    // Mark this article's section as the current location.
+    mountChrome(undefined, { activeCategory: article.category.slug }),
+    renderSide(article),
+    renderAdSlot(document.getElementById('ad-inline'), 'article_inline'),
+  ]);
+}
+
+main();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,11 @@
+__pycache__/
+*.log
+*.db
+
+local/
+config.yaml
+# DB credentials passed to compose. Secret like config.yaml, and tracking it would ship the committed values to production unchanged.
+.env
+
+.venv/
+venv/

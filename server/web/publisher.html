@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>報道社 | instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="container">
+    <span class="promo">このデプロイは Discord サーバーのニュースプラットフォームです</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord の報道社連合</span>
+    </a>
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" placeholder="記事・タグ・報道社を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <div class="actions" data-actions>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<nav class="globalnav">
+  <div class="container" data-globalnav>
+    <a href="/">トップ</a>
+    <span class="spacer"></span>
+  </div>
+</nav>
+
+<main class="container layout">
+  <div class="main" data-main>
+    <div class="breadcrumb">
+      <a href="/">トップ</a><span>›</span>
+      報道社<span>›</span>
+      <span data-crumb></span>
+    </div>
+
+    <!--
+      Publisher page. The real publisher is a Discord role: joining, leaving and permissions are all handled on the Discord side.
+      A role cannot carry a logo, description or stance, so the publishers table holds those.
+    -->
+    <section class="card">
+      <div class="pub-hero" data-hero></div>
+      <div class="pub-stats" data-stats></div>
+    </section>
+
+    <section class="card" data-members-card hidden>
+      <div class="section-head"><h2>記者</h2></div>
+      <div class="member-list" data-members></div>
+    </section>
+
+    <section class="card" data-articles-card hidden>
+      <div class="section-head">
+        <h2 data-articles-title>記事</h2>
+        <a class="more" href="#" data-more-articles hidden>もっと読む</a>
+      </div>
+      <ul class="articles" data-articles></ul>
+    </section>
+  </div>
+
+  <aside class="side">
+
+    <section class="card" data-ranking-card hidden>
+      <div class="section-head"><h2>報道社ランキング</h2></div>
+      <ol class="pub-ranking" data-ranking></ol>
+    </section>
+
+    <section class="card" data-pubs-card hidden>
+      <div class="section-head"><h2>加盟報道社</h2></div>
+      <div class="member-list" data-pubs></div>
+      <div class="body" style="padding-top:0;">
+        <p style="font-size:12px; color:var(--muted); margin:0;">報道社を立ち上げるには、Discord サーバーの管理者にロールの作成を依頼してください。</p>
+      </div>
+    </section>
+
+    <div class="adslot sidebar card" data-adslot>
+      <div class="creative"></div>
+    </div>
+
+  </aside>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">instant-news — Discord コミュニティのニュースプラットフォーム</div>
+  </div>
+</footer>
+
+<script type="module">
+import { get, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError } from '/static/js/api.js';
+import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml } from '/static/js/chrome.js';
+
+/* This page's route is fixed at /publishers/{slug}, so the target publisher is taken from the URL. */
+const SLUG = decodeURIComponent((location.pathname.match(/\/publishers\/([^/]+)\/?$/) || [])[1] || '');
+
+/* Items per page of a listing. */
+const PER_PAGE = 20;
+
+/* Ranking depth fetched to locate this week's rank. The sidebar draws only the top few, but the rank itself should still be reported for publishers close to unranked. */
+const RANKING_DEPTH = 50;
+
+/* How many publishers the sidebar ranking shows. */
+const RANKING_SHOWN = 5;
+
+/* Tally window for this week's rank, in days. */
+const RANKING_DAYS = 7;
+
+let viewer = null;
+let articlePage = 0;
+
+/** Whether a next page of results exists. When the response carries no pagination info, assume there is one until a page comes back empty. */
+function hasMore(data, items) {
+  if (data && typeof data.has_more === 'boolean') return data.has_more;
+  if (data && Number.isFinite(data.total) && Number.isFinite(data.page) && Number.isFinite(data.per_page)) {
+    return data.page * data.per_page < data.total;
+  }
+  return items.length > 0;
+}
+
+/** Badges attached to an article. The sponsored-article disclosure and breaking news are always rendered: a disclosure is a requirement, not decoration, and must not be dropped even in a listing. Visibility is rendered only when it is not public, since spelling out the default adds no information. */
+function badgesHtml(a) {
+  const out = [];
+  if (a.is_breaking) out.push('<span class="badge breaking">速報</span>');
+  if (a.is_sponsored) {
+    out.push('<span class="badge sponsored">広告</span>');
+    if (a.sponsor_name) out.push(`<span>提供 ${escapeHtml(a.sponsor_name)}</span>`);
+  }
+  if (a.visibility === 'members') out.push('<span class="badge vis-members">メンバー限定</span>');
+  if (a.visibility === 'restricted') out.push('<span class="badge vis-restricted">ロール限定</span>');
+  return out;
+}
+
+/** One row of the article listing. This page lists only this publisher's articles, so the publisher name is not repeated; the reporter, category and tags are shown instead. */
+function articleRowHtml(a) {
+  const meta = [];
+  if (a.category) meta.push(`<a class="cat-chip" href="/categories/${encodeURIComponent(a.category.slug)}">${escapeHtml(a.category.name)}</a>`);
+  for (const t of (a.tags || []).slice(0, 2)) meta.push(`<a class="tag-chip" href="/tags/${encodeURIComponent(t.slug)}">#${escapeHtml(t.name)}</a>`);
+  /* Articles bylined to the publisher name only do not show the reporter: byline_mode switches whether author_id is displayed. */
+  if (a.author && a.byline_mode !== 'publisher') {
+    meta.push(`<span class="author">${avatarHtml(a.author)}${escapeHtml(displayName(a.author))}</span>`);
+  }
+  if (a.comment_count != null) meta.push(`<span class="thread">${escapeHtml(a.comment_count)}</span>`);
+  if (a.score != null) meta.push(`<span class="react">${escapeHtml((a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')) + Math.abs(a.score))}</span>`);
+  meta.push(...badgesHtml(a));
+  if (a.published_at) meta.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))}</time>`);
+
+  return `<li><div class="article-row">` +
+    `<p class="title"><a href="${escapeHtml(articleUrl(a.slug))}">${escapeHtml(a.title)}</a></p>` +
+    `<div class="meta">${meta.join('')}</div>` +
+    `</div></li>`;
+}
+
+/** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as —. */
+function statValue(v) {
+  return v == null ? '—' : escapeHtml(v);
+}
+
+/** Draws the publisher's heading, description and stance. */
+function renderHero(pub) {
+  document.title = `${pub.name} | instant-news`;
+  document.querySelector('[data-crumb]').textContent = pub.name;
+  document.querySelector('[data-articles-title]').textContent = `${pub.name}の記事`;
+
+  /* State media and the like carry their stance next to the publisher name.
+     It is material for readers judging the article's provenance, so it belongs in the heading rather than buried in the profile.
+     The state-run label is only styled inside .publisher, so the heading wraps it in .publisher too. */
+  const state = pub.stance === 'state'
+    ? ' <span class="publisher"><span class="state">国営</span></span>'
+    : '';
+
+  /* Affiliation is decided by a Discord role. A dissolved publisher (its role gone) keeps its past articles, so say so. */
+  const roleName = pub.role && pub.role.name ? pub.role.name : pub.role_name;
+  const note = roleName
+    ? `🎮 所属は Discord の @${escapeHtml(roleName)} ロールで管理されています`
+    : '🎮 この報道社のロールは Discord 上に存在しません。過去の記事の署名は残ります。';
+
+  document.querySelector('[data-hero]').innerHTML =
+    pubLogoHtml(pub) +
+    `<div><h1>${escapeHtml(pub.name)}${state}</h1>` +
+    `<p class="desc">${escapeHtml(pub.description || '')}</p>` +
+    `<span class="role-note">${note}</span></div>`;
+}
+
+/** Track record. The layout is fixed at 4 columns, so all four are always filled. */
+function renderStats(stats, memberCount, rank) {
+  document.querySelector('[data-stats]').innerHTML =
+    `<div><b>${statValue(stats.article_count)}</b><span>記事</span></div>` +
+    `<div><b>${statValue(memberCount)}</b><span>記者</span></div>` +
+    `<div><b>▲ ${statValue(stats.up_count)}</b><span>賛成</span></div>` +
+    `<div><b>${rank}</b><span>今週の順位</span></div>`;
+}
+
+/** Affiliated reporters. A user holding the publisher's role is thereby a reporter; there is nothing else to join. */
+function renderMembers(members) {
+  if (members.length === 0) return;
+  document.querySelector('[data-members]').innerHTML = members.map((m) =>
+    `<span class="m">${avatarHtml(m)}${escapeHtml(displayName(m))}</span>`
+  ).join('');
+  document.querySelector('[data-members-card]').hidden = false;
+}
+
+/** Loads the publisher itself. */
+async function loadPublisher() {
+  let data;
+  try {
+    data = await get('/api/publishers/' + encodeURIComponent(SLUG));
+  } catch (e) {
+    const msg = e instanceof ApiError && e.status === 404
+      ? 'この報道社は存在しません。'
+      : '報道社を読み込めませんでした。時間をおいて再度お試しください。';
+    document.querySelector('[data-main]').innerHTML =
+      `<section class="card"><div class="section-head"><h2>報道社を表示できません</h2></div>` +
+      `<div class="body">${escapeHtml(msg)}</div></section>`;
+    return null;
+  }
+  const pub = data.publisher || data;
+  const members = listOf(data.members, 'members');
+  renderHero(pub);
+  renderMembers(members);
+  return { stats: data.stats || pub, memberCount: members.length };
+}
+
+/** Loads one page of the article listing and appends it to the end. */
+async function loadArticles() {
+  const link = document.querySelector('[data-more-articles]');
+  let data;
+  try {
+    data = await get('/api/articles' + qs({ publisher: SLUG, page: articlePage + 1, per_page: PER_PAGE }));
+  } catch (e) {
+    link.hidden = true;
+    return;
+  }
+  articlePage += 1;
+  const items = listOf(data, 'articles');
+  const card = document.querySelector('[data-articles-card]');
+  const list = document.querySelector('[data-articles]');
+
+  if (items.length === 0 && articlePage === 1) {
+    card.hidden = false;
+    list.outerHTML = '<div class="body">公開された記事はまだありません。</div>';
+    return;
+  }
+  list.insertAdjacentHTML('beforeend', items.map(articleRowHtml).join(''));
+  card.hidden = false;
+  link.hidden = !hasMore(data, items);
+}
+
+/**
+ * Loads the publisher ranking, draws it in the sidebar, and returns this publisher's rank for the week.
+ * The server derives the rank from Discord votes and comments under a per-article rule (documented in docs/api.md).
+ * Only the top entries are drawn; the rank itself is read off a more deeply fetched listing.
+ */
+async function loadRanking() {
+  let rows;
+  try {
+    rows = listOf(await get('/api/rankings/publishers' + qs({ days: RANKING_DAYS, limit: RANKING_DEPTH })), 'publishers');
+  } catch (e) {
+    return '—';
+  }
+  if (rows.length === 0) return '圏外';
+
+  document.querySelector('[data-ranking]').innerHTML = rows.slice(0, RANKING_SHOWN).map((row, i) => {
+    const p = row.publisher || row;
+    return `<li><span class="rank-badge">${i + 1}</span>${pubLogoHtml(p)}` +
+      `<div><a class="p-name" href="/publishers/${encodeURIComponent(p.slug)}">${escapeHtml(p.name)}</a>` +
+      `<div class="p-meta">記事 ${escapeHtml(row.article_count)} ・ 💬 ${escapeHtml(row.comment_count)}</div></div>` +
+      `<span class="p-score">▲ ${escapeHtml(row.up_count)}</span></li>`;
+  }).join('');
+  document.querySelector('[data-ranking-card]').hidden = false;
+
+  const at = rows.findIndex((row) => (row.publisher || row).slug === SLUG);
+  return at < 0 ? '圏外' : `#${at + 1}`;
+}
+
+/** Member publishers. This is the entry point for browsing the publisher listing. */
+async function loadPublishers() {
+  let pubs;
+  try {
+    pubs = listOf(await get('/api/publishers'), 'publishers');
+  } catch (e) {
+    return;
+  }
+  if (pubs.length === 0) return;
+  document.querySelector('[data-pubs]').innerHTML = pubs.map((p) =>
+    `<a class="m" href="/publishers/${encodeURIComponent(p.slug)}">${pubLogoHtml(p)}${escapeHtml(p.name)}</a>`
+  ).join('');
+  document.querySelector('[data-pubs-card]').hidden = false;
+}
+
+/** Wires up the "read more" link. Further pages of the listing are appended in place. */
+function wireMore(selector, loader) {
+  const link = document.querySelector(selector);
+  link.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    link.hidden = true;
+    loader();
+  });
+}
+
+async function main() {
+  try {
+    viewer = await me();
+  } catch (e) {
+    viewer = null;
+  }
+
+  mountChrome(viewer);
+  renderAdSlot(document.querySelector('[data-adslot]'), 'sidebar');
+  wireMore('[data-more-articles]', loadArticles);
+
+  loadPublishers();
+  const loaded = await loadPublisher();
+  if (!loaded) return;
+  loadArticles();
+  renderStats(loaded.stats, loaded.memberCount, await loadRanking());
+}
+
+main();
+</script>
+
+</body>
+</html>

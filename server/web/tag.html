@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>タグ | instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="container">
+    <span class="promo">このデプロイは Discord サーバーのニュースプラットフォームです</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord の報道社連合</span>
+    </a>
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" placeholder="記事・タグ・報道社を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <div class="actions" data-actions>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<nav class="globalnav">
+  <div class="container" data-globalnav>
+    <a href="/">トップ</a>
+    <span class="spacer"></span>
+  </div>
+</nav>
+
+<main class="container layout">
+  <div class="main" data-main>
+    <div class="breadcrumb">
+      <a href="/">トップ</a><span>›</span>
+      タグ<span>›</span>
+      <span data-crumb></span>
+    </div>
+
+    <!--
+      Tag page. Topics such as countries are expressed as tags, so this page doubles as the topic's profile.
+      The description and the icon (which may be a flag) come from tags.description / tags.icon_url.
+    -->
+    <section class="card">
+      <div class="tag-hero" data-hero></div>
+      <div class="pub-stats" data-stats></div>
+    </section>
+
+    <!-- The tag's timeline. Articles filtered by the tag, oldest first, so the topic's history reads as a chronology. -->
+    <section class="card" data-timeline-card hidden>
+      <div class="section-head">
+        <h2>年表</h2>
+        <a class="more" href="#" data-more-timeline hidden>もっと読む</a>
+      </div>
+      <ul class="timeline" data-timeline></ul>
+    </section>
+
+    <section class="card" data-articles-card hidden>
+      <div class="section-head">
+        <h2 data-articles-title>記事</h2>
+        <a class="more" href="#" data-more-articles hidden>もっと読む</a>
+      </div>
+      <ul class="articles" data-articles></ul>
+    </section>
+  </div>
+
+  <aside class="side">
+
+    <section class="card" data-related-card hidden>
+      <div class="section-head"><h2>関連タグ</h2></div>
+      <div class="tagcloud" data-related></div>
+    </section>
+
+    <section class="card" data-pubs-card hidden>
+      <div class="section-head"><h2 data-pubs-title>よく報じる社</h2></div>
+      <ol class="pub-ranking" data-pubs></ol>
+    </section>
+
+    <div class="adslot sidebar card" data-adslot>
+      <div class="creative"></div>
+    </div>
+
+    <section class="card" data-tagcloud-card hidden>
+      <div class="section-head"><h2>タグ一覧</h2></div>
+      <div class="tagcloud" data-tagcloud></div>
+    </section>
+
+  </aside>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">instant-news — Discord コミュニティのニュースプラットフォーム</div>
+  </div>
+</footer>
+
+<script type="module">
+import { api, get, del, me, escapeHtml, formatDateTime, articleUrl, renderAdSlot, qs, ApiError, mediaVariant } from '/static/js/api.js';
+import { mountChrome, cssUrl, listOf, pubLogoHtml, tagIconHtml, loginUrl } from '/static/js/chrome.js';
+
+/* This page's route is fixed at /tags/{slug}, so the target tag is taken from the URL. */
+const SLUG = decodeURIComponent((location.pathname.match(/\/tags\/([^/]+)\/?$/) || [])[1] || '');
+
+/* Items per page of a listing. */
+const PER_PAGE = 20;
+
+/* Number of articles sampled for the sidebar aggregates (related tags, the publishers that report on this tag most). The aggregate is an approximation over a sample of this tag's newest articles, not an exhaustive count over all time. */
+const SAMPLE_SIZE = 100;
+
+/* The logged-in user; null when not logged in. */
+let viewer = null;
+
+/* Whether the viewer subscribes to this tag. A subscription is a per-person DM, a different mechanism from the tag's channel notification. */
+let subscribed = false;
+
+/* Year of the timeline item rendered just before. The year is printed only at the boundary where it changes, so it must be remembered across renders. */
+let timelineYear = null;
+
+let articlePage = 0;
+let timelinePage = 0;
+
+/** Whether a next page of results exists. When the response carries no pagination info, assume there is one until a page comes back empty. */
+function hasMore(data, items) {
+  if (data && typeof data.has_more === 'boolean') return data.has_more;
+  if (data && Number.isFinite(data.total) && Number.isFinite(data.page) && Number.isFinite(data.per_page)) {
+    return data.page * data.per_page < data.total;
+  }
+  return items.length > 0;
+}
+
+/** Badges attached to an article. The sponsored-article disclosure and breaking news are always rendered: a disclosure is a requirement, not decoration, and must not be dropped even in a listing. Visibility is rendered only when it is not public, since spelling out the default adds no information. */
+function badgesHtml(a) {
+  const out = [];
+  if (a.is_breaking) out.push('<span class="badge breaking">速報</span>');
+  if (a.is_sponsored) {
+    out.push('<span class="badge sponsored">広告</span>');
+    if (a.sponsor_name) out.push(`<span>提供 ${escapeHtml(a.sponsor_name)}</span>`);
+  }
+  if (a.visibility === 'members') out.push('<span class="badge vis-members">メンバー限定</span>');
+  if (a.visibility === 'restricted') out.push('<span class="badge vis-restricted">ロール限定</span>');
+  return out;
+}
+
+/** One row of the article listing. On the tag page "which publisher reported it" is the point of interest, so the publisher leads the meta line. */
+function articleRowHtml(a) {
+  const meta = [];
+  const pub = a.publisher;
+  if (pub) {
+    const state = pub.stance === 'state' ? '<span class="state">国営</span>' : '';
+    meta.push(`<a class="publisher" href="/publishers/${encodeURIComponent(pub.slug)}">${pubLogoHtml(pub)}${escapeHtml(pub.name)}${state}</a>`);
+  }
+  if (a.category) meta.push(`<a class="cat-chip" href="/categories/${encodeURIComponent(a.category.slug)}">${escapeHtml(a.category.name)}</a>`);
+  if (a.comment_count != null) meta.push(`<span class="thread">${escapeHtml(a.comment_count)}</span>`);
+  if (a.score != null) meta.push(`<span class="react">${escapeHtml((a.score > 0 ? '▲' : (a.score < 0 ? '▼' : '±')) + Math.abs(a.score))}</span>`);
+  meta.push(...badgesHtml(a));
+  if (a.published_at) meta.push(`<time datetime="${escapeHtml(a.published_at)}">${escapeHtml(formatDateTime(a.published_at))}</time>`);
+
+  return `<li><div class="article-row">` +
+    `<p class="title"><a href="${escapeHtml(articleUrl(a.slug))}">${escapeHtml(a.title)}</a></p>` +
+    `<div class="meta">${meta.join('')}</div>` +
+    `</div></li>`;
+}
+
+/** A timeline date. The year is printed only at the boundary where it changes. A topic's history spans years, so month and day alone leave the reader unable to tell which year an event belongs to. */
+function timelineDateHtml(iso) {
+  const d = new Date(iso);
+  if (!iso || Number.isNaN(d.getTime())) return '<time class="t-date"></time>';
+  const year = d.getFullYear();
+  const head = timelineYear === year ? '' : `${year}年<br>`;
+  timelineYear = year;
+  return `<time class="t-date" datetime="${escapeHtml(iso)}" title="${escapeHtml(formatDateTime(iso))}">${head}${d.getMonth() + 1}月${d.getDate()}日</time>`;
+}
+
+/** One timeline item. Articles published as breaking news are emphasized as milestones (major). */
+function timelineItemHtml(a) {
+  const meta = [];
+  if (a.publisher) meta.push(escapeHtml(a.publisher.name));
+  if (a.category) meta.push(escapeHtml(a.category.name));
+  return `<li${a.is_breaking ? ' class="major"' : ''}>` +
+    timelineDateHtml(a.published_at) +
+    '<span class="t-dot"></span>' +
+    `<div><a class="t-title" href="${escapeHtml(articleUrl(a.slug))}">${escapeHtml(a.title)}</a>` +
+    `<div class="t-meta">${meta.join(' ・ ')}</div></div></li>`;
+}
+
+/** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as —. */
+function statValue(v) {
+  return v == null ? '—' : escapeHtml(v);
+}
+
+/** Renders the tag's heading, description and stats. */
+function renderTag(tag, stats) {
+  const label = `#${tag.name}`;
+  document.title = `${label} | instant-news`;
+  document.querySelector('[data-crumb]').textContent = label;
+  document.querySelector('[data-articles-title]').textContent = `${label} の記事`;
+  document.querySelector('[data-pubs-title]').textContent = `${label} をよく報じる社`;
+
+  const flag = tag.icon_url
+    ? `<span class="flag ph" style="background-image:${cssUrl(mediaVariant(tag.icon_url, '400w'))}"></span>`
+    : '<span class="flag"></span>';
+  document.querySelector('[data-hero]').innerHTML =
+    flag +
+    `<div><h1>${escapeHtml(label)}</h1><p class="desc">${escapeHtml(tag.description || '')}</p></div>` +
+    subscribeHtml();
+
+  /* The stats grid is fixed at 4 columns, so all 4 are always filled. Whether a channel notification exists is shown here so a reader can see in one place that subscription (a DM addressed to the individual) and the notify channel are separate mechanisms. */
+  document.querySelector('[data-stats]').innerHTML =
+    `<div><b>${statValue(stats.article_count)}</b><span>記事</span></div>` +
+    `<div><b>▲ ${statValue(stats.up_count)}</b><span>賛成</span></div>` +
+    `<div><b>💬 ${statValue(stats.comment_count)}</b><span>コメント</span></div>` +
+    `<div><b>${tag.notify_channel_id ? 'あり' : 'なし'}</b><span>チャンネル通知</span></div>`;
+
+  wireSubscribe();
+}
+
+/** The subscribe button. Its label itself states that latest articles arrive as a DM addressed to you personally. Channel notifications flow to the destination configured on the tag and run independently of this. */
+function subscribeHtml() {
+  const title = 'このタグの記事が公開されると、あなた個人宛てに Discord の DM が届きます。タグに設定されたチャンネルへの通知とは別の仕組みで、購読はあなただけに効きます。';
+  if (!viewer) {
+    return `<a class="btn primary subscribe" href="${escapeHtml(loginUrl())}" title="${escapeHtml(title)}">🔔 ログインして DM 購読</a>`;
+  }
+  if (subscribed) {
+    return `<button class="btn subscribe" type="button" data-subscribe title="${escapeHtml(title)}">🔔 DM 購読中</button>`;
+  }
+  return `<button class="btn primary subscribe" type="button" data-subscribe title="${escapeHtml(title)}">🔔 新着を DM で受け取る</button>`;
+}
+
+/** Wires up the subscribe button: a press flips the subscription state and re-renders the button. */
+function wireSubscribe() {
+  const btn = document.querySelector('[data-subscribe]');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const path = '/api/me/subscriptions/' + encodeURIComponent(SLUG);
+    try {
+      if (subscribed) await del(path);
+      else await api(path, { method: 'PUT' });
+      subscribed = !subscribed;
+      btn.outerHTML = subscribeHtml();
+      wireSubscribe();
+    } catch (e) {
+      /* An expired session sends the user to login; anything else re-enables the button so it can be pressed again. */
+      if (e instanceof ApiError && e.status === 401) {
+        location.href = loginUrl();
+        return;
+      }
+      btn.disabled = false;
+      alert('購読の変更に失敗しました。時間をおいて再度お試しください。');
+    }
+  });
+}
+
+/** Loads the tag itself. */
+async function loadTag() {
+  let data;
+  try {
+    data = await get('/api/tags/' + encodeURIComponent(SLUG));
+  } catch (e) {
+    const msg = e instanceof ApiError && e.status === 404
+      ? 'このタグは存在しません。'
+      : 'タグを読み込めませんでした。時間をおいて再度お試しください。';
+    document.querySelector('[data-main]').innerHTML =
+      `<section class="card"><div class="section-head"><h2>タグを表示できません</h2></div>` +
+      `<div class="body">${escapeHtml(msg)}</div></section>`;
+    return false;
+  }
+  const tag = data.tag || data;
+  renderTag(tag, data.stats || tag);
+  return true;
+}
+
+/** Loads one page of the article listing and appends it to the end. */
+async function loadArticles() {
+  const link = document.querySelector('[data-more-articles]');
+  let data;
+  try {
+    data = await get('/api/articles' + qs({ tag: SLUG, page: articlePage + 1, per_page: PER_PAGE }));
+  } catch (e) {
+    link.hidden = true;
+    return;
+  }
+  articlePage += 1;
+  const items = listOf(data, 'articles');
+  const card = document.querySelector('[data-articles-card]');
+  const list = document.querySelector('[data-articles]');
+
+  if (items.length === 0 && articlePage === 1) {
+    card.hidden = false;
+    list.outerHTML = '<div class="body">このタグの記事はまだありません。</div>';
+    return;
+  }
+  list.insertAdjacentHTML('beforeend', items.map(articleRowHtml).join(''));
+  card.hidden = false;
+  link.hidden = !hasMore(data, items);
+}
+
+/** Loads one page of the timeline and appends it to the end. The order is oldest first, so the topic's history reads straight through. */
+async function loadTimeline() {
+  const link = document.querySelector('[data-more-timeline]');
+  let data;
+  try {
+    data = await get(`/api/tags/${encodeURIComponent(SLUG)}/timeline` + qs({ page: timelinePage + 1 }));
+  } catch (e) {
+    link.hidden = true;
+    return;
+  }
+  timelinePage += 1;
+  const items = listOf(data, 'articles');
+  if (items.length === 0) {
+    link.hidden = true;
+    return;
+  }
+  document.querySelector('[data-timeline]').insertAdjacentHTML('beforeend', items.map(timelineItemHtml).join(''));
+  document.querySelector('[data-timeline-card]').hidden = false;
+  link.hidden = !hasMore(data, items);
+}
+
+/**
+ * Renders the sidebar aggregates. Related tags and the publishers that report on it most are counted from this tag's articles.
+ * The sample is the newest SAMPLE_SIZE articles, not a count over the whole period.
+ */
+async function loadAggregates() {
+  let items;
+  try {
+    items = listOf(await get('/api/articles' + qs({ tag: SLUG, per_page: SAMPLE_SIZE })), 'articles');
+  } catch (e) {
+    return;
+  }
+
+  /* Related tags: tags that appear on the same articles as this one, most frequent first. */
+  const related = new Map();
+  for (const a of items) {
+    for (const t of a.tags || []) {
+      if (!t || t.slug === SLUG) continue;
+      const cur = related.get(t.slug) || { tag: t, count: 0 };
+      cur.count += 1;
+      related.set(t.slug, cur);
+    }
+  }
+  const relatedTop = [...related.values()].sort((x, y) => y.count - x.count).slice(0, 12);
+  if (relatedTop.length > 0) {
+    document.querySelector('[data-related]').innerHTML = relatedTop.map(({ tag, count }) =>
+      `<a href="/tags/${encodeURIComponent(tag.slug)}">${tagIconHtml(tag)}#${escapeHtml(tag.name)} <b>${escapeHtml(count)}</b></a>`
+    ).join('');
+    document.querySelector('[data-related-card]').hidden = false;
+  }
+
+  /* The publishers that report on it most, ordered by article count. Up-votes and comments are totals within this sample. */
+  const pubs = new Map();
+  for (const a of items) {
+    const p = a.publisher;
+    if (!p) continue;
+    const cur = pubs.get(p.slug) || { pub: p, count: 0, ups: 0, comments: 0 };
+    cur.count += 1;
+    cur.ups += a.up_count || 0;
+    cur.comments += a.comment_count || 0;
+    pubs.set(p.slug, cur);
+  }
+  const pubTop = [...pubs.values()].sort((x, y) => y.count - x.count).slice(0, 5);
+  if (pubTop.length > 0) {
+    document.querySelector('[data-pubs]').innerHTML = pubTop.map((row, i) =>
+      `<li><span class="rank-badge">${i + 1}</span>${pubLogoHtml(row.pub)}` +
+      `<div><a class="p-name" href="/publishers/${encodeURIComponent(row.pub.slug)}">${escapeHtml(row.pub.name)}</a>` +
+      `<div class="p-meta">記事 ${escapeHtml(row.count)} ・ 💬 ${escapeHtml(row.comments)}</div></div>` +
+      `<span class="p-score">▲ ${escapeHtml(row.ups)}</span></li>`
+    ).join('');
+    document.querySelector('[data-pubs-card]').hidden = false;
+  }
+}
+
+/** The sidebar tag list. Tags vary in number and so cannot be laid out in the nav; the entry point for browsing topics goes here instead. */
+async function loadTagCloud() {
+  let tags;
+  try {
+    tags = listOf(await get('/api/tags'), 'tags');
+  } catch (e) {
+    return;
+  }
+  if (tags.length === 0) return;
+  document.querySelector('[data-tagcloud]').innerHTML = tags.slice(0, 24).map((t) =>
+    `<a href="/tags/${encodeURIComponent(t.slug)}">${tagIconHtml(t)}#${escapeHtml(t.name)}` +
+    (t.article_count == null ? '' : ` <b>${escapeHtml(t.article_count)}</b>`) + '</a>'
+  ).join('');
+  document.querySelector('[data-tagcloud-card]').hidden = false;
+}
+
+/** Wires up the "read more" link. Further pages of the listing are appended in place. */
+function wireMore(selector, loader) {
+  const link = document.querySelector(selector);
+  link.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    link.hidden = true;
+    loader();
+  });
+}
+
+async function main() {
+  try {
+    viewer = await me();
+  } catch (e) {
+    viewer = null;
+  }
+  if (viewer) {
+    const subs = listOf(viewer.subscriptions, 'subscriptions');
+    subscribed = subs.some((t) => (typeof t === 'string' ? t : t && t.slug) === SLUG);
+  }
+
+  mountChrome(viewer);
+  renderAdSlot(document.querySelector('[data-adslot]'), 'sidebar');
+  wireMore('[data-more-articles]', loadArticles);
+  wireMore('[data-more-timeline]', loadTimeline);
+
+  loadTagCloud();
+  if (!(await loadTag())) return;
+  loadTimeline();
+  loadArticles();
+  loadAggregates();
+}
+
+main();
+</script>
+
+</body>
+</html>

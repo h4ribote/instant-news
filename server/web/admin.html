@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>プラットフォームの設定 | instant-news</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/theme.js"></script>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="container">
+    <span class="promo">このデプロイは Discord サーバーのニュースプラットフォームです</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="container">
+    <a class="logo" href="/">
+      <span class="mark">instant<span>-news</span></span>
+      <span class="tag">Discord の報道社連合</span>
+    </a>
+    <form class="search" action="/" method="get">
+      <input type="text" name="q" placeholder="記事・タグ・報道社を検索">
+      <button type="submit" aria-label="検索">🔍</button>
+    </form>
+    <div class="actions" data-actions>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="テーマを切り替える">🌙</button>
+      <a class="icon-btn acct" href="/settings" aria-label="設定">⚙</a>
+    </div>
+  </div>
+</header>
+
+<nav class="globalnav">
+  <div class="container" data-globalnav>
+    <a href="/">トップ</a>
+    <span class="spacer"></span>
+  </div>
+</nav>
+
+<main class="container layout">
+  <!--
+    js/admin.js builds the main column; tabs switch between settings (the settings table) and categories, tags and publishers (their own tables).
+    The setting fields are generated from the GET /api/admin/settings response, so this HTML names no setting key at all.
+  -->
+  <div class="main" data-main></div>
+
+  <aside class="side">
+    <section class="card">
+      <div class="section-head"><h2>この画面について</h2></div>
+      <div class="body">
+        <p style="font-size:13px;">プラットフォーム全体の設定と分類(カテゴリ・タグ・報道社)を管理します。「自分の設定」ではないため、ここでの変更はすべての利用者に効きます。自分のアカウントと API キーは<a href="/settings">設定・API キー</a>にあります。</p>
+        <ul style="font-size:12px; padding-left:1.2em; margin:0;">
+          <li><b>設定</b>は変更した欄だけをまとめて保存します。1 つでも不正な値があれば、どれも保存されません。</li>
+          <li><b>カテゴリ・タグ・報道社</b>は 1 件ずつ作成・編集・削除します。操作はその場で確定します。</li>
+          <li>記事は必ず 1 つのカテゴリに属するため、カテゴリが 1 つも無いと記事を作れません。</li>
+          <li>設定の変更は数秒のうちに server と bot の双方へ伝わります。「再起動が必要」の設定だけは例外です。</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-head"><h2>締め出されたときは</h2></div>
+      <div class="body">
+        <p style="font-size:13px;">管理ロールの指定を誤ると、この画面を含む管理操作をあなた自身が行えなくなります。その状態はこの画面からは直せません。</p>
+        <ul style="font-size:12px; padding-left:1.2em; margin:0;">
+          <li>Discord の Administrator 権限を持つロールの保有者と、guild のオーナーは、管理ロールの設定に関わらず管理者として扱われます。</li>
+          <li>どちらにも当てはまらない場合の復旧は、DB へ到達できる者が CLI から <code>python -m server.cli set-setting admin.role_ids '["ロール ID"]'</code> を実行する経路だけになります。</li>
+        </ul>
+      </div>
+    </section>
+
+    <div class="adslot sidebar card" data-adslot>
+      <div class="creative"></div>
+    </div>
+  </aside>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <nav>
+      <a href="/">トップ</a>
+      <a href="/settings">設定・API キー</a>
+    </nav>
+    <div class="copy">instant-news — Discord コミュニティのニュースプラットフォーム</div>
+  </div>
+</footer>
+
+<script type="module" src="/static/js/admin.js"></script>
+
+</body>
+</html>

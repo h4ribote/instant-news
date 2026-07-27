@@ -1,0 +1,99 @@
+# Runtime environment for instant-news: three services — db (MySQL), server (FastAPI) and bot (Discord bot).
+#
+# MySQL is not the only place that holds state. This deployment persists two, and they reference each other:
+#   db-data: MySQL's data — articles, users, the catalogue of images (the media table), and the platform settings. Once the seed values are dropped from config.yaml, this is the only copy of discord.guild_id and the OAuth and bot credentials, and a deployment restored without it cannot boot at all: SettingsStore.bootstrap refuses to start for the settings that have no default.
+#   media-data: the image blobs — what each media row points at via content_hash (media.storage_dir in config.yaml).
+# So back up and restore the two together. Restoring MySQL alone leaves articles pointing at blobs that are not there; wiping only the media table leaves blobs that nothing references. Putting the images on the container filesystem instead of a volume loses every image the moment the container image is replaced, leaving only the DB-side references behind.
+#
+# The build context for both server and bot is the repository root, not each service's own directory: the two share common/, which a narrower context could not copy.
+#
+# config.yaml is untracked by Git and is never baked into the image (.dockerignore excludes it). It is passed in by mount at run time, so changing config needs no image rebuild. common/config.py looks for config.yaml at the repository root, i.e. /app inside the container, so it is mounted over that path.
+# That reaches only part of the file. Only server / database / media.storage_dir are read from the mount on every boot; everything else in it is a seed value copied into the MySQL settings table at first boot and never read again. The settings table is the source of truth for those and admins change them from /admin, so editing them here and restarting does nothing (common/settings.py, config.example.yaml).
+#
+# compose cannot read the YAML config file, so the DB credentials and the published port — and only those — appear twice, here and in config.yaml. Supply them from a .env at the repository root (keep it untracked by Git) and keep them equal to the corresponding config.yaml values.
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      # The schema is created as utf8mb4 (migrations/0001_initial.sql). That is also MySQL 8's default, but emoji and multilingual text are a premise here, so it is stated rather than left to a default.
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # Full-text search over articles uses the ngram parser: Japanese does not separate words with spaces, so the default space-delimited parser builds no usable index.
+      # ngram_token_size can only be set at startup and the index is built with this value, so changing it later requires rebuilding the FULLTEXT index. 2 is the default, and picks up words from two characters up.
+      - --ngram-token-size=2
+      # Disable stopwords for the ngram parser. The default stopword list is written for English and contains the single characters "a" and "i".
+      # The ngram parser matches the list against the characters a token is made of, not against words, and drops the whole token from the index if even one character matches.
+      # So with the default list, any word whose 2-character tokens all contain a or i (Japan -> ja/ap/pa/an, data -> da/at/ta, and Asia, AI, API, capital) leaves nothing at all in the index, and searching for it always returns 0 results.
+      # The breakage shows up patchily, word by word: China still matches because ch survives, and Tokyo contains neither a nor i. Japanese words are unaffected.
+      # Like ngram_token_size, this value is read when the index is built (the value at search time does not affect results), so changing it later requires rebuilding the FULLTEXT index.
+      - --innodb-ft-enable-stopword=OFF
+      # Memory InnoDB holds data and indexes in. MySQL's default is 128 MiB, too small to hold article bodies (LONGTEXT) plus the ngram full-text index; whatever overflows goes to disk on every read.
+      # The value depends on the host's free memory, so it comes from .env. The db container has no memory limit, so letting MySQL compute the size itself (innodb_dedicated_server) would claim about 75% of the whole host's RAM and squeeze the co-located server and bot — hence an explicit value.
+      - --innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-1G}
+      # Binary log retention (7 days). MySQL 8.4 defaults to 30 days, but this deployment has no replica, and backups pair the volumes (see the volumes notes below) rather than archiving binlogs, so 30 days would accumulate in db-data and consume space with no procedure anywhere that uses it.
+      # They are kept at all as a grace window: right after a wrong update is applied, mysqlbinlog can read them back to trace what happened.
+      - --binlog-expire-logs-seconds=604800
+    environment:
+      # Keep these equal to the database section of config.yaml. The passwords get no default: a default credential sitting in the repository ships to production unchanged.
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-instant_news}
+      MYSQL_USER: ${MYSQL_USER:-instant_news}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?config.yaml の database.password と同じ値を .env の MYSQL_PASSWORD に設定してください}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MySQL の root パスワードを .env の MYSQL_ROOT_PASSWORD に設定してください(アプリケーションは root を使わず、保守用です)}
+    volumes:
+      - db-data:/var/lib/mysql
+      # Runs only when the data directory is empty, i.e. on first boot, and creates the schema. It does not run where data already exists, so it is not a way to apply schema changes.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Check over TCP with an explicit 127.0.0.1: localhost would connect over the UNIX socket, which also reaches the temporary server that runs during initialization.
+      # MySQL initializes on a temporary server with networking disabled, so connecting over TCP at all means initialization has finished. The query then goes to the target database with the application's own credentials, confirming the user and the schema are in place too.
+      test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u \"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" -D \"$$MYSQL_DATABASE\" -e 'SELECT 1' > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      # Failing is expected until schema initialization finishes; do not let failures in that window count as unhealthy.
+      start_period: 60s
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        # Wait for schema initialization before starting. The db container coming up and MySQL being able to accept connections are two different things.
+        condition: service_healthy
+    # What is published is server.port from config.yaml. compose cannot read config.yaml, so moving off the 8000 default means changing both server.port there and INSTANT_NEWS_PORT in .env (the same number is used inside and outside the container).
+    ports:
+      - "${INSTANT_NEWS_PORT:-8000}:${INSTANT_NEWS_PORT:-8000}"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      # The image blobs. The mount target must match media.storage_dir in config.yaml.
+      - media-data:/var/lib/instant-news/media
+    healthcheck:
+      # config.yaml decides the listen port, so read it from the config here too. This checks all the way through to the home page being served.
+      test: ["CMD", "python", "-c", "import urllib.request; from common.config import load_config; urllib.request.urlopen(f'http://127.0.0.1:{load_config().server.port}/', timeout=5).read()"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # bot does not depend on server. server decides an article's publication and enqueues the notification post; bot reads the queue and sends it to Discord. The only thing joining the two is the DB queues (article_discord_posts / article_subscription_notices), so bot can still send what is already enqueued while server is down, and server can still publish and enqueue while bot is down.
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    # No image volume here: server is what writes images and what serves them.
+
+volumes:
+  # MySQL's data.
+  db-data:
+  # The image blobs; corresponds to media.storage_dir in config.yaml.
+  media-data:
