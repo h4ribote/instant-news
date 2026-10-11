@@ -24,6 +24,7 @@
 - **API キーは発行者ユーザーに紐づく。**独自アカウントを増やすのではなく、既存ユーザーの権限を機械が借りる形にする。これにより責任の所在が必ず人間に残り、記事の著者も必ず実在のユーザーになる。キーの生値は保持せず SHA-256 のみを保存する(`sessions` と同じ設計を踏襲する)。
 - 発行資格(誰が発行できるか)とスコープ(何ができるか)は別の軸として扱う(`api_token_scopes`)。管理者が発行できるスコープを 1 つに束ねてはならない。広告管理アプリに与えるのは `ads:admin` だけであり、記事の署名を偽造する力(`articles:write:any`)を混ぜて渡してはならない。
 - `settings:admin` は `admin.role_ids` を書き換えられる、すなわち管理者の資格そのものを配れるため、他のどのスコープよりも強い。実質的に管理者権限の委譲であることを踏まえて渡す。
+- **`idempotency_keys` は、資源を作る POST(記事の作成・広告の登録)の `Idempotency-Key` を記録する。**行は資源の作成と同じトランザクションで書くため、キーが記録されていることと資源が存在することは常に一致する。範囲は利用者と操作の組(`user_id`, `endpoint`, `idempotency_key`)の一意制約であり、同じキーの同時の要求はこの一意索引で直列化される。`request_hash` は本体の指紋で、同じキーで違う本体を送る要求を見分ける。`replay` は資源から再構成できない応答の部分(記事の保存で取り込めなかった画像)を持つ。行は 24 時間で期限切れになり、予約公開の巡回が順次消す。API の振る舞いは [docs/api.md](api.md) の「冪等性」を参照。
 
 ### 設定
 
@@ -101,6 +102,7 @@ erDiagram
     users ||--o{ sessions : owns
     users ||--o{ api_tokens : issues
     api_tokens ||--o{ api_token_scopes : grants
+    users ||--o{ idempotency_keys : sends
     users |o--o{ settings : updated_by
     users ||--o{ media : uploads
     api_tokens |o--o{ media : uploaded_via
@@ -129,7 +131,7 @@ erDiagram
     ads ||--o{ ad_stats_daily : measured_by
 ```
 
-`categories.notify_channel_id` と `tags.notify_channel_id` は Discord のチャンネル スノーフレークであり、DB 内に参照先の実体を持たないため外部キーではない(上図にも現れない)。
+`categories.notify_channel_id` と `tags.notify_channel_id` は Discord のチャンネル スノーフレークであり、DB 内に参照先の実体を持たないため外部キーではない(上図にも現れない)。`idempotency_keys.resource_id` も外部キーではない。`endpoint` によって記事を指すことも広告を指すこともあり、1 つの表を参照先に決められないためである。
 
 上図の `|o`(0 または 1)は NULL 許容の外部キーを表す。`articles.publisher_id`(報道社に属さない個人の記事)・`articles.series_id`(連載に属さない記事)・`publishers.role_id`(解散して所属ロールを失った報道社)・`media.via_token_id` と `article_revisions.via_token_id`(Web UI からの操作)・`settings.updated_by`(初期値の投入のまま変更されていない設定)がこれにあたる。`articles.category_id` だけは NOT NULL であるため `||`(必ず 1)である。
 
@@ -145,6 +147,7 @@ erDiagram
 | settings | プラットフォームの設定の真実。値を JSON で持ち、型・検証・秘密かどうかはコード側の登録簿(`common/settings.py`)が定義する。`config.yaml` の対応する値は初回起動時の初期値としてのみ読まれる。 |
 | api_tokens | 機械クライアントの API キー。発行者ユーザーに紐づき、生値は保持せず SHA-256 のみを保存する。 |
 | api_token_scopes | キーに与えたスコープ(`articles:write` / `articles:write:any` / `ads:admin` / `taxonomy:admin` / `settings:admin`)。 |
+| idempotency_keys | 資源を作る POST の `Idempotency-Key`。利用者・操作・キーの組で一意であり、作った資源の ID と本体の指紋を 24 時間保持する。 |
 | media | 取り込んだ画像の登録簿。実体は内容アドレスでファイルシステムに置き、行は寸法・バイト数・公開可否・取り込み元を持つ。 |
 | publishers | 記事を発行する報道社。所属は Discord ロール(`role_id`)で表し、ロゴ・slug・紹介文・立場(`stance`)を持つ。 |
 | categories | 記事の主分類。記事は単一のカテゴリを必ず持つ。`notify_channel_id` がこの欄の主チャンネルを、`include_in_latest` が新着一覧への掲載可否を決める。 |

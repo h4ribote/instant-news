@@ -6,6 +6,7 @@ Both are entered as top-level browser navigations, so they answer with a redirec
 from __future__ import annotations
 
 import logging
+from typing import Any, Final
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -31,7 +32,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=['auth'])
 
 
-@router.get('/auth/login')
+# Both entry points answer with a 302 redirect, declared as such so the OpenAPI document does not describe a JSON body that never comes.
+_REDIRECT: Final[dict[int | str, dict[str, Any]]] = {302: {'description': '転送する。', 'headers': {'Location': {'description': '転送先。', 'schema': {'type': 'string'}}}}}
+
+
+@router.get('/auth/login', status_code=status.HTTP_302_FOUND, response_class=RedirectResponse, responses=_REDIRECT)
 async def login(request: Request, redirect_to: str | None = None) -> RedirectResponse:
     """Send the user to Discord's consent screen.
 
@@ -49,7 +54,7 @@ async def login(request: Request, redirect_to: str | None = None) -> RedirectRes
     return response
 
 
-@router.get(OAUTH_CALLBACK_PATH)
+@router.get(OAUTH_CALLBACK_PATH, status_code=status.HTTP_302_FOUND, response_class=RedirectResponse, responses=_REDIRECT)
 async def callback(
     request: Request,
     code: str | None = None,

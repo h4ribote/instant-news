@@ -19,7 +19,7 @@ from common.snowflake import to_snowflake
 
 from ..deps import get_db, require_scope
 from ..errors import BadRequest, Conflict, NotFound
-from ..schemas import CategoryOut, CategoryWrite, PublisherOut, PublisherWrite, TagOut, TagWrite
+from ..schemas import CategoryOut, CategoryWrite, ItemList, PublisherOut, PublisherWrite, TagOut, TagWrite
 
 # Imposed on the router rather than declared per route: forgetting the check when adding a route cannot create a route that passes straight through.
 router = APIRouter(tags=['admin:taxonomy'], dependencies=[Depends(require_scope('taxonomy:admin'))])
@@ -97,9 +97,9 @@ def _reject_nulls(payload: Any, names: tuple[str, ...]) -> None:
 
 
 @router.get('/api/admin/categories')
-async def list_categories(db: Annotated[Database, Depends(get_db)]) -> list[CategoryOut]:
+async def list_categories(db: Annotated[Database, Depends(get_db)]) -> ItemList[CategoryOut]:
     rows = await db.fetch_all(f'{_CATEGORY_SELECT} ORDER BY position, id')
-    return [CategoryOut.model_validate(row) for row in rows]
+    return ItemList[CategoryOut](items=[CategoryOut.model_validate(row) for row in rows])
 
 
 @router.post('/api/admin/categories', status_code=status.HTTP_201_CREATED)
@@ -172,9 +172,9 @@ async def delete_category(category_id: str, db: Annotated[Database, Depends(get_
 
 
 @router.get('/api/admin/tags')
-async def list_tags(db: Annotated[Database, Depends(get_db)]) -> list[TagOut]:
+async def list_tags(db: Annotated[Database, Depends(get_db)]) -> ItemList[TagOut]:
     rows = await db.fetch_all(f'{_TAG_SELECT} ORDER BY slug')
-    return [TagOut.model_validate(row) for row in rows]
+    return ItemList[TagOut](items=[TagOut.model_validate(row) for row in rows])
 
 
 @router.post('/api/admin/tags', status_code=status.HTTP_201_CREATED)
@@ -252,9 +252,9 @@ async def _require_role_exists(db: Database, role_id: int) -> None:
 
 
 @router.get('/api/admin/publishers')
-async def list_publishers(db: Annotated[Database, Depends(get_db)]) -> list[PublisherOut]:
+async def list_publishers(db: Annotated[Database, Depends(get_db)]) -> ItemList[PublisherOut]:
     rows = await db.fetch_all(f'{_PUBLISHER_SELECT} ORDER BY name, id')
-    return [PublisherOut.model_validate(row) for row in rows]
+    return ItemList[PublisherOut](items=[PublisherOut.model_validate(row) for row in rows])
 
 
 @router.post('/api/admin/publishers', status_code=status.HTTP_201_CREATED)

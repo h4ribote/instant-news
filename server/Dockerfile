@@ -32,12 +32,13 @@ RUN useradd --create-home --uid 10001 app \
  && mkdir -p /var/lib/instant-news/media \
  && chown -R app:app /var/lib/instant-news
 
-# The integration tests, run against a throwaway MySQL by docker-compose.test.yml.
+# The integration tests, run against a throwaway MySQL by docker-compose.test.yml. The OpenAPI contract the tests compare against comes along.
 FROM base AS test
 
 COPY tests/requirements.txt ./tests/requirements.txt
 RUN pip install --no-cache-dir --disable-pip-version-check -r tests/requirements.txt
 COPY tests/ ./tests/
+COPY docs/openapi.json ./docs/openapi.json
 
 USER app
 

@@ -130,6 +130,25 @@ CREATE TABLE api_token_scopes (
     CONSTRAINT fk_api_token_scopes_token FOREIGN KEY (token_id) REFERENCES api_tokens (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+-- Idempotency-Key records for the POSTs that create a resource (an article, an ad). A client that lost the response to a network fault resends with the same key and gets the resource the first request created instead of a duplicate.
+-- The row is written in the same transaction as the resource, so a key is recorded exactly when its resource exists. A concurrent resend waits on the unique index until the first commits and then replays it.
+-- The scope is the user, not the credential: a session and the user's keys follow one rule, and the foreign key stays exact. Keys are expected to be random (a UUID), so two requests of one user never pick the same value by chance.
+-- Rows are kept for 24 hours; the scheduler sweeps older ones, and a lookup ignores them.
+CREATE TABLE idempotency_keys (
+    id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id          BIGINT UNSIGNED NOT NULL,                  -- The user the request was made as.
+    endpoint         VARCHAR(64)     NOT NULL,                  -- The operation the key belongs to (for example POST /api/articles).
+    idempotency_key  VARCHAR(255)    NOT NULL,                  -- The Idempotency-Key header value.
+    request_hash     CHAR(64)        NOT NULL,                  -- SHA-256 of the normalized request body. A resend with a different body under the same key is refused.
+    resource_id      BIGINT UNSIGNED NOT NULL,                  -- The ID of the resource the first request created.
+    replay           JSON            NULL,                      -- Response parts that cannot be rebuilt from the resource (the images an article save could not ingest).
+    created_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_idempotency_keys_user_endpoint_key (user_id, endpoint, idempotency_key),
+    KEY idx_idempotency_keys_created_at (created_at),
+    CONSTRAINT fk_idempotency_keys_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 -- Images
 
 -- Catalogue of ingested images. The blob itself sits content-addressed on the filesystem (media/{hash[0:2]}/{hash[2:4]}/{hash}.{variant}.webp).

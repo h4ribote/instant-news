@@ -14,9 +14,10 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import Any, Final
 
-from aiomysql import Connection
+from aiomysql import Connection, IntegrityError
 
 from common.config import Config, effective_media_config
 from common.db import Database
@@ -24,6 +25,7 @@ from common.settings import RuntimeSettings
 from common.snowflake import to_snowflake
 
 from .errors import ArticleError, ArticleForbidden, Conflict, NotFound, PreconditionFailed, RateLimited
+from .idempotency import IdempotencyRequest, claim, complete
 from .markdown import render_markdown
 from .media.service import IngestFailure, ingest_article_images
 from .principals import Principal, has_scope, is_admin
@@ -36,6 +38,9 @@ __all__ = [
     'article_etag',
     'has_write_any',
     'ensure_may_edit',
+    'RATE_LIMIT_WINDOW_SECONDS',
+    'RateLimitStatus',
+    'rate_limit_status',
     'resolve_moved_slug',
     'save_article',
     'publish_article',
@@ -53,6 +58,8 @@ _SLUG_BASE_MAX_LENGTH: Final = 190
 _SLUG_FALLBACK: Final = 'article'
 # Where to give up when generated slugs keep colliding.
 _SLUG_MAX_ATTEMPTS: Final = 1000
+# MySQL's ER_DUP_ENTRY.
+_DUPLICATE_ENTRY: Final = 1062
 # Slugs no article may take. /api/articles/by-id/{id} shares its first segment with /api/articles/{slug}/..., so an article slugged by-id would have its sub-resources shadowed.
 _RESERVED_SLUGS: Final = frozenset({'by-id'})
 
@@ -144,6 +151,37 @@ def ensure_may_edit(principal: Principal, existing: dict[str, Any], *, write_any
         raise ArticleForbidden('他の利用者が著者の記事は編集できません。')
 
 
+RATE_LIMIT_WINDOW_SECONDS: Final = 3600
+
+
+@dataclass(frozen=True)
+class RateLimitStatus:
+    """Where one API key stands against the hourly create/update limit. reset_seconds is how long until the oldest save in the window falls out of it and frees one unit; 0 when nothing is used."""
+
+    limit: int
+    used: int
+    reset_seconds: int
+
+    @property
+    def remaining(self) -> int:
+        return max(self.limit - self.used, 0)
+
+
+async def rate_limit_status(db: Database, settings: RuntimeSettings, token_id: int, *, conn: Connection | None = None) -> RateLimitStatus:
+    """Count the key's saves (revisions) in the sliding window. The same count both enforces the limit and is reported to the client."""
+    row = await db.fetch_one(
+        'SELECT COUNT(*) AS used, COALESCE(TIMESTAMPDIFF(SECOND, NOW(), MIN(created_at) + INTERVAL %s SECOND), 0) AS reset_seconds '
+        'FROM article_revisions WHERE via_token_id = %s AND created_at >= NOW() - INTERVAL %s SECOND',
+        RATE_LIMIT_WINDOW_SECONDS,
+        token_id,
+        RATE_LIMIT_WINDOW_SECONDS,
+        conn=conn,
+    )
+    used = int(row['used']) if row else 0
+    reset_seconds = max(int(row['reset_seconds']), 0) if row and used else 0
+    return RateLimitStatus(limit=settings.articles.api_rate_limit_per_hour, used=used, reset_seconds=reset_seconds)
+
+
 async def _ensure_within_rate_limit(db: Database, settings: RuntimeSettings, principal: Principal, *, conn: Connection | None = None) -> None:
     """Check the hourly create/update limit for one API key.
 
@@ -157,22 +195,14 @@ async def _ensure_within_rate_limit(db: Database, settings: RuntimeSettings, pri
         return
     if conn is not None:
         await db.fetch_val('SELECT id FROM api_tokens WHERE id = %s FOR UPDATE', principal.token_id, conn=conn)
-    limit = settings.articles.api_rate_limit_per_hour
-    row = await db.fetch_one(
-        'SELECT COUNT(*) AS used, COALESCE(TIMESTAMPDIFF(SECOND, NOW(), MIN(created_at) + INTERVAL 1 HOUR), 0) AS retry_after '
-        'FROM article_revisions WHERE via_token_id = %s AND created_at >= NOW() - INTERVAL 1 HOUR',
-        principal.token_id,
-        conn=conn,
-    )
-    used = int(row['used']) if row else 0
-    if used < limit:
+    status = await rate_limit_status(db, settings, principal.token_id, conn=conn)
+    if status.used < status.limit:
         return
-    # Seconds until the oldest revision falls out of the window. Even when it already has (0 or less right at the boundary), keep at least 1 second so an immediate retry is not invited.
-    retry_after = max(int(row['retry_after']) if row else 1, 1)
+    # Even when the oldest save has already left the window (0 right at the boundary), keep at least 1 second so an immediate retry is not invited.
     raise RateLimited(
-        f'このキーの記事の作成・更新は 1 時間あたり {limit} 件までです。',
-        retry_after=retry_after,
-        details={'limit': limit, 'used': used},
+        f'このキーの記事の作成・更新は 1 時間あたり {status.limit} 件までです。',
+        retry_after=max(status.reset_seconds, 1),
+        details={'limit': status.limit, 'used': status.used},
     )
 
 
@@ -321,12 +351,15 @@ async def save_article(
     article_id: int | None,
     payload: ArticlePayload,
     expected_versions: frozenset[int] | None = None,
+    idempotency: IdempotencyRequest | None = None,
 ) -> tuple[int, list[IngestFailure]]:
     """Create or update an article. Returns (article ID, the images that could not be ingested).
 
     A None article_id creates from an ArticleCreate; anything else updates from an ArticleUpdate. Images that could not be ingested are returned rather than raised: a temporary fault at a remote host must never stop an article going out. But a URL that failed stays in the body as it is and will eventually expire, taking the image with it, so the failure is never silently counted as success and is always reported to the caller.
 
     expected_versions holds the versions If-Match accepts (None when the request carries no If-Match, or carries *); a current version outside it raises PreconditionFailed. Without it the save still refuses with Conflict when another save lands between reading the row here and locking it, because the fields this request omits would otherwise be written back with the values read before that save.
+
+    idempotency, on a creation, records the Idempotency-Key in the creating transaction together with the images that failed (a replay reports them again). It raises IdempotencyRace when another request under the key committed first, and the creation rolls back.
 
     Both config and settings are taken because the settings image ingestion needs come from two different places. The storage location (storage_dir) is bound to the runtime environment and lives in config.yaml; the individual limits live in the settings table, where an admin can change them. effective_media_config folds the two into one.
     """
@@ -421,6 +454,11 @@ async def save_article(
     body_html = render_markdown(body_md)
 
     async with db.transaction() as conn:
+        # The Idempotency-Key is claimed before anything else, so a concurrent resend waits here for this transaction and then replays it.
+        idempotency_record: int | None = None
+        if idempotency is not None and existing is None:
+            idempotency_record = await claim(db, conn, principal.user_id, idempotency)
+
         # This is where the limit is enforced: take the key's row, count, and insert the revision in one transaction, so no other request can slip in after the count. The key's row is taken before the article's so that this path always locks in the order key then article, never forming a pair that waits on each other in reverse.
         await _ensure_within_rate_limit(db, settings, principal, conn=conn)
 
@@ -467,13 +505,27 @@ async def save_article(
             scheduled_at,
         )
         if article_id is None:
-            article_id = await db.execute_insert(
-                'INSERT INTO articles (slug, author_id, publisher_id, category_id, series_id, series_position, title, excerpt, '
-                'body_md, body_html, cover_image_url, status, visibility, byline_mode, is_breaking, is_sponsored, sponsor_name, scheduled_at) '
-                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
-                *columns,
-                conn=conn,
-            )
+            try:
+                article_id = await db.execute_insert(
+                    'INSERT INTO articles (slug, author_id, publisher_id, category_id, series_id, series_position, title, excerpt, '
+                    'body_md, body_html, cover_image_url, status, visibility, byline_mode, is_breaking, is_sponsored, sponsor_name, scheduled_at) '
+                    'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    *columns,
+                    conn=conn,
+                )
+            except IntegrityError as exc:
+                # The slug, the one unique column besides the key, was free when checked but another creation committed it in the meantime (two articles with the same headline at once).
+                if exc.args and exc.args[0] == _DUPLICATE_ENTRY:
+                    raise Conflict(f'この slug は同時に別の記事が使いました。再送してください: {slug}') from exc
+                raise
+            if idempotency_record is not None:
+                await complete(
+                    db,
+                    conn,
+                    idempotency_record,
+                    article_id,
+                    {'media_failures': [{'source_url': failure.source_url, 'reason': failure.reason} for failure in failures]},
+                )
         else:
             await db.execute(
                 'UPDATE articles SET slug = %s, author_id = %s, publisher_id = %s, category_id = %s, series_id = %s, '

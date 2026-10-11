@@ -6,7 +6,7 @@ The business rules live in articles.py; this module sticks to receiving requests
 
 Reads address an article by slug (the permalink), writes by id (immutable). GET /api/articles/by-id/{id} closes the gap for clients that hold only the id. A slug the article used to have answers 301 to its current slug, but only to a viewer who may see the article; anyone else gets the same 404 as for a slug that never existed.
 
-The detail, by-id, create, update and publish responses carry the article's ETag. PATCH and publish honour If-Match when it is present and answer 412 when the article moved on; without it they behave as before.
+The detail, by-id, create, update and publish responses carry the article's ETag. PATCH and publish honour If-Match when it is present and answer 412 when the article moved on; without it they behave as before. POST honours Idempotency-Key, replaying the article a first request under the same key created. Creates and updates made with an API key report the key's rate limit standing in their headers (app.rate_limit).
 """
 
 from __future__ import annotations
@@ -23,15 +23,17 @@ from common.db import Database
 from common.settings import RuntimeSettings
 from common.snowflake import to_snowflake
 
+from ..article_query import LATEST_ORDER, article_paging, fetch_article_page, published_and_visible
 from ..articles import article_etag, ensure_may_edit, has_write_any, publish_article, resolve_moved_slug, save_article
 from ..deps import get_config, get_db, get_principal_optional, get_settings, require_scope
-from ..errors import BadRequest, MovedPermanently, NotFound
-from ..media.service import IngestFailure
+from ..errors import BadRequest, Conflict, MovedPermanently, NotFound
+from ..idempotency import IdempotencyRace, IdempotentResult, find_replay, idempotency_request
+from ..paging import KeysetOrder, PagingParams, SortKey, fetch_keyset, page_request, paging_params
 from ..principals import Principal
+from ..rate_limit import RATE_LIMIT_HEADERS_DOC, track_rate_limit
 from ..schemas import (
     ArticleCreate,
     ArticleListItem,
-    ArticleListOut,
     ArticleOut,
     ArticleSaveOut,
     ArticleUpdate,
@@ -40,27 +42,48 @@ from ..schemas import (
     CommentOut,
     DiscordPostOut,
     MediaFailure,
+    Page,
     RevisionDiffOut,
     RevisionListItem,
     RevisionOut,
 )
-from ..visibility import can_view_article, visibility_sql_filter
+from ..visibility import can_view_article
 
 router = APIRouter(tags=['articles'])
 
-_DEFAULT_PER_PAGE: Final = 20
-_MAX_PER_PAGE: Final = 100
-
 # Comments per page. Larger than for articles because each comment is small and they are read straight through as a conversation.
-_DEFAULT_COMMENTS_PER_PAGE: Final = 50
-_MAX_COMMENTS_PER_PAGE: Final = 200
+_comment_paging: Final = paging_params(50, 200)
+_revision_paging: Final = paging_params(20, 100)
+
+# Comments oldest first, because comments are a conversation; the id orders comments posted in the same second.
+_COMMENT_ORDER: Final = KeysetOrder(
+    (
+        SortKey('c.posted_at', lambda row: row['posted_at'], 'datetime'),
+        SortKey('c.id', lambda row: row['id'], 'int'),
+    )
+)
+# Revisions newest first: the latest revision is what a reader looks for, and the history is read back from there.
+_REVISION_ORDER: Final = KeysetOrder((SortKey('r.revision_number', lambda row: row['revision_number'], 'int', descending=True),))
 
 # One entity-tag inside an If-Match list: an optional weak marker and the quoted opaque value.
 _ENTITY_TAG_RE: Final = re.compile(r'\s*(W/)?"([^"]*)"\s*')
 
+_IF_MATCH_DESCRIPTION: Final = 'GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。'
+
+# The endpoint name an article creation's Idempotency-Key is recorded under.
+_CREATE_ENDPOINT: Final = 'POST /api/articles'
+
+# Response headers as declared in the OpenAPI document.
+_ETAG_HEADER: Final[dict[str, Any]] = {'ETag': {'description': '記事の編集可能な状態を表す強い ETag("<id>-<version>")。', 'schema': {'type': 'string'}}}
+_MOVED: Final[dict[int | str, dict[str, Any]]] = {
+    301: {
+        'description': '記事が過去に使っていた slug。同じ URL の slug を現在のものに替えた先へ転送する。',
+        'headers': {'Location': {'description': '転送先。', 'schema': {'type': 'string'}}},
+    }
+}
+
 # Up/down votes and the comment count are summed over all of the article's notification posts: one article can be notified to several channels, so article_discord_posts holds several rows per article, each with its own independent counts.
 # When the subtraction is done in SQL, always subtract values that have been through SUM(). up_count and down_count are unsigned, so a per-row subtraction (dp.up_count - dp.down_count) does not clamp the moment down-votes exceed up-votes; the statement itself fails. SUM() returns DECIMAL, which can hold negatives.
-# Never alias articles. The condition fragment returned by visibility_sql_filter refers to articles by table name, so an alias makes that fragment name columns it cannot resolve and the listing query dies at runtime.
 _ARTICLE_COLUMNS: Final = """
     articles.id, articles.slug, articles.title, articles.excerpt, articles.body_md, articles.body_html,
     articles.cover_image_url, articles.author_id, articles.publisher_id, articles.category_id,
@@ -94,6 +117,15 @@ SELECT r.id, r.revision_number, r.editor_id, r.via_token_id, r.title, r.body_md,
        u.global_name AS editor_global_name, u.avatar_hash AS editor_avatar_hash
   FROM article_revisions r
   JOIN users u ON u.id = r.editor_id
+"""
+
+_COMMENT_SELECT: Final = """
+SELECT c.id, c.message_id, c.author_discord_user_id, c.body, c.up_count, c.down_count,
+       c.posted_at, c.edited_at,
+       u.username AS author_username, u.global_name AS author_global_name,
+       u.avatar_hash AS author_avatar_hash
+  FROM article_comments c
+  LEFT JOIN users u ON u.discord_user_id = c.author_discord_user_id
 """
 
 
@@ -192,10 +224,30 @@ def _revision_item_data(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _comment_out(row: dict[str, Any]) -> CommentOut:
+    return CommentOut(
+        id=row['id'],
+        message_id=row['message_id'],
+        author=CommentAuthorOut(
+            discord_user_id=row['author_discord_user_id'],
+            username=row['author_username'],
+            global_name=row['author_global_name'],
+            avatar_hash=row['author_avatar_hash'],
+        ),
+        body=row['body'],
+        up_count=int(row['up_count']),
+        down_count=int(row['down_count']),
+        # The subtraction is done here. Subtracting the row's columns from each other in SQL is unsigned arithmetic, and the statement fails the moment down-votes exceed up-votes.
+        score=int(row['up_count']) - int(row['down_count']),
+        posted_at=row['posted_at'],
+        edited_at=row['edited_at'],
+    )
+
+
 async def _fetch_tags(db: Database, article_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
     """Fetch the tags of each article.
 
-    JOINing them into the listing query itself duplicates an article's row once per tag and throws off the page count. One extra query fetches them all at once and assigns them to their articles.
+    JOINing them into the article query itself duplicates an article's row once per tag. One extra query fetches them all at once and assigns them to their articles.
     """
     if not article_ids:
         return {}
@@ -356,7 +408,7 @@ async def _require_editable(db: Database, settings: RuntimeSettings, principal: 
 # Listing
 
 
-@router.get('/api/articles', response_model=ArticleListOut)
+@router.get('/api/articles')
 async def list_articles(
     category: str | None = Query(default=None, description='カテゴリの slug で絞る。'),
     tag: str | None = Query(default=None, description='タグの slug で絞る。'),
@@ -364,29 +416,30 @@ async def list_articles(
     series: str | None = Query(default=None, description='連載の slug で絞る。'),
     author: str | None = Query(default=None, description='著者の利用者 ID で絞る。'),
     latest_only: bool = Query(default=False, description='新着一覧に載せるカテゴリの記事だけを返す。'),
-    page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=_DEFAULT_PER_PAGE, ge=1, le=_MAX_PER_PAGE),
+    paging: PagingParams = Depends(article_paging),
     db: Database = Depends(get_db),
     principal: Principal | None = Depends(get_principal_optional),
-) -> ArticleListOut:
-    """Return published articles newest first. The visibility filter is always applied, and no admin clause is added on top of it: see visibility_sql_filter for what that leaves out."""
-    conditions = ["articles.status = 'published'"]
-    params: list[Any] = []
+) -> Page[ArticleListItem]:
+    """Return published articles newest first. The visibility filter is always applied, and no admin clause is added on top of it: see visibility_sql_filter for what that leaves out.
 
-    # The fragment already comes parenthesised, so it can be ANDed straight in.
-    visibility_sql, visibility_params = visibility_sql_filter(principal)
-    conditions.append(visibility_sql)
-    params.extend(visibility_params)
+    Each filter is a condition on articles' own columns (a subquery resolves a slug to its ID), so the listing runs on the articles indexes and the total, when asked for, counts over articles alone.
+    """
+    where, params = published_and_visible(principal)
+    conditions = [where]
+    filters: dict[str, Any] = {}
 
     if category is not None:
-        conditions.append('c.slug = %s')
+        conditions.append('articles.category_id = (SELECT id FROM categories WHERE slug = %s)')
         params.append(category)
+        filters['category'] = category
     if publisher is not None:
-        conditions.append('p.slug = %s')
+        conditions.append('articles.publisher_id = (SELECT id FROM publishers WHERE slug = %s)')
         params.append(publisher)
+        filters['publisher'] = publisher
     if series is not None:
-        conditions.append('s.slug = %s')
+        conditions.append('articles.series_id = (SELECT id FROM series WHERE slug = %s)')
         params.append(series)
+        filters['series'] = series
     if author is not None:
         try:
             author_id = to_snowflake(author)
@@ -394,52 +447,80 @@ async def list_articles(
             raise BadRequest(f'author は利用者 ID として解釈できません: {author}') from exc
         conditions.append('articles.author_id = %s')
         params.append(author_id)
+        filters['author'] = author_id
     if tag is not None:
-        # Filter with EXISTS: a JOIN duplicates the row of an article that has several tags, throwing off both the total and the pages.
+        # Filter with EXISTS: a JOIN duplicates the row of an article that has several tags.
         conditions.append('EXISTS (SELECT 1 FROM article_tags atg JOIN tags t ON t.id = atg.tag_id WHERE atg.article_id = articles.id AND t.slug = %s)')
         params.append(tag)
+        filters['tag'] = tag
     if latest_only:
         # Keeps recurring articles such as market prices from filling the site-wide latest feed.
-        conditions.append('c.include_in_latest = 1')
+        conditions.append('articles.category_id IN (SELECT id FROM categories WHERE include_in_latest = 1)')
+        filters['latest_only'] = True
 
-    where = ' AND '.join(conditions)
-    total = int(await db.fetch_val(f'SELECT COUNT(*) {_ARTICLE_FROM} WHERE {where}', *params) or 0)
-
-    # Ordered by published_at descending, made total by ID so that articles sharing a timestamp are neither duplicated nor dropped at a page boundary.
-    rows = await db.fetch_all(
-        f'SELECT {_ARTICLE_COLUMNS} {_ARTICLE_FROM} WHERE {where} ORDER BY articles.published_at DESC, articles.id DESC LIMIT %s OFFSET %s',
-        *params,
-        per_page,
-        (page - 1) * per_page,
+    return await fetch_article_page(
+        db,
+        page_request('articles', filters, paging),
+        where=' AND '.join(conditions),
+        where_args=params,
+        order=LATEST_ORDER,
     )
-    tags_by_article = await _fetch_tags(db, [row['id'] for row in rows])
-    items = [ArticleListItem.model_validate(_list_item_data(row, tags_by_article.get(row['id'], []))) for row in rows]
-    return ArticleListOut(items=items, page=page, per_page=per_page, total=total, has_next=page * per_page < total)
 
 
 # Saving and publishing
 
 
-@router.post('/api/articles', response_model=ArticleSaveOut, status_code=201)
+@router.post(
+    '/api/articles',
+    status_code=201,
+    dependencies=[Depends(track_rate_limit)],
+    responses={201: {'headers': {**_ETAG_HEADER, **RATE_LIMIT_HEADERS_DOC, 'Idempotent-Replayed': {'description': '同じ Idempotency-Key の最初の要求の結果を再生したときに true。', 'schema': {'type': 'string'}}}}},
+)
 async def create_article(
     payload: ArticleCreate,
     response: Response,
+    idempotency_key: str | None = Header(default=None, description='再送で記事が重複しないためのキー(UUID など)。同じキーと同じ本体の再送には、最初の要求が作った記事を返す。'),
     db: Database = Depends(get_db),
     config: Config = Depends(get_config),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal = Depends(require_scope('articles:write')),
 ) -> ArticleSaveOut:
-    """Create an article."""
-    article_id, failures = await save_article(db, config, settings, principal, article_id=None, payload=payload)
-    return await _save_response(db, settings, response, article_id, failures)
+    """Create an article.
+
+    With an Idempotency-Key, a key already used with the same body replays the article it created (checked before the rate limit and before any image is fetched, so a replay costs neither), and one used with a different body is refused.
+    """
+    idempotency = idempotency_request(_CREATE_ENDPOINT, idempotency_key, payload)
+    if idempotency is not None:
+        replayed = await find_replay(db, principal.user_id, idempotency)
+        if replayed is not None:
+            return await _replay_response(db, settings, response, replayed)
+    try:
+        article_id, failures = await save_article(db, config, settings, principal, article_id=None, payload=payload, idempotency=idempotency)
+    except IdempotencyRace:
+        replayed = await find_replay(db, principal.user_id, idempotency) if idempotency is not None else None
+        if replayed is None:
+            raise Conflict('同じ Idempotency-Key の要求が同時に処理されています。再送してください。') from None
+        return await _replay_response(db, settings, response, replayed)
+    return await _save_response(db, settings, response, article_id, [MediaFailure(source_url=failure.source_url, reason=failure.reason) for failure in failures])
 
 
-@router.patch('/api/articles/{article_id}', response_model=ArticleSaveOut)
+async def _replay_response(db: Database, settings: RuntimeSettings, response: Response, replayed: IdempotentResult) -> ArticleSaveOut:
+    """The response to a resend: the article as it stands now, with the images the first request could not ingest."""
+    response.headers['Idempotent-Replayed'] = 'true'
+    failures = (replayed.replay or {}).get('media_failures', [])
+    return await _save_response(db, settings, response, replayed.resource_id, [MediaFailure.model_validate(failure) for failure in failures])
+
+
+@router.patch(
+    '/api/articles/{article_id}',
+    dependencies=[Depends(track_rate_limit)],
+    responses={200: {'headers': {**_ETAG_HEADER, **RATE_LIMIT_HEADERS_DOC}}},
+)
 async def update_article(
     article_id: str,
     payload: ArticleUpdate,
     response: Response,
-    if_match: str | None = Header(default=None, description='GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。'),
+    if_match: str | None = Header(default=None, description=_IF_MATCH_DESCRIPTION),
     db: Database = Depends(get_db),
     config: Config = Depends(get_config),
     settings: RuntimeSettings = Depends(get_settings),
@@ -456,10 +537,10 @@ async def update_article(
         payload=payload,
         expected_versions=_if_match_versions(if_match, parsed),
     )
-    return await _save_response(db, settings, response, saved_id, failures)
+    return await _save_response(db, settings, response, saved_id, [MediaFailure(source_url=failure.source_url, reason=failure.reason) for failure in failures])
 
 
-async def _save_response(db: Database, settings: RuntimeSettings, response: Response, article_id: int, failures: list[IngestFailure]) -> ArticleSaveOut:
+async def _save_response(db: Database, settings: RuntimeSettings, response: Response, article_id: int, failures: list[MediaFailure]) -> ArticleSaveOut:
     """Assemble the save response.
 
     Images that could not be ingested always go into the response. A URL that failed to ingest stays in the body as it is, and on an external CDN it eventually expires and the image disappears, so treating the save as a silent success leaves a rotting link in the article that nobody ever notices.
@@ -468,17 +549,14 @@ async def _save_response(db: Database, settings: RuntimeSettings, response: Resp
     if row is None:
         raise NotFound('記事が見つかりません。')
     _set_etag(response, row)
-    return ArticleSaveOut(
-        article=await _article_out(db, settings, row),
-        media_failures=[MediaFailure(source_url=failure.source_url, reason=failure.reason) for failure in failures],
-    )
+    return ArticleSaveOut(article=await _article_out(db, settings, row), media_failures=failures)
 
 
-@router.post('/api/articles/{article_id}/publish', response_model=ArticleOut)
+@router.post('/api/articles/{article_id}/publish', responses={200: {'headers': _ETAG_HEADER}})
 async def publish(
     article_id: str,
     response: Response,
-    if_match: str | None = Header(default=None, description='GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。'),
+    if_match: str | None = Header(default=None, description=_IF_MATCH_DESCRIPTION),
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal = Depends(require_scope('articles:write')),
@@ -497,7 +575,7 @@ async def publish(
 # Detail and revision history
 
 
-@router.get('/api/articles/by-id/{article_id}', response_model=ArticleOut)
+@router.get('/api/articles/by-id/{article_id}', responses={200: {'headers': _ETAG_HEADER}})
 async def get_article_by_id(
     article_id: str,
     response: Response,
@@ -516,7 +594,7 @@ async def get_article_by_id(
     return await _article_out(db, settings, row)
 
 
-@router.get('/api/articles/{slug}', response_model=ArticleOut)
+@router.get('/api/articles/{slug}', responses={200: {'headers': _ETAG_HEADER}, **_MOVED})
 async def get_article(
     slug: str,
     request: Request,
@@ -534,17 +612,16 @@ async def get_article(
     return await _article_out(db, settings, row)
 
 
-@router.get('/api/articles/{slug}/comments', response_model=CommentListOut)
+@router.get('/api/articles/{slug}/comments', responses=_MOVED)
 async def list_comments(
     slug: str,
     request: Request,
-    page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=_DEFAULT_COMMENTS_PER_PAGE, ge=1, le=_MAX_COMMENTS_PER_PAGE),
+    paging: PagingParams = Depends(_comment_paging),
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> CommentListOut:
-    """Return an article's comments oldest first. 404 if the article cannot be viewed.
+    """Return one page of an article's comments, oldest first. 404 if the article cannot be viewed.
 
     A comment's visibility is the article's visibility itself. Returning comments to someone who cannot read the article leaks what was said about it and how much, while the body stays hidden. The check is delegated to the same _require_viewable the article detail uses; a separate check written here would go stale on its own the day the article-side rule changes.
 
@@ -553,67 +630,62 @@ async def list_comments(
     This API is read-only and accepts no writes. The real comments are the replies in the Discord thread, and that is the only place to write them (thread_url is the entry point).
     """
     article = await _require_viewable(db, settings, principal, request, slug)
-    total = int(await db.fetch_val('SELECT COUNT(*) FROM article_comments WHERE article_id = %s', article['id']) or 0)
-    rows = await db.fetch_all(
-        """
-        SELECT c.id, c.message_id, c.author_discord_user_id, c.body, c.up_count, c.down_count,
-               c.posted_at, c.edited_at,
-               u.username AS author_username, u.global_name AS author_global_name,
-               u.avatar_hash AS author_avatar_hash
-          FROM article_comments c
-          LEFT JOIN users u ON u.discord_user_id = c.author_discord_user_id
-         WHERE c.article_id = %s
-         ORDER BY c.posted_at, c.id
-         LIMIT %s OFFSET %s
-        """,
-        article['id'], per_page, (page - 1) * per_page,
+    article_id = int(article['id'])
+    fetched = await fetch_keyset(
+        db,
+        page_request('comments', {'article_id': article_id}, paging),
+        select=_COMMENT_SELECT,
+        count_from='FROM article_comments c',
+        where='c.article_id = %s',
+        where_args=[article_id],
+        order=_COMMENT_ORDER,
     )
     # A thread is opened per notification post, so one article can have several. The one offered as the entry point is the thread of the notification post sent first; comments from any thread count as the same article's comments.
     thread_row = await db.fetch_one(
         'SELECT thread_id FROM article_discord_posts WHERE article_id = %s AND thread_id IS NOT NULL ORDER BY enqueued_at, id LIMIT 1',
-        article['id'],
+        article_id,
     )
     return CommentListOut(
-        items=[
-            CommentOut(
-                id=row['id'],
-                message_id=row['message_id'],
-                author=CommentAuthorOut(
-                    discord_user_id=row['author_discord_user_id'],
-                    username=row['author_username'],
-                    global_name=row['author_global_name'],
-                    avatar_hash=row['author_avatar_hash'],
-                ),
-                body=row['body'],
-                up_count=int(row['up_count']),
-                down_count=int(row['down_count']),
-                # The subtraction is done here. Subtracting the row's columns from each other in SQL is unsigned arithmetic, and the statement fails the moment down-votes exceed up-votes.
-                score=int(row['up_count']) - int(row['down_count']),
-                posted_at=row['posted_at'],
-                edited_at=row['edited_at'],
-            )
-            for row in rows
-        ],
-        total=total,
+        items=[_comment_out(row) for row in fetched.rows],
+        per_page=fetched.per_page,
+        next_cursor=fetched.next_cursor,
+        prev_cursor=fetched.prev_cursor,
+        total=fetched.total,
         thread_url=_thread_url(settings.discord.guild_id, thread_row['thread_id']) if thread_row else None,
     )
 
 
-@router.get('/api/articles/{slug}/revisions', response_model=list[RevisionListItem])
+@router.get('/api/articles/{slug}/revisions', responses=_MOVED)
 async def list_revisions(
     slug: str,
     request: Request,
+    paging: PagingParams = Depends(_revision_paging),
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
-) -> list[RevisionListItem]:
-    """Return the revision history listing."""
+) -> Page[RevisionListItem]:
+    """Return one page of the revision history, newest first."""
     article = await _require_viewable(db, settings, principal, request, slug)
-    rows = await db.fetch_all(f'{_REVISION_SELECT} WHERE r.article_id = %s ORDER BY r.revision_number', article['id'])
-    return [RevisionListItem.model_validate(_revision_item_data(row)) for row in rows]
+    article_id = int(article['id'])
+    fetched = await fetch_keyset(
+        db,
+        page_request('revisions', {'article_id': article_id}, paging),
+        select=_REVISION_SELECT,
+        count_from='FROM article_revisions r',
+        where='r.article_id = %s',
+        where_args=[article_id],
+        order=_REVISION_ORDER,
+    )
+    return Page[RevisionListItem](
+        items=[RevisionListItem.model_validate(_revision_item_data(row)) for row in fetched.rows],
+        per_page=fetched.per_page,
+        next_cursor=fetched.next_cursor,
+        prev_cursor=fetched.prev_cursor,
+        total=fetched.total,
+    )
 
 
-@router.get('/api/articles/{slug}/revisions/{revision_number}', response_model=RevisionOut)
+@router.get('/api/articles/{slug}/revisions/{revision_number}', responses=_MOVED)
 async def get_revision(
     slug: str,
     revision_number: int,
@@ -630,7 +702,7 @@ async def get_revision(
     return RevisionOut.model_validate(data)
 
 
-@router.get('/api/articles/{slug}/revisions/{revision_number}/diff', response_model=RevisionDiffOut)
+@router.get('/api/articles/{slug}/revisions/{revision_number}/diff', responses=_MOVED)
 async def get_revision_diff(
     slug: str,
     revision_number: int,

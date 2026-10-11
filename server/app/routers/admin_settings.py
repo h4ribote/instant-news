@@ -40,7 +40,7 @@ async def list_settings(store: Annotated[SettingsStore, Depends(get_settings_sto
 
     A secret setting comes back with value null, and is_set says whether it is set. A setting that cannot be changed comes back with editable false, and description says why.
     """
-    return SettingsOut(settings=await _describe(store))
+    return SettingsOut(items=await _describe(store))
 
 
 @router.patch('/api/admin/settings')
@@ -61,4 +61,4 @@ async def update_settings(
         updated = await store.set_many(payload.updates, updated_by=principal.user_id)
     except ValueError as exc:
         raise BadRequest(str(exc)) from exc
-    return SettingsUpdateOut(updated_keys=updated, settings=await _describe(store))
+    return SettingsUpdateOut(updated_keys=updated, items=await _describe(store))

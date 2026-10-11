@@ -78,7 +78,7 @@ def _read_variant(storage_dir: Path, content_hash: str, variant: str) -> bytes |
     return data
 
 
-@router.post('/api/media', response_model=MediaOut)
+@router.post('/api/media')
 async def upload_media(
     file: Annotated[UploadFile, File(description='取り込む画像。復号して WebP へ再符号化したものだけを保存する。')],
     db: Annotated[Database, Depends(get_db)],
@@ -103,7 +103,11 @@ async def upload_media(
     return MediaOut(id=result.media_id, content_hash=result.content_hash, url=result.url)
 
 
-@router.get('/media/{content_hash}/{variant}.webp', response_class=Response)
+@router.get(
+    '/media/{content_hash}/{variant}.webp',
+    response_class=Response,
+    responses={200: {'description': '画像(WebP)。', 'content': {'image/webp': {'schema': {'type': 'string', 'format': 'binary'}}}}},
+)
 async def serve_media(
     content_hash: str,
     variant: str,

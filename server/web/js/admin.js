@@ -402,7 +402,7 @@ async function saveSettings(btn) {
     .map((d) => d.label);
 
   /* The response is the updated listing itself, so it is shown as-is without re-reading. */
-  defs = listOf(data, 'settings');
+  defs = listOf(data);
   settingsDirty = false;
   renderSettingsPanel();
 
@@ -819,7 +819,7 @@ async function main() {
     return;
   }
 
-  defs = listOf(settings, 'settings');
+  defs = listOf(settings);
   renderTabs();
   renderSettingsPanel();
   window.addEventListener('hashchange', () => showTab(currentTab()));

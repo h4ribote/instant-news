@@ -1,1 +1,2 @@
 pytest
+openapi-spec-validator

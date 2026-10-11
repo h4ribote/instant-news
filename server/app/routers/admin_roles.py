@@ -17,7 +17,7 @@ from common.db import Database
 
 from ..deps import get_db, require_admin
 from ..principals import ADMINISTRATOR_BIT
-from ..schemas import AdminRoleOut
+from ..schemas import AdminRoleOut, ItemList
 
 # Imposed on the router rather than declared per route: forgetting the check when adding a route cannot create a route that passes straight through.
 router = APIRouter(tags=['admin:roles'], dependencies=[Depends(require_admin())])
@@ -32,10 +32,10 @@ _ROLES_SQL: Final = """
 
 
 @router.get('/api/admin/roles')
-async def list_roles(db: Annotated[Database, Depends(get_db)]) -> list[AdminRoleOut]:
+async def list_roles(db: Annotated[Database, Depends(get_db)]) -> ItemList[AdminRoleOut]:
     """The target guild's role listing. Used for the fields of settings that point at roles and for the publisher affiliation-role options.
 
     The source of truth is Discord; this table is a snapshot the bot mirrors as it receives role create / update / delete events. A freshly created role can stay absent for a very short while, so the UI must keep direct ID entry as well.
     """
     rows = await db.fetch_all(_ROLES_SQL, ADMINISTRATOR_BIT)
-    return [AdminRoleOut.model_validate(row) for row in rows]
+    return ItemList[AdminRoleOut](items=[AdminRoleOut.model_validate(row) for row in rows])

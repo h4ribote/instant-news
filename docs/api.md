@@ -8,6 +8,28 @@
 - 日時は ISO 8601 の UTC(末尾 `Z` 付き)で返す。
 - 認証の受け口は 2 つある。Cookie `session`(不透明トークン)と `Authorization: Bearer <api key>` である。両方が付いている要求では **Bearer を優先する**。
 - API キーは `ink_` プレフィックスを付けて発行する。
+- **集合を返す応答は、素の配列ではなく必ずオブジェクトで包む。**後から項目を足しても互換を壊さないためである。形は後述の「一覧の規約」の 2 種類だけである。
+- **エラーの本体は、状態コードによらず `{"error": {"code": ..., "message": ..., "details": ...}}` の 1 つの形である**(`details` は無い場合がある)。422(本体の形式の不備)も同じ形で返し、`details.errors` に不備のある項目を入れる。
+- **HTTP API の契約は `docs/openapi.json` である。**稼働中のサーバーが `/openapi.json` で返すものと同じ文書で、全ルートが成功時の応答の型と、既定の応答としてのエラー本体(`ErrorOut`)を宣言している。自動投稿クライアントはこれから型を生成してよい。生成結果がこのファイルと一致することはテストで検査しており、API の形を変える変更は必ずこのファイルの差分として現れる。再生成の手順は README の「テスト」を参照。
+
+### 一覧の規約
+
+一覧の応答は次の 2 種類である。
+
+| 形 | 使う一覧 | 中身 |
+| --- | --- | --- |
+| `Page` | 活動とともに増え続ける一覧(記事・検索・タグ年表・連載の記事・コメント・改版履歴・広告) | `items` / `per_page` / `next_cursor` / `prev_cursor` / `total` |
+| `ItemList` | 丸ごと返す集合(カテゴリ・タグ・報道社・連載・ランキング・自分のキーと購読・管理用の各一覧) | `items` |
+
+`Page` の一覧は、どれも同じクエリ引数を受ける。
+
+- `per_page`: 1 ページの件数。既定と上限は一覧ごとに決まっており、記事系は既定 20・上限 100、コメントは既定 50・上限 200、改版履歴と広告は既定 20・上限 100 である。
+- `cursor`: 前の応答の `next_cursor`(次のページ)または `prev_cursor`(前のページ)を**そのまま**渡す。省略すると先頭のページになる。その方向にページが無ければ、応答の該当する cursor は `null` である。
+- `include_total`: 真のときだけ、一覧全体の件数を `total` に入れる。偽(既定)なら `total` は `null` である。件数は別のクエリで数えるため、要るときだけ頼む。
+
+cursor は不透明な文字列であり、中身を解釈したり組み立てたりしてはならない。cursor はページ境界の行の並びの鍵を運び、次のページはその鍵の直後から読む(keyset)。このため、読み進める間に新着が挿入されても後のページがずれて重複・欠落することはなく、深いページも先頭と同じ速さで返る。**検索だけは例外で、cursor は位置を運ぶ。**関連度は記事が索引に加わるたびに全文書で値が動くため、続きの起点にできる安定した鍵が無い。
+
+cursor は発行した一覧とフィルタに結び付いている。形の崩れた cursor、別の一覧や別のフィルタで発行された cursor は **400**(`invalid_cursor`)になる。
 
 ## API キーの発行資格とスコープ
 
@@ -153,6 +175,32 @@ flowchart LR
 
 セッション経由の投稿はこの制限の対象外である(人間の手による投稿はこの意味では暴走しない)。
 
+**API キー経由の `POST /api/articles` と `PATCH /api/articles/{id}` の応答は、そのキーの残量をヘッダで返す。**429 だけでなく成功応答(と 400 / 409 / 412 / 422 などのエラー応答)にも付くため、クライアントは上限に当たる前に自制できる。値は制限の判定と同じ集計を要求の処理後に取ったもので、成功した保存はもう数に入っている。同じ値を 2 つの形式で返す。秒数はどれも `Retry-After` と同じく「今から何秒後か」である。
+
+| ヘッダ | 値 |
+| --- | --- |
+| `X-RateLimit-Limit` | 1 時間あたりの上限。 |
+| `X-RateLimit-Remaining` | この応答の時点で残っている回数。 |
+| `X-RateLimit-Reset` | 窓内で最も古い保存が窓を抜け、1 回分が空くまでの秒数(使用が 0 なら 0)。 |
+| `RateLimit-Policy` | IETF で標準化中の形式の方針。`"articles-write";q=<上限>;w=3600`。 |
+| `RateLimit` | 同じ形式の残量。`"articles-write";r=<残り>;t=<秒数>`。 |
+
+窓は直近 1 時間の滑走窓であり、ある時刻に全量が戻るのではなく、古い保存が窓を抜けるたびに 1 回分ずつ戻る。セッション経由の要求には付かない。
+
+## 冪等性(Idempotency-Key)
+
+**`POST /api/articles` と `POST /api/admin/ads` は `Idempotency-Key` ヘッダを受ける。**通信断で応答を失ったクライアントが同じキーで再送すると、2 件目を作らず、最初の要求が作った記事(広告)を返す。どちらも一意な項目を持たない資源であり、キーが無いと再送のたびに重複する。他の POST は既に冪等であるため対象にしない(分類は slug の一意制約で 409 になり、画像は内容アドレスで同じものに収まり、公開は何度送っても同じ状態に行き着く。キーの発行は生値を保存できず、再送に同じ応答を返せない)。
+
+- キーは 1 - 255 文字の表示可能な ASCII である(UUID などの乱数を使う)。違反は 400。
+- キーの範囲は**利用者と操作の組**である。同じ利用者のセッションと API キーは同じ範囲を共有し、別の利用者のキーとは衝突しない。
+- **同じキー・同じ本体の再送**には 201 で最初の結果を返し、`Idempotent-Replayed: true` を付ける。本体は資源の現在の状態であり、記事なら最初の保存で取り込めなかった画像(`media_failures`)も再び返す。再送はレート制限を消費せず、画像の取得もしない。本体の同一性は、検証と正規化を済ませた後の内容で判定する(キーの順序や空白の違いは同じ要求とみなす)。
+- **同じキー・違う本体**は 422(`idempotency_key_reused`)である。最初の結果を返すと、送られてもいない要求に答えることになるためである。
+- キーは作成と同じトランザクションで記録する。作成が失敗した要求はキーを残さないため、同じキーでそのまま再送できる。
+- **同じキーの要求が同時に届いた場合**は、後着が先着のトランザクションの完了を待ち、先着の結果を再生する(どちらも 201 で、資源は 1 つだけ作られる)。
+- キーは 24 時間保持する。過ぎたキーは新しいキーとして扱われ、予約公開の巡回が順次削除する。
+
+Web UI のエディタは新規作成の保存にキーを付ける。本体を変えずに保存し直す(二度押し・応答の喪失)と同じキーを使い、本体を変えれば新しいキーにする。
+
 ## 投稿 API に通知の要否を指定するフラグは無い
 
 投稿 API は「この記事は通知する / しない」を指定するフラグを**持たない**。意図的である。
@@ -201,10 +249,10 @@ python -m server.cli revoke-token --id <token_id>
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
 | `/api/me` | GET | 認証必須 | ユーザー・保有ロール・所属報道社(保有ロールから引ける `publishers`)・管理者か・購読タグ。 |
-| `/api/me/tokens` | GET | 認証必須 | 自分のキー一覧(`token_prefix` / `name` / `scopes` / 日時)。**生値は返さない。** |
+| `/api/me/tokens` | GET | 認証必須 | 自分のキー一覧(`ItemList`。各要素は `token_prefix` / `name` / `scopes` / 日時)。**生値は返さない。** |
 | `/api/me/tokens` | POST | 認証必須 | `{name, scopes[], expires_days?}`。**発行資格を検査する**(管理者スコープは管理者のみ)。生値を**この応答でだけ**返す。 |
 | `/api/me/tokens/{id}` | DELETE | 認証必須 | 自分のキーを失効させる(`revoked_at` を設定)。 |
-| `/api/me/subscriptions` | GET | 認証必須 | 購読中のタグ一覧。 |
+| `/api/me/subscriptions` | GET | 認証必須 | 購読中のタグ一覧(`ItemList`)。 |
 | `/api/me/subscriptions/{tag_slug}` | PUT | 認証必須 | タグを購読する。 |
 | `/api/me/subscriptions/{tag_slug}` | DELETE | 認証必須 | タグの購読を解除する。 |
 
@@ -212,14 +260,14 @@ python -m server.cli revoke-token --id <token_id>
 
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
-| `/api/articles?category=&tag=&publisher=&series=&author=&latest_only=&page=&per_page=` | GET | 不要 | 閲覧範囲で絞った一覧。既定は `status='published'` の降順。`latest_only=1` のとき `categories.include_in_latest = 1` のカテゴリのみ(トップの新着一覧が定期記事で埋まるのを防ぐ)。 |
+| `/api/articles?category=&tag=&publisher=&series=&author=&latest_only=&per_page=&cursor=&include_total=` | GET | 不要 | 閲覧範囲で絞った `status='published'` の記事の `Page`。`published_at` の新しい順(同時刻は `id` の大きい順)。`latest_only=1` のとき `categories.include_in_latest = 1` のカテゴリのみ(トップの新着一覧が定期記事で埋まるのを防ぐ)。報道社の記事一覧はこの `publisher=` で取る。 |
 | `/api/articles/{slug}` | GET | 不要 | 記事詳細。**閲覧不可なら 404**(403 は存在を教えてしまう)。記事が過去に使っていた slug なら現在の slug へ **301**(後述の「slug の変更とリダイレクト」)。`view_count` を加算する。応答に `ETag` を付ける。賛否(`up_count` / `down_count` / `score`)とコメント数(`comment_count`)は当該記事の全通知の合計。`score = up_count - down_count` であり**負になりうる**。訂正(`article_revisions.is_correction`)の一覧も返す。通知メッセージの内訳を `discord_posts` として返す(1 記事が複数チャンネルへ通知されうるため配列)。各要素は `channel_id` / `message_id` / `thread_id` / `thread_url` / `up_count` / `down_count` / `score` / `comment_count` / `posted_at` を持ち、未送信・スレッド未作成の行では該当項目が `null` になる。**`thread_url` はサーバーが組み立てる。**スレッドの URL には対象 guild の ID が要り、それは設定(`discord.guild_id`)にしかないため、画面には組み立てられない。 |
-| `/api/articles/{slug}/comments?page=&per_page=` | GET | 不要 | 記事のコメント。**閲覧範囲は記事と同じであり、記事が 404 ならコメントも 404** になる(本文を伏せたまま「何がどれだけ語られたか」を漏らさない)。古い順に返す(コメントは会話であり、点数順に並べ替えると返信が元の発言より前に出て文脈が壊れる)。各要素は `id` / `message_id` / `author` / `body` / `up_count` / `down_count` / `score` / `posted_at` / `edited_at`。`author` は users に居ない投稿者(guild を抜けた利用者・他の bot)では `discord_user_id` だけが埋まり、名前とアバターは `null` になる。`body` は Discord の生の記法のままであり、**サーバーは整形しない**(画面が必ずエスケープして出す)。`total` はその記事のコメント総数、`thread_url` は Discord のスレッドへの入口。**この API は読み出しのみで、書き込みを受け付けない**(コメントの実体は Discord のスレッドにあり、書く場所はそこだけである)。 |
+| `/api/articles/{slug}/comments?per_page=&cursor=&include_total=` | GET | 不要 | 記事のコメントの `Page` に `thread_url` を加えたもの。**閲覧範囲は記事と同じであり、記事が 404 ならコメントも 404** になる(本文を伏せたまま「何がどれだけ語られたか」を漏らさない)。古い順に返す(コメントは会話であり、点数順に並べ替えると返信が元の発言より前に出て文脈が壊れる)。各要素は `id` / `message_id` / `author` / `body` / `up_count` / `down_count` / `score` / `posted_at` / `edited_at`。`author` は users に居ない投稿者(guild を抜けた利用者・他の bot)では `discord_user_id` だけが埋まり、名前とアバターは `null` になる。`body` は Discord の生の記法のままであり、**サーバーは整形しない**(画面が必ずエスケープして出す)。`include_total=true` なら `total` はその記事のコメント総数、`thread_url` は Discord のスレッドへの入口。**この API は読み出しのみで、書き込みを受け付けない**(コメントの実体は Discord のスレッドにあり、書く場所はそこだけである)。 |
 | `/api/articles/by-id/{id}` | GET | 不要 | 記事詳細を不変の `id` で引く。応答・閲覧範囲の判定(閲覧不可なら 404)・`ETag` は slug 版と同じ。**`view_count` は加算しない**(編集画面や自動投稿クライアントが書き込む前に読むためのものであり、読者の閲覧ではない)。 |
-| `/api/articles` | POST | `articles:write` | 記事の作成。本体は `ArticleCreate`(後述の「記事の書き込み」)。応答に画像の取り込み失敗(`media_failures`)を含める。**黙って元 URL を残さず、必ず執筆者に伝える。**応答に `ETag` を付ける。 |
-| `/api/articles/{id}` | PATCH | `articles:write` | 記事の**部分更新**。本体は `ArticleUpdate` で、**送ったキーだけを更新する**。`If-Match` があれば検査し、不一致なら 412。応答は POST と同じく `media_failures` と `ETag` を含む。 |
+| `/api/articles` | POST | `articles:write` | 記事の作成。本体は `ArticleCreate`(後述の「記事の書き込み」)。応答に画像の取り込み失敗(`media_failures`)を含める。**黙って元 URL を残さず、必ず執筆者に伝える。**応答に `ETag` を付ける。`Idempotency-Key` を受ける(前掲の「冪等性」)。API キー経由なら残量ヘッダを付ける(前掲の「レート制限」)。 |
+| `/api/articles/{id}` | PATCH | `articles:write` | 記事の**部分更新**。本体は `ArticleUpdate` で、**送ったキーだけを更新する**。`If-Match` があれば検査し、不一致なら 412。応答は POST と同じく `media_failures` と `ETag` を含み、API キー経由なら残量ヘッダを付ける。 |
 | `/api/articles/{id}/publish` | POST | `articles:write` | 公開。`status='published'`、`published_at = COALESCE(published_at, NOW())`(**再公開で `published_at` を動かさない**)。公開時に `publisher_id` を凍結し、同じトランザクションで通知を積む。`If-Match` があれば検査し、不一致なら 412。応答に `ETag` を付ける。 |
-| `/api/articles/{slug}/revisions` | GET | 不要 | 改版履歴の一覧。 |
+| `/api/articles/{slug}/revisions?per_page=&cursor=&include_total=` | GET | 不要 | 改版履歴の `Page`。新しい改版から順に返す。 |
 | `/api/articles/{slug}/revisions/{n}` | GET | 不要 | 過去版のスナップショット。 |
 | `/api/articles/{slug}/revisions/{n}/diff` | GET | 不要 | 直前版との差分(unified diff を行の配列で返す)。 |
 
@@ -287,27 +335,30 @@ slug は作成時に見出しから生成するか明示し、以後は **`slug`
 
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
-| `/api/categories` | GET | 不要 | カテゴリ一覧(`position` 順)。 |
-| `/api/tags` | GET | 不要 | タグ一覧。 |
+| `/api/categories` | GET | 不要 | カテゴリ一覧(`ItemList`、`position` 順)。 |
+| `/api/tags` | GET | 不要 | タグ一覧(`ItemList`)。 |
 | `/api/tags/{slug}` | GET | 不要 | タグの詳細(説明・アイコン)。 |
-| `/api/tags/{slug}/timeline?page=` | GET | 不要 | そのタグの記事を `published_at` **昇順**で返す(タグ年表)。 |
-| `/api/publishers` | GET | 不要 | 報道社一覧。 |
-| `/api/publishers/{slug}` | GET | 不要 | 報道社のプロフィール + 所属記者一覧(`role_id` を保有する `users`)+ 実績。 |
-| `/api/series` | GET | 不要 | 連載一覧。 |
-| `/api/series/{slug}` | GET | 不要 | 連載の詳細と所属記事。 |
+| `/api/tags/{slug}/timeline?per_page=&cursor=&include_total=` | GET | 不要 | そのタグの記事の `Page` を `published_at` **昇順**で返す(タグ年表)。 |
+| `/api/publishers` | GET | 不要 | 報道社一覧(`ItemList`)。 |
+| `/api/publishers/{slug}` | GET | 不要 | 報道社のプロフィール + 所属記者一覧(`role_id` を保有する `users`)+ 実績。記事は含めない(`/api/articles?publisher=` で取る)。 |
+| `/api/series` | GET | 不要 | 連載一覧(`ItemList`)。 |
+| `/api/series/{slug}` | GET | 不要 | 連載の詳細。記事は含めない(下の `/articles` で取る)。 |
+| `/api/series/{slug}/articles?per_page=&cursor=&include_total=` | GET | 不要 | 連載の記事の `Page` を回の順に返す(`series_position` の昇順。回の無い記事は末尾に、公開の古い順で並ぶ)。 |
+
+記事を含む下位の一覧を持つのは、独自の並びを持つもの(タグ年表・連載の回順)だけである。報道社の記事は新着順であり、`/api/articles` の絞り込みと同じものなので、別の口を設けない。
 
 ### 検索
 
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
-| `/api/search?q=&page=` | GET | 不要 | `MATCH(title, body_md) AGAINST (%s IN NATURAL LANGUAGE MODE)` による全文検索。閲覧範囲で絞る。 |
+| `/api/search?q=&per_page=&cursor=&include_total=` | GET | 不要 | `MATCH(title, body_md) AGAINST (%s IN NATURAL LANGUAGE MODE)` による全文検索の `Page`。閲覧範囲で絞る。関連度の高い順(同点は新しい順)。cursor は位置を運ぶ(前掲の「一覧の規約」)。 |
 
 ### ランキング
 
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
-| `/api/rankings/publishers?days=7&limit=10` | GET | 不要 | 報道社ランキング。各行は `publisher`(slug/name/logo_url/stance)・`article_count`・`up_count`・`down_count`・`comment_count`・`score`。score の規則は後述。 |
-| `/api/rankings/articles?metric=views&limit=5` | GET | 不要 | 記事ランキング(トップのサイドバー)。`metric=views` はアクセス数(アクセスランキング)、`metric=featured` は反応=記事の点数+コメント数(注目)で並べ替える。各要素は記事一覧と同じ `ArticleListItem`。並び順の規則は後述。 |
+| `/api/rankings/publishers?days=7&limit=10` | GET | 不要 | 報道社ランキング(`ItemList`)。各行は `publisher`(slug/name/logo_url/stance)・`article_count`・`up_count`・`down_count`・`comment_count`・`score`。score の規則は後述。 |
+| `/api/rankings/articles?metric=views&limit=5` | GET | 不要 | 記事ランキング(`ItemList`。トップのサイドバー)。`metric=views` はアクセス数(アクセスランキング)、`metric=featured` は反応=記事の点数+コメント数(注目)で並べ替える。各要素は記事一覧と同じ `ArticleListItem`。並び順の規則は後述。 |
 
 報道社ランキングの集計対象は `status='published'` かつ `visibility='public'` かつ `published_at >= NOW() - INTERVAL days DAY` の記事に限る(**閲覧制限のある記事を公開のランキングに混ぜない**)。記事広告(`is_sponsored`)は**含める**(開示されている以上、読者はそれを踏まえて反応している)。
 
@@ -355,16 +406,17 @@ slug は作成時に見出しから生成するか明示し、以後は **`slug`
 
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
-| `/api/admin/ad-slots` | GET | `ads:admin` | 枠と推奨寸法・説明。 |
-| `/api/admin/ads` | GET, POST | `ads:admin` | 広告の一覧・登録。 |
+| `/api/admin/ad-slots` | GET | `ads:admin` | 枠と推奨寸法・説明(`ItemList`)。 |
+| `/api/admin/ads?per_page=&cursor=&include_total=` | GET | `ads:admin` | 広告の `Page`(登録の新しい順。停止した広告も含む)。 |
+| `/api/admin/ads` | POST | `ads:admin` | 広告の登録。`Idempotency-Key` を受ける(前掲の「冪等性」)。 |
 | `/api/admin/ads/{id}` | GET, PATCH, DELETE | `ads:admin` | 広告の取得・更新・停止。**DELETE は物理削除ではなく `is_active=0`**(実績を残す)。 |
 | `/api/admin/ads/{id}/stats?from=&to=` | GET | `ads:admin` | 日次実績(`ad_stats_daily`)。 |
-| `/api/admin/categories`, `/api/admin/categories/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | カテゴリの管理。 |
-| `/api/admin/tags`, `/api/admin/tags/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | タグの管理。 |
-| `/api/admin/publishers`, `/api/admin/publishers/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | 報道社の管理。 |
-| `/api/admin/roles` | GET | 管理者(スコープではない) | 対象 guild のロールの一覧。各項目は `id` / `name` / `color` / `position` / `is_administrator`。ロールを指す設定の欄と報道社の所属ロールの選択肢に使う。**権限ビットそのものは返さず、Administrator かどうかを `is_administrator` に解決して返す。** |
-| `/api/admin/settings` | GET | `settings:admin` | プラットフォームの設定の一覧。各項目は `key` / `kind` / `label` / `description` / `editable` / `restart_required` / `secret` / `ref` / `minimum` / `exclusive_minimum` / `maximum` / `value` / `is_set` / `updated_at` / `updated_by` を持つ。**秘密の設定は生値を返さず、`value` は `null`、設定済みかどうかは `is_set` が示す。** |
-| `/api/admin/settings` | PATCH | `settings:admin` | 設定の**部分更新**。本体は `{"updates": {"<key>": <value>, ...}}`。応答は変更したキーの一覧と、更新後の一覧(GET と同じ形)。 |
+| `/api/admin/categories`, `/api/admin/categories/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | カテゴリの管理。一覧は `ItemList`。 |
+| `/api/admin/tags`, `/api/admin/tags/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | タグの管理。一覧は `ItemList`。 |
+| `/api/admin/publishers`, `/api/admin/publishers/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | 報道社の管理。一覧は `ItemList`。 |
+| `/api/admin/roles` | GET | 管理者(スコープではない) | 対象 guild のロールの一覧(`ItemList`)。各項目は `id` / `name` / `color` / `position` / `is_administrator`。ロールを指す設定の欄と報道社の所属ロールの選択肢に使う。**権限ビットそのものは返さず、Administrator かどうかを `is_administrator` に解決して返す。** |
+| `/api/admin/settings` | GET | `settings:admin` | プラットフォームの設定の一覧(`items`)。各項目は `key` / `kind` / `label` / `description` / `editable` / `restart_required` / `secret` / `ref` / `minimum` / `exclusive_minimum` / `maximum` / `value` / `is_set` / `updated_at` / `updated_by` を持つ。**秘密の設定は生値を返さず、`value` は `null`、設定済みかどうかは `is_set` が示す。** |
+| `/api/admin/settings` | PATCH | `settings:admin` | 設定の**部分更新**。本体は `{"updates": {"<key>": <value>, ...}}`。応答は変更したキーの一覧(`updated_keys`)と、更新後の一覧(GET と同じ `items`)。 |
 
 設定の各キーの意味・型・変更可否は [docs/settings.md](settings.md) にある。本書は API の面だけを扱う。API の面で押さえるべき点は次のとおりである。
 
@@ -432,10 +484,14 @@ slug は作成時に見出しから生成するか明示し、以後は **`slug`
 | 速報フラグ・報道社の指定など、資格を満たさない内容の保存 | 403 |
 | 閲覧できない記事・画像 | **404**(403 は存在を教えてしまう) |
 | 記事が過去に使っていた slug への要求(閲覧できる場合) | 301 |
-| 入力の不備(`is_sponsored=1` で `sponsor_name` が空、予約語の slug など) | 400 |
+| 入力の不備(`is_sponsored=1` で `sponsor_name` が空、予約語の slug、形式の崩れた `Idempotency-Key` など) | 400 |
+| 形式の崩れた cursor、別の一覧・別のフィルタで発行された cursor(`invalid_cursor`) | 400 |
 | 本体の形式の不備(必須項目の欠落、未知のキー、NULL を許さない項目への `null` など) | 422 |
-| 既存の状態との衝突(使用中・予約済みの slug、記事の保存の処理中に別の保存が割り込んだ) | 409 |
+| 使用済みの `Idempotency-Key` を違う本体で送った(`idempotency_key_reused`) | 422 |
+| 既存の状態との衝突(使用中・予約済みの slug、同時に作成された記事との slug の衝突、記事の保存の処理中に別の保存が割り込んだ) | 409 |
 | `If-Match` が記事の現在の `ETag` と一致しない | 412 |
 | キー単位のレート制限の超過 | 429 |
+
+どのエラーも本体は前掲の `{"error": {...}}` の形であり、`code` で種類を見分けられる。
 
 例外から HTTP への変換は `server/app/errors.py` に集約し、`server/main.py` で例外ハンドラとして登録する。

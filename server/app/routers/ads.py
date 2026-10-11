@@ -96,7 +96,12 @@ async def serve_ad(
     )
 
 
-@router.get('/ads/{ad_id}/click')
+@router.get(
+    '/ads/{ad_id}/click',
+    status_code=status.HTTP_302_FOUND,
+    response_class=RedirectResponse,
+    responses={302: {'description': '広告のリンク先へ転送する。', 'headers': {'Location': {'description': 'リンク先。', 'schema': {'type': 'string'}}}}},
+)
 async def click_ad(ad_id: str, db: Annotated[Database, Depends(get_db)]) -> RedirectResponse:
     """Count one click and forward to the ad's click destination.
 

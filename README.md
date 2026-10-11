@@ -142,6 +142,13 @@ docker compose -f docker-compose.test.yml down -v
 
 1 行目の終了コードが pytest の結果です。テストは `tests/` にあり、設定は `tests/config.test.yaml` を使います。
 
+HTTP API の契約は `docs/openapi.json` です。ルートや応答の型を変えると、生成結果とこのファイルが食い違ってテストが失敗します。変更を確かめたうえで、次のコマンドで生成し直してください。DB は要らないため `--no-deps` で起動します。ビルドを別のコマンドに分けるのは、ビルドのログが標準出力に出てファイルに混ざるためです。
+
+```bash
+docker compose -f docker-compose.test.yml build tests
+docker compose -f docker-compose.test.yml run --rm --no-deps -T tests python -m server.openapi > docs/openapi.json
+```
+
 ## ドキュメント
 
 | ドキュメント | 内容 |

@@ -57,7 +57,7 @@ async def test_slug_is_kept_unless_given(client: httpx.AsyncClient, world: World
     ('old_path', 'new_path'),
     [
         ('/api/articles/old-slug', '/api/articles/new-slug'),
-        ('/api/articles/old-slug/comments?page=1&per_page=10', '/api/articles/new-slug/comments?page=1&per_page=10'),
+        ('/api/articles/old-slug/comments?per_page=10&include_total=true', '/api/articles/new-slug/comments?per_page=10&include_total=true'),
         ('/api/articles/old-slug/revisions', '/api/articles/new-slug/revisions'),
         ('/api/articles/old-slug/revisions/1', '/api/articles/new-slug/revisions/1'),
         ('/api/articles/old-slug/revisions/1/diff', '/api/articles/new-slug/revisions/1/diff'),

@@ -168,11 +168,11 @@
 import { get, qs, escapeHtml, formatDateTime, articleUrl, renderAdSlot, mediaVariant } from '/static/js/api.js';
 import { mountChrome, listOf, displayName, avatarHtml, pubLogoHtml, tagIconHtml, cssUrlRaw } from '/static/js/chrome.js';
 
-/* How many articles to fetch at once. The article listing, and also the breaking-news band and the sidebar's two rankings, are all built from the same fetch. */
+/* How many articles to fetch at once. On the first page of the latest listing, the article listing and the breaking-news band are built from the same fetch. */
 const PER_PAGE = 20;
 
-/* The recent latest articles, shared by the breaking-news band and the sidebar rankings. latest_only=1 drops sections of recurring articles such as market prices (categories.include_in_latest = 0) from the site-wide latest feed. */
-const LATEST_URL = '/api/articles' + qs({ latest_only: 1, page: 1, per_page: PER_PAGE });
+/* The first page of the latest articles, shared by the article listing and the breaking-news band. latest_only=1 drops sections of recurring articles such as market prices (categories.include_in_latest = 0) from the site-wide latest feed. include_total=1 asks for the count shown beside the heading. */
+const LATEST_URL = listUrl({ kind: 'latest', cursor: null });
 
 /* Max tags shown on one listing row. Showing them all stretches the row and buries the headline, so the rest are left to the article page. */
 const TAGS_PER_ROW = 3;
@@ -286,39 +286,40 @@ function articleRowHtml(article) {
  * Decide from the URL what the article listing shows.
  * /categories/{slug} is a section page; latest_only is not applied there, so articles of a section excluded from the latest listing still appear on that section's own page.
  * Search (?q=) and series (?series=) have no dedicated route, so they are expressed as states of the home page.
+ * Which page is shown is the ?cursor= the pager put there: the API's opaque next_cursor / prev_cursor, passed through untouched.
  */
 function resolveView() {
   const params = new URLSearchParams(location.search);
-  const parsed = Number.parseInt(params.get('page') || '1', 10);
-  const page = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+  const cursor = params.get('cursor') || null;
 
   const matched = location.pathname.match(/^\/categories\/([^/]+)\/?$/);
-  if (matched) return { kind: 'category', slug: decodeURIComponent(matched[1]), page };
+  if (matched) return { kind: 'category', slug: decodeURIComponent(matched[1]), cursor };
 
   const q = (params.get('q') || '').trim();
-  if (q) return { kind: 'search', q, page };
+  if (q) return { kind: 'search', q, cursor };
 
   const series = (params.get('series') || '').trim();
-  if (series) return { kind: 'series', slug: series, page };
+  if (series) return { kind: 'series', slug: series, cursor };
 
-  return { kind: 'latest', page };
+  return { kind: 'latest', cursor };
 }
 
-/** Where the listing to show is fetched from. */
+/** Where the listing to show is fetched from. A series is listed in installment order, the order it is meant to be read in. */
 function listUrl(view) {
+  const paging = { per_page: PER_PAGE, include_total: 1, cursor: view.cursor };
   switch (view.kind) {
-    case 'category': return '/api/articles' + qs({ category: view.slug, page: view.page, per_page: PER_PAGE });
-    case 'search': return '/api/search' + qs({ q: view.q, page: view.page });
-    case 'series': return '/api/articles' + qs({ series: view.slug, page: view.page, per_page: PER_PAGE });
-    default: return '/api/articles' + qs({ latest_only: 1, page: view.page, per_page: PER_PAGE });
+    case 'category': return '/api/articles' + qs({ category: view.slug, ...paging });
+    case 'search': return '/api/search' + qs({ q: view.q, ...paging });
+    case 'series': return `/api/series/${encodeURIComponent(view.slug)}/articles` + qs(paging);
+    default: return '/api/articles' + qs({ latest_only: 1, ...paging });
   }
 }
 
-/** Where the pager goes. Keeps the current filter (section, query, series) and replaces only the page number. */
-function pageHref(page) {
+/** Where the pager goes. Keeps the current filter (section, query, series) and replaces only the cursor. */
+function pageHref(cursor) {
   const url = new URL(location.href);
-  if (page <= 1) url.searchParams.delete('page');
-  else url.searchParams.set('page', String(page));
+  if (cursor) url.searchParams.set('cursor', cursor);
+  else url.searchParams.delete('cursor');
   return url.pathname + url.search;
 }
 
@@ -407,8 +408,8 @@ async function mountArticles(view, listP, categoriesP) {
   }
   setHtml(listEl, items.map(articleRowHtml).join(''));
 
-  const prev = view.page > 1 ? `<a href="${escapeHtml(pageHref(view.page - 1))}">← 前のページ</a>` : '';
-  const next = data && data.has_next ? `<a href="${escapeHtml(pageHref(view.page + 1))}">次のページ →</a>` : '';
+  const prev = data && data.prev_cursor ? `<a href="${escapeHtml(pageHref(data.prev_cursor))}">← 前のページ</a>` : '';
+  const next = data && data.next_cursor ? `<a href="${escapeHtml(pageHref(data.next_cursor))}">次のページ →</a>` : '';
   if (prev || next) {
     pagerEl.innerHTML = prev + (prev && next ? ' ・ ' : '') + next;
     pagerEl.hidden = false;

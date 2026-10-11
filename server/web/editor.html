@@ -303,6 +303,23 @@ const state = {
 
 const el = (id) => document.getElementById(id);
 
+/* The Idempotency-Key of the article creation not yet confirmed, with the body it was sent with. Resending the same body (a double click, a retry after the response was lost) reuses the key, so the server returns the article already created instead of making a second one. A changed body is a new request and gets a new key, which the server would otherwise refuse as a reused key. */
+let pendingCreate = null;
+
+/** A random key from getRandomValues, which unlike crypto.randomUUID is available on plain http too. */
+function randomKey() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** The Idempotency-Key header for creating the article from this body. */
+function createKeyHeader(payload) {
+  const body = JSON.stringify(payload);
+  if (!pendingCreate || pendingCreate.body !== body) pendingCreate = { key: randomKey(), body };
+  return { 'Idempotency-Key': pendingCreate.key };
+}
+
 /* Reading the inputs, and applying state back into them */
 
 /** Turn the tag field into an array of slugs. The leading # is optional. */
@@ -608,10 +625,11 @@ async function save(overrides) {
   try {
     const { data: res, headers } = state.articleId
       ? await apiResponse(`/api/articles/${encodeURIComponent(state.articleId)}`, { method: 'PATCH', body: payload, headers: ifMatch() })
-      : await apiResponse('/api/articles', { method: 'POST', body: payload });
+      : await apiResponse('/api/articles', { method: 'POST', body: payload, headers: createKeyHeader(payload) });
     const article = res.article;
     const failures = res.media_failures || [];
 
+    pendingCreate = null;
     state.articleId = article.id;
     state.slug = article.slug;
     state.status = article.status;

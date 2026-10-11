@@ -5,6 +5,8 @@
 Never let the loop die on an exception. If one article failing to publish stopped the scheduler, every later scheduled article would stay unpublished and nobody would see it happen. Failures are logged and retried on the next pass.
 
 Settings are re-read every pass. Reading them once at startup would mean a server restart before a change to the poll interval takes effect. Settings are held briefly, so re-reading does not make every pass a DB query.
+
+Each pass also deletes a bounded batch of expired Idempotency-Key records. Lookups already ignore them, so a pass that fails to sweep changes no behaviour; it only lets the table grow until a later pass catches up.
 """
 
 from __future__ import annotations
@@ -19,11 +21,15 @@ from common.db import Database
 from common.settings import RuntimeSettings, SettingsStore
 
 from .articles import publish_article
+from .idempotency import purge_expired
 
 logger = logging.getLogger(__name__)
 
 # Max articles handled in one pass, so that one pass takes a bounded time however large the backlog of scheduled articles grows. Whatever is left over is picked up by the next pass.
 BATCH_LIMIT: Final = 100
+
+# Max expired Idempotency-Key records deleted in one pass, for the same reason.
+IDEMPOTENCY_PURGE_LIMIT: Final = 1000
 
 # Seconds to wait before the next pass, used only when the settings could not be read. When the DB is down or the settings table is broken, polling continues with no interval to go on, so this keeps the loop from spinning without a wait and hammering the DB. Never used while the settings are readable: the poll interval comes from settings.
 RETRY_INTERVAL_SECONDS: Final = 15
@@ -79,4 +85,8 @@ async def run_publish_scheduler(app: FastAPI) -> None:
             await _publish_due_articles(db, settings)
         except Exception:
             logger.exception('予約公開の巡回で例外が発生しました。次の周回へ進みます。')
+        try:
+            await purge_expired(db, limit=IDEMPOTENCY_PURGE_LIMIT)
+        except Exception:
+            logger.exception('期限切れの Idempotency-Key の削除に失敗しました。次の周回で再試行します。')
         await asyncio.sleep(interval)

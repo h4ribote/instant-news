@@ -1,6 +1,6 @@
 """The article listing projection, shared by every route that returns a list of articles.
 
-A listed article has the same shape (ArticleListItem) whatever the filter condition, and writing the assembly separately per condition lets the byline, reaction counts and tag resolution diverge between paths. This module holds that one assembly: the SELECT projection, the byline/taxonomy joins, the visibility-narrowed WHERE, a paged fetch (fetch_article_page) and a ranked fetch (fetch_ranked_articles). The taxonomy, search and rankings routers all drive it.
+A listed article has the same shape (ArticleListItem) whatever the filter condition, and writing the assembly separately per condition lets the byline, reaction counts and tag resolution diverge between paths. This module holds that one assembly: the SELECT projection, the byline/taxonomy joins, the visibility-narrowed WHERE, the cursor-paged fetches (fetch_article_page, and fetch_article_page_by_position for search) and a ranked fetch (fetch_ranked_articles). The articles, taxonomy, search and rankings routers all drive it.
 
 It lives at the service layer rather than inside a router because more than one router needs it, and because rankings.py — which the taxonomy router imports — must be able to reuse it without importing a router back (which would be a cycle).
 
@@ -16,12 +16,39 @@ from typing import Any, Final
 
 from common.db import Database
 
+from .paging import KeysetOrder, PageRequest, PageRows, SortKey, fetch_by_position, fetch_keyset, paging_params
 from .principals import Principal
 from .schemas import ArticleListItem, CategoryOut, Page, PublisherOut, SeriesBrief, TagOut, UserBrief
 from .visibility import visibility_sql_filter
 
-# Items per page of a listing. The tag timeline and search take only page in the query, so the count is fixed here.
+# Items per page of an article listing: the default, and the most a request may ask for.
 DEFAULT_PER_PAGE: Final = 20
+MAX_PER_PAGE: Final = 100
+
+# The paging parameters of every article listing.
+article_paging: Final = paging_params(DEFAULT_PER_PAGE, MAX_PER_PAGE)
+
+_PUBLISHED_AT: Final = SortKey('articles.published_at', lambda row: row['published_at'], 'datetime')
+_ID: Final = SortKey('articles.id', lambda row: row['id'], 'int')
+
+# Newest first, the order of the article listing. The id makes the order total, so articles sharing a timestamp are neither repeated nor skipped at a page boundary.
+LATEST_ORDER: Final = KeysetOrder(
+    (
+        SortKey(_PUBLISHED_AT.expr, _PUBLISHED_AT.value, 'datetime', descending=True),
+        SortKey(_ID.expr, _ID.value, 'int', descending=True),
+    )
+)
+# Oldest first, the order of a tag's timeline.
+TIMELINE_ORDER: Final = KeysetOrder((_PUBLISHED_AT, _ID))
+# A series in installment order. Articles without a position go last, oldest first among them; the NULL is folded into a flag and a substitute value because a keyset comparison needs non-null keys.
+SERIES_ORDER: Final = KeysetOrder(
+    (
+        SortKey('(articles.series_position IS NULL)', lambda row: int(row['series_position'] is None), 'int'),
+        SortKey('COALESCE(articles.series_position, 0)', lambda row: row['series_position'] or 0, 'int'),
+        _PUBLISHED_AT,
+        _ID,
+    )
+)
 
 # The columns of a listed article. DictCursor collapses same-named columns last-one-wins, so every column from a joined table is given a prefixed alias.
 _ARTICLE_COLUMNS: Final = '''
@@ -168,44 +195,63 @@ def _article_list_item(row: Mapping[str, Any], tags: list[TagOut]) -> ArticleLis
     )
 
 
+async def _article_page(db: Database, fetched: PageRows) -> Page[ArticleListItem]:
+    tags_by_article = await _fetch_tags_for_articles(db, [int(row['id']) for row in fetched.rows])
+    return Page[ArticleListItem](
+        items=[_article_list_item(row, tags_by_article.get(int(row['id']), [])) for row in fetched.rows],
+        per_page=fetched.per_page,
+        next_cursor=fetched.next_cursor,
+        prev_cursor=fetched.prev_cursor,
+        total=fetched.total,
+    )
+
+
 async def fetch_article_page(
     db: Database,
+    request: PageRequest,
+    *,
+    where: str,
+    where_args: Sequence[Any],
+    order: KeysetOrder,
+    joins: str = '',
+) -> Page[ArticleListItem]:
+    """Return one page of the articles matching the condition, in the listing representation, paged by keyset.
+
+    where / joins are SQL fragments the caller writes as constants inside its own module; values that came from the request must never be mixed into them. Values are passed as placeholders via where_args. joins carries only what the condition narrows by, because the total (when asked for) counts over articles and those joins alone: the byline/taxonomy joins are against NOT NULL foreign keys or outer joins, and cannot change the count.
+    """
+    fetched = await fetch_keyset(
+        db,
+        request,
+        select=f'SELECT {_ARTICLE_COLUMNS} {_ARTICLE_JOINS} {joins}',
+        count_from=f'FROM articles {joins}',
+        where=where,
+        where_args=where_args,
+        order=order,
+    )
+    return await _article_page(db, fetched)
+
+
+async def fetch_article_page_by_position(
+    db: Database,
+    request: PageRequest,
     *,
     where: str,
     where_args: Sequence[Any],
     order_by: str,
     order_args: Sequence[Any] = (),
-    joins: str = '',
-    page: int,
-    per_page: int = DEFAULT_PER_PAGE,
 ) -> Page[ArticleListItem]:
-    """Return one page of the articles matching the condition, in the listing representation.
-
-    where / order_by / joins are SQL fragments the caller writes as constants inside its own module; values that came from the request must never be mixed into them. Values are passed as placeholders via where_args / order_args.
-
-    The total is counted with COUNT(*) over the same condition. That count query does not need the byline/taxonomy joins (the inner joins are against NOT NULL foreign keys and do not change the count, and the outer joins cannot change it at all), so only the joins used for narrowing are passed.
-    """
-    total = int(await db.fetch_val(f'SELECT COUNT(*) FROM articles {joins} WHERE {where}', *where_args) or 0)
-    offset = (page - 1) * per_page
-    rows: list[dict[str, Any]] = []
-    # A page of results past the total is certain to hold no rows, so the row query is not issued at all.
-    if offset < total:
-        rows = await db.fetch_all(
-            f'SELECT {_ARTICLE_COLUMNS} {_ARTICLE_JOINS} {joins} WHERE {where} ORDER BY {order_by} LIMIT %s OFFSET %s',
-            *where_args,
-            *order_args,
-            per_page,
-            offset,
-        )
-    tags_by_article = await _fetch_tags_for_articles(db, [int(row['id']) for row in rows])
-    items = [_article_list_item(row, tags_by_article.get(int(row['id']), [])) for row in rows]
-    return Page[ArticleListItem](
-        items=items,
-        page=page,
-        per_page=per_page,
-        total=total,
-        has_next=offset + len(items) < total,
+    """Return one page of the articles matching the condition, paged by position. For search alone, whose relevance order has no stable key."""
+    fetched = await fetch_by_position(
+        db,
+        request,
+        select=f'SELECT {_ARTICLE_COLUMNS} {_ARTICLE_JOINS}',
+        count_from='FROM articles',
+        where=where,
+        where_args=where_args,
+        order_by=order_by,
+        order_args=order_args,
     )
+    return await _article_page(db, fetched)
 
 
 # The article rankings (the home page sidebar's アクセスランキング and 注目).

@@ -17,7 +17,7 @@ from ..auth import create_api_token, ensure_can_issue_scopes, list_api_tokens, r
 from ..deps import get_db, get_principal, get_settings
 from ..errors import Forbidden, NotFound
 from ..principals import Principal, is_admin
-from ..schemas import MeOut, TagOut, TokenCreate, TokenCreated, TokenOut
+from ..schemas import ItemList, MeOut, TagOut, TokenCreate, TokenCreated, TokenOut
 
 router = APIRouter(tags=['me'])
 
@@ -44,7 +44,7 @@ def _reject_token_principal(principal: Principal) -> None:
         raise Forbidden('API キーの発行・失効は API キー経由では行えません。Web UI からログインするか CLI を使ってください。')
 
 
-@router.get('/api/me', response_model=MeOut)
+@router.get('/api/me')
 async def read_me(
     principal: Principal = Depends(get_principal),
     db: Database = Depends(get_db),
@@ -89,17 +89,17 @@ async def read_me(
     )
 
 
-@router.get('/api/me/tokens', response_model=list[TokenOut])
+@router.get('/api/me/tokens')
 async def read_tokens(
     principal: Principal = Depends(get_principal),
     db: Database = Depends(get_db),
-) -> list[TokenOut]:
+) -> ItemList[TokenOut]:
     """Listing of your own API keys. The raw value is not in the DB so it cannot be returned, and no design may ever make it returnable."""
     rows = await list_api_tokens(db, principal.user_id)
-    return [TokenOut.model_validate(row) for row in rows]
+    return ItemList[TokenOut](items=[TokenOut.model_validate(row) for row in rows])
 
 
-@router.post('/api/me/tokens', response_model=TokenCreated, status_code=status.HTTP_201_CREATED)
+@router.post('/api/me/tokens', status_code=status.HTTP_201_CREATED)
 async def issue_token(
     payload: TokenCreate,
     principal: Principal = Depends(get_principal),
@@ -147,21 +147,21 @@ async def _load_tag(db: Database, tag_slug: str) -> dict[str, Any]:
     return row
 
 
-@router.get('/api/me/subscriptions', response_model=list[TagOut])
+@router.get('/api/me/subscriptions')
 async def read_subscriptions(
     principal: Principal = Depends(get_principal),
     db: Database = Depends(get_db),
-) -> list[TagOut]:
+) -> ItemList[TagOut]:
     """Listing of the tags you subscribe to."""
     rows = await db.fetch_all(
         f'SELECT {_TAG_COLUMNS} FROM tags t '
         'JOIN tag_subscriptions s ON s.tag_id = t.id WHERE s.user_id = %s ORDER BY t.name, t.id',
         principal.user_id,
     )
-    return [TagOut.model_validate(row) for row in rows]
+    return ItemList[TagOut](items=[TagOut.model_validate(row) for row in rows])
 
 
-@router.put('/api/me/subscriptions/{tag_slug}', response_model=TagOut)
+@router.put('/api/me/subscriptions/{tag_slug}')
 async def subscribe_tag(
     tag_slug: str,
     principal: Principal = Depends(get_principal),

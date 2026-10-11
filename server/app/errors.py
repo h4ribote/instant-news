@@ -81,6 +81,13 @@ class MediaError(BadRequest):
     default_message = '画像を処理できませんでした。'
 
 
+class InvalidCursor(BadRequest):
+    """A listing cursor that is malformed, or that was issued for another listing or other filters."""
+
+    code = 'invalid_cursor'
+    default_message = 'cursor が不正です。一覧の応答が返した next_cursor / prev_cursor をそのまま渡してください。'
+
+
 class Unauthorized(AppError):
     """Not authenticated: who the caller is remains unknown."""
 
@@ -132,6 +139,14 @@ class PreconditionFailed(AppError):
     status_code = 412
     code = 'precondition_failed'
     default_message = '記事は最後に読み込んだ後で更新されています。最新の内容を読み込み直してください。'
+
+
+class IdempotencyKeyReused(AppError):
+    """An Idempotency-Key already used for a request with a different body. Replaying the first result would answer a request that was never made."""
+
+    status_code = 422
+    code = 'idempotency_key_reused'
+    default_message = 'この Idempotency-Key は内容の異なる要求に使われています。新しい要求には新しいキーを使ってください。'
 
 
 class QuotaExceeded(AppError):
