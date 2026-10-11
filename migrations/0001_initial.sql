@@ -246,6 +246,7 @@ CREATE TABLE series (
 --   restricted  only logged-in users in the target guild who also hold one of the roles listed in article_visibility_roles
 -- The cover image (cover_image_url) is the exception: it goes into the Discord embed, so it is served without authentication. Even on a restricted article the cover is visible to anyone who knows its URL, so never choose a cover that gives away the contents of a confidential article. Images inside the body go through article_media and get the same check as the body.
 -- publisher_id is frozen at publication. Deriving the publisher from the author's current roles would rewrite the bylines of past articles the moment a reporter transfers.
+-- version cannot be replaced by article_revisions.revision_number: publishing (by hand or by the scheduler) rewrites status, publisher_id and published_at without creating a revision.
 CREATE TABLE articles (
     id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     slug             VARCHAR(200)    NOT NULL,                  -- Unique slug for the permalink.
@@ -266,6 +267,7 @@ CREATE TABLE articles (
     is_sponsored     TINYINT(1)      NOT NULL DEFAULT 0,        -- A sponsored article. The core draws the Sponsored label so that it cannot be removed.
     sponsor_name     VARCHAR(100)    NULL,                      -- Whose ad it is. Required when is_sponsored=1: the Sponsored label on its own is not a disclosure.
     view_count       BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    version          INT UNSIGNED    NOT NULL DEFAULT 1,        -- Version of the editable state, carried by the ETag. Every save and every publication that changes the row advances it; counting a view does not.
     scheduled_at     DATETIME        NULL,                      -- When it is due to publish, for status=scheduled.
     published_at     DATETIME        NULL,                      -- When it was first published.
     created_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -288,6 +290,17 @@ CREATE TABLE articles (
     CONSTRAINT fk_articles_publisher FOREIGN KEY (publisher_id) REFERENCES publishers (id) ON DELETE RESTRICT,
     CONSTRAINT fk_articles_category  FOREIGN KEY (category_id)  REFERENCES categories (id) ON DELETE RESTRICT,
     CONSTRAINT fk_articles_series    FOREIGN KEY (series_id)    REFERENCES series (id)     ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Slugs an article used to have. /articles/{old} and /api/articles/{old}/... answer 301 to the current slug, so links already handed out (the Discord embed among them) keep working after a slug change.
+-- A slug held here is reserved for its article: no other article may take it, so an old URL never comes to point at a different article. The article itself may take it back, which deletes the row.
+CREATE TABLE article_slug_history (
+    slug        VARCHAR(200)    NOT NULL,
+    article_id  BIGINT UNSIGNED NOT NULL,
+    created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- When the article moved off this slug.
+    PRIMARY KEY (slug),
+    KEY idx_article_slug_history_article_id (article_id),
+    CONSTRAINT fk_article_slug_history_article FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Many-to-many between articles and tags.

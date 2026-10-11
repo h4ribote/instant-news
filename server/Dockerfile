@@ -3,8 +3,10 @@
 # Image for server (FastAPI).
 #
 # The build context is the repository root, not the server/ directory this file lives in (see build.context in docker-compose.yml): server and bot share common/, and narrowing the context to server/ would put common/ out of reach of COPY. Every COPY path is therefore written relative to the repository root.
+#
+# Stages: base holds the dependencies and the application; test adds pytest and tests/ (docker-compose.test.yml builds it); runtime is the last stage, so a build without a target produces the production image, which carries no test code.
 
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 
 # PYTHONDONTWRITEBYTECODE: keep code that runs read-only from writing .pyc.
 # PYTHONUNBUFFERED: stream stdout instead of buffering it, since buffered output loses the last log lines when the container dies.
@@ -29,6 +31,21 @@ COPY server/ ./server/
 RUN useradd --create-home --uid 10001 app \
  && mkdir -p /var/lib/instant-news/media \
  && chown -R app:app /var/lib/instant-news
+
+# The integration tests, run against a throwaway MySQL by docker-compose.test.yml.
+FROM base AS test
+
+COPY tests/requirements.txt ./tests/requirements.txt
+RUN pip install --no-cache-dir --disable-pip-version-check -r tests/requirements.txt
+COPY tests/ ./tests/
+
+USER app
+
+# The cache provider is off because /app is root-owned and not writable by the app user.
+CMD ["python", "-m", "pytest", "-p", "no:cacheprovider", "tests"]
+
+# The production image.
+FROM base AS runtime
 
 # No reason to run as root. The sources stay root-owned, so the application cannot rewrite its own code.
 USER app

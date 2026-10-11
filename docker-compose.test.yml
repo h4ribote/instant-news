@@ -1,0 +1,46 @@
+# Integration test stack: a throwaway MySQL (test-db) and the pytest runner (tests). Independent of docker-compose.yml: it shares no volume, publishes no port and reads no .env, so it can run next to a live deployment without touching it.
+#
+#   docker compose -f docker-compose.test.yml run --rm --build tests
+#   docker compose -f docker-compose.test.yml down -v
+#
+# The run's exit status is pytest's. The database lives on tmpfs and starts empty on every stack start, built from migrations/ in file order, so the tests also cover that the migrations apply cleanly.
+
+name: instant-news-test
+
+services:
+  test-db:
+    image: mysql:8.4
+    # The same server flags as docker-compose.yml, so full-text search and character handling behave as in production.
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --ngram-token-size=2
+      - --innodb-ft-enable-stopword=OFF
+    environment:
+      # Must match the database section of tests/config.test.yaml. Test-only values; this database holds nothing.
+      MYSQL_DATABASE: instant_news_test
+      MYSQL_USER: instant_news_test
+      MYSQL_PASSWORD: test-only-password
+      MYSQL_ROOT_PASSWORD: test-only-root-password
+    tmpfs:
+      - /var/lib/mysql
+    volumes:
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP on 127.0.0.1 answers only after initialization (the temporary init server has networking off), and the query proves the schema and the user exist.
+      test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u \"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" -D \"$$MYSQL_DATABASE\" -e 'SELECT 1' > /dev/null 2>&1"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  tests:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+      target: test
+    depends_on:
+      test-db:
+        condition: service_healthy
+    environment:
+      INSTANT_NEWS_CONFIG: /app/tests/config.test.yaml

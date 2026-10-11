@@ -213,11 +213,12 @@ python -m server.cli revoke-token --id <token_id>
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
 | `/api/articles?category=&tag=&publisher=&series=&author=&latest_only=&page=&per_page=` | GET | 不要 | 閲覧範囲で絞った一覧。既定は `status='published'` の降順。`latest_only=1` のとき `categories.include_in_latest = 1` のカテゴリのみ(トップの新着一覧が定期記事で埋まるのを防ぐ)。 |
-| `/api/articles/{slug}` | GET | 不要 | 記事詳細。**閲覧不可なら 404**(403 は存在を教えてしまう)。`view_count` を加算する。賛否(`up_count` / `down_count` / `score`)とコメント数(`comment_count`)は当該記事の全通知の合計。`score = up_count - down_count` であり**負になりうる**。訂正(`article_revisions.is_correction`)の一覧も返す。通知メッセージの内訳を `discord_posts` として返す(1 記事が複数チャンネルへ通知されうるため配列)。各要素は `channel_id` / `message_id` / `thread_id` / `thread_url` / `up_count` / `down_count` / `score` / `comment_count` / `posted_at` を持ち、未送信・スレッド未作成の行では該当項目が `null` になる。**`thread_url` はサーバーが組み立てる。**スレッドの URL には対象 guild の ID が要り、それは設定(`discord.guild_id`)にしかないため、画面には組み立てられない。 |
+| `/api/articles/{slug}` | GET | 不要 | 記事詳細。**閲覧不可なら 404**(403 は存在を教えてしまう)。記事が過去に使っていた slug なら現在の slug へ **301**(後述の「slug の変更とリダイレクト」)。`view_count` を加算する。応答に `ETag` を付ける。賛否(`up_count` / `down_count` / `score`)とコメント数(`comment_count`)は当該記事の全通知の合計。`score = up_count - down_count` であり**負になりうる**。訂正(`article_revisions.is_correction`)の一覧も返す。通知メッセージの内訳を `discord_posts` として返す(1 記事が複数チャンネルへ通知されうるため配列)。各要素は `channel_id` / `message_id` / `thread_id` / `thread_url` / `up_count` / `down_count` / `score` / `comment_count` / `posted_at` を持ち、未送信・スレッド未作成の行では該当項目が `null` になる。**`thread_url` はサーバーが組み立てる。**スレッドの URL には対象 guild の ID が要り、それは設定(`discord.guild_id`)にしかないため、画面には組み立てられない。 |
 | `/api/articles/{slug}/comments?page=&per_page=` | GET | 不要 | 記事のコメント。**閲覧範囲は記事と同じであり、記事が 404 ならコメントも 404** になる(本文を伏せたまま「何がどれだけ語られたか」を漏らさない)。古い順に返す(コメントは会話であり、点数順に並べ替えると返信が元の発言より前に出て文脈が壊れる)。各要素は `id` / `message_id` / `author` / `body` / `up_count` / `down_count` / `score` / `posted_at` / `edited_at`。`author` は users に居ない投稿者(guild を抜けた利用者・他の bot)では `discord_user_id` だけが埋まり、名前とアバターは `null` になる。`body` は Discord の生の記法のままであり、**サーバーは整形しない**(画面が必ずエスケープして出す)。`total` はその記事のコメント総数、`thread_url` は Discord のスレッドへの入口。**この API は読み出しのみで、書き込みを受け付けない**(コメントの実体は Discord のスレッドにあり、書く場所はそこだけである)。 |
-| `/api/articles` | POST | `articles:write` | 記事の作成。応答に画像の取り込み失敗(`media_failures`)を含める。**黙って元 URL を残さず、必ず執筆者に伝える。** |
-| `/api/articles/{id}` | PATCH | `articles:write` | 記事の更新。応答は POST と同じく `media_failures` を含む。 |
-| `/api/articles/{id}/publish` | POST | `articles:write` | 公開。`status='published'`、`published_at = COALESCE(published_at, NOW())`(**再公開で `published_at` を動かさない**)。公開時に `publisher_id` を凍結し、同じトランザクションで通知を積む。 |
+| `/api/articles/by-id/{id}` | GET | 不要 | 記事詳細を不変の `id` で引く。応答・閲覧範囲の判定(閲覧不可なら 404)・`ETag` は slug 版と同じ。**`view_count` は加算しない**(編集画面や自動投稿クライアントが書き込む前に読むためのものであり、読者の閲覧ではない)。 |
+| `/api/articles` | POST | `articles:write` | 記事の作成。本体は `ArticleCreate`(後述の「記事の書き込み」)。応答に画像の取り込み失敗(`media_failures`)を含める。**黙って元 URL を残さず、必ず執筆者に伝える。**応答に `ETag` を付ける。 |
+| `/api/articles/{id}` | PATCH | `articles:write` | 記事の**部分更新**。本体は `ArticleUpdate` で、**送ったキーだけを更新する**。`If-Match` があれば検査し、不一致なら 412。応答は POST と同じく `media_failures` と `ETag` を含む。 |
+| `/api/articles/{id}/publish` | POST | `articles:write` | 公開。`status='published'`、`published_at = COALESCE(published_at, NOW())`(**再公開で `published_at` を動かさない**)。公開時に `publisher_id` を凍結し、同じトランザクションで通知を積む。`If-Match` があれば検査し、不一致なら 412。応答に `ETag` を付ける。 |
 | `/api/articles/{slug}/revisions` | GET | 不要 | 改版履歴の一覧。 |
 | `/api/articles/{slug}/revisions/{n}` | GET | 不要 | 過去版のスナップショット。 |
 | `/api/articles/{slug}/revisions/{n}/diff` | GET | 不要 | 直前版との差分(unified diff を行の配列で返す)。 |
@@ -225,6 +226,62 @@ python -m server.cli revoke-token --id <token_id>
 上表の「要求スコープ」が `articles:write` の 3 つのエンドポイントは、`articles:write:any` を持つキーでも成立する(含意。前掲の「発行資格とスコープは別の軸である」を参照)。
 
 `articles:write` のキーは `author_id` を所有者に固定する。`author_id` / `publisher_id` を自由に指定できるのは `articles:write:any` のみである。セッション経由の場合、自分以外の `author_id` を指定できるのは管理者だけである。`publisher_id` は、その報道社の `role_id` を主体が保有している場合にのみ指定できる(`articles:write:any` を除く)。**公開済みの記事の `author_id` / `publisher_id` は変更できない**(署名は公開の時点で確定する。前掲の「署名は凍結し、権限は都度判定する」を参照)。`is_breaking=1` にできるのは設定の `articles.breaking.allowed_role_ids` のロールを保有する主体だけであり、空リストなら誰も立てられない。`is_sponsored=1` なら `sponsor_name` は必須である(「広告」とだけ書いても開示にならない)。**必須の判定は「表示可能な文字を 1 文字以上含むか」で行う。**空白のみの値に加え、U+200B(ゼロ幅空白)や U+FEFF のような書式文字だけの値も 400 で弾く。これらは `strip()` を通り抜けるが画面には何も描かず、「広告」ラベルだけを出して広告主を伏せることになるためである。
+
+### 記事の書き込み
+
+#### 識別子
+
+**記事の不変の識別子は `id` であり、書き込み系(`PATCH /api/articles/{id}`・`POST /api/articles/{id}/publish`)はこれで記事を指す。**`id` は作成の応答(`article.id`)にも詳細・一覧の各要素にも必ず含まれる。`slug` は記事ページの URL(パーマリンク)であり、明示すれば変更できるため、書き込みの宛先には使わない。`id` しか持たないクライアントは `GET /api/articles/by-id/{id}` で記事を読める。
+
+#### 作成と部分更新
+
+作成(POST)と更新(PATCH)は本体のスキーマが別である。作成は `ArticleCreate`、更新は `ArticleUpdate` で、どちらも未知のキーは 422 になる(綴りを誤ったキーが黙って無視され、成功に見えることを防ぐ)。
+
+- **作成**: `title` / `body_md` / `category_id` は必須で、欠けていれば 422。他の項目は省略すると下表の既定値になる。
+- **更新**: すべて省略可で、**送ったキーだけを更新する**。省略した項目は現在の値を保つ。`null` を送ると、NULL を許す項目では値の消去を意味する(`series_id: null` で連載から外す、`scheduled_at: null` で予約時刻を消す)。NULL を許さない項目への `null` は消去ではなく **422** である。`tags` / `visibility_role_ids` は送った配列で全体を置き換え、空にするには `[]` を送る。
+
+| 項目 | 作成時 | 更新で `null` を送ると | 作成時の既定値 |
+| --- | --- | --- | --- |
+| `title` | 必須 | 422 | - |
+| `body_md` | 必須 | 422 | - |
+| `category_id` | 必須 | 422 | - |
+| `excerpt` | 任意 | 消去 | `null` |
+| `publisher_id` | 任意 | 消去(公開済みの記事で値が変わるなら、署名の凍結により 403) | `null` |
+| `series_id` | 任意 | 消去 | `null` |
+| `series_position` | 任意 | 消去 | `null` |
+| `tags` | 任意 | 422(空にするには `[]`) | `[]` |
+| `visibility` | 任意 | 422 | `public` |
+| `visibility_role_ids` | 任意 | 422(空にするには `[]`) | `[]` |
+| `cover_image_url` | 任意 | 消去 | `null` |
+| `byline_mode` | 任意 | 422 | `author` |
+| `is_breaking` | 任意 | 422 | `false` |
+| `is_sponsored` | 任意 | 422 | `false` |
+| `sponsor_name` | 任意 | 消去(`is_sponsored` が真なら 400) | `null` |
+| `slug` | 任意 | 422 | `null`(見出しから生成する) |
+| `status` | 任意 | 422 | `draft` |
+| `scheduled_at` | 任意 | 消去(`status` が `scheduled` なら 400) | `null` |
+| `author_id` | 任意 | 422 | `null`(主体自身) |
+| `revision_note` | 任意 | このときの改版にメモを残さない | `null` |
+| `is_correction` | 任意 | 422 | `false` |
+
+`revision_note` と `is_correction` は記事の項目ではなく、その保存が記録する改版(`article_revisions`)の属性である。保存のたびに送った値がその改版に付き、省略すればメモなし・訂正ではない改版になる。
+
+#### 楽観的排他制御(ETag と If-Match)
+
+記事の詳細・`by-id`・作成・更新・公開の応答は、**記事の編集可能な状態を表す強い `ETag`** を返す。応答本体の `version` が同じ値を数値で持ち、保存と、状態を実際に変える公開(初回公開・アーカイブからの再公開)のたびに進む。閲覧数の加算や、公開済みの記事への公開要求では進まない。
+
+PATCH と publish は `If-Match` を**任意で**受ける。付いていれば、記事の現在の `ETag` がそのいずれとも一致しない場合に **412** を返し、何も書かない。412 の本文の `details.etag` は現在の `ETag` である。比較は強い比較であり、弱い ETag(`W/"..."`)・他の記事の ETag・形式の崩れた値は一致しない。`*` は「記事が存在すれば一致」を意味する。存在(404)と編集権限(403)の判定は 412 より先に行うため、編集できない記事の版は知らされない。
+
+`If-Match` を付けない要求は従来どおり無条件に書き込む(後勝ち)。ただし、同じ記事への別の保存が要求の処理中に割り込んだ場合は、省略した項目を古い値で書き戻さないよう **409** で拒む。複数のクライアント(複数の自動投稿キー、Web UI)が同じ記事を書き換えうるなら、読み込んだ応答の `ETag` を `If-Match` に付けて送ること。Web UI のエディタは常に付けて送り、412 を受けたら上書きせずに読み込み直しを促す。
+
+#### slug の変更とリダイレクト
+
+slug は作成時に見出しから生成するか明示し、以後は **`slug` を明示したときだけ変わる**(見出しを直しても変わらない)。slug を変えると、元の slug は `article_slug_history` に残り、`/articles/{旧 slug}` と `/api/articles/{旧 slug}`(`comments` / `revisions` 以下を含む)は**新しい slug の同じ URL へ 301** を返す。クエリ文字列は保つ。bot が Discord の embed に載せた URL もこれで生き続ける。
+
+- **301 は閲覧できる者にだけ返す。**閲覧できない者には、存在しない slug と同じ 404 を返す(リダイレクト先が限定記事の新しい slug を明かしてしまうため)。
+- **過去の slug はその記事のために予約される。**他の記事はそれを使えない(明示すれば 409、見出しからの生成では番号を付けて避ける)。古いリンクが別の記事を指すことはない。記事自身は過去の slug に戻せる。
+- 301 には `Cache-Control: no-cache` を付ける。記事が過去の slug に戻ったとき、キャッシュされたリダイレクトが 2 つの slug の間を往復しないようにするためである。
+- `by-id` は予約語であり、slug にできない(400)。`/api/articles/by-id/{id}` と衝突するためである。
 
 ### 分類
 
@@ -374,7 +431,11 @@ python -m server.cli revoke-token --id <token_id>
 | 要求スコープを今の資格が満たさない | 403 |
 | 速報フラグ・報道社の指定など、資格を満たさない内容の保存 | 403 |
 | 閲覧できない記事・画像 | **404**(403 は存在を教えてしまう) |
-| 入力の不備(`is_sponsored=1` で `sponsor_name` が空など) | 400 |
+| 記事が過去に使っていた slug への要求(閲覧できる場合) | 301 |
+| 入力の不備(`is_sponsored=1` で `sponsor_name` が空、予約語の slug など) | 400 |
+| 本体の形式の不備(必須項目の欠落、未知のキー、NULL を許さない項目への `null` など) | 422 |
+| 既存の状態との衝突(使用中・予約済みの slug、記事の保存の処理中に別の保存が割り込んだ) | 409 |
+| `If-Match` が記事の現在の `ETag` と一致しない | 412 |
 | キー単位のレート制限の超過 | 429 |
 
 例外から HTTP への変換は `server/app/errors.py` に集約し、`server/main.py` で例外ハンドラとして登録する。

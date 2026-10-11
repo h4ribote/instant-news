@@ -240,7 +240,7 @@
 </footer>
 
 <script type="module">
-import { get, post, patch, upload, me, escapeHtml, formatDateTime, articleUrl, qs, mediaVariant } from '/static/js/api.js';
+import { ApiError, apiResponse, get, upload, me, escapeHtml, formatDateTime, articleUrl, qs, mediaVariant } from '/static/js/api.js';
 import { mountChrome, listOf, displayName, cssUrlRaw, errorMessage } from '/static/js/chrome.js';
 
 /* Presentation helpers */
@@ -285,10 +285,12 @@ function utcIsoToLocal(iso) {
 /* State */
 
 const params = new URLSearchParams(location.search);
-// What is being edited: id is the update destination (PATCH /api/articles/{id}), slug is the load key (GET /api/articles/{slug}).
+// What is being edited: id is the article's immutable identifier, used both to load it (GET /api/articles/by-id/{id}) and to write it (PATCH /api/articles/{id}). slug is accepted only from older links that carry no id.
+// etag is the version this editor last read or wrote. Every write sends it as If-Match, so an edit made elsewhere in the meantime is reported (412) instead of being overwritten.
 const state = {
   articleId: params.get('id'),
   slug: params.get('slug'),
+  etag: null,
   status: 'draft',
   coverUrl: null,
   user: null,
@@ -567,6 +569,23 @@ function busy(on) {
   for (const id of ['btn-draft', 'btn-review', 'btn-publish']) el(id).disabled = on;
 }
 
+/** Headers for a write to the article being edited: If-Match carries the version this editor last saw. */
+function ifMatch() {
+  return state.etag ? { 'If-Match': state.etag } : {};
+}
+
+/**
+ * The notice for a failed write.
+ * 412 means the article was changed elsewhere (another tab, another person, an auto-posting key) after this editor loaded it. Nothing was written; the inputs are left as they are so the writer can copy what they need before reloading.
+ */
+function writeFailureHtml(e, what) {
+  if (e instanceof ApiError && e.status === 412) {
+    const reload = `/editor${qs({ id: state.articleId })}`;
+    return noticeHtml('⚠', `<b>${escapeHtml(what)}できませんでした。この記事は、編集を始めた後に別の場所で更新されています。</b> 上書きを避けるため何も保存していません。入力中の内容を必要に応じて控えてから、<a href="${escapeHtml(reload)}">最新の内容を読み込み直して</a>ください。`);
+  }
+  return noticeHtml('⚠', `<b>${escapeHtml(what)}できませんでした。</b> ${escapeHtml(errorMessage(e))}`);
+}
+
 /**
  * Save.
  * Images that failed to ingest (media_failures) are always shown. The URL stays in the body as it was and the save itself still succeeds, so leaving it silent would leave a rotting link that nobody notices.
@@ -587,24 +606,25 @@ async function save(overrides) {
 
   busy(true);
   try {
-    const res = state.articleId
-      ? await patch(`/api/articles/${encodeURIComponent(state.articleId)}`, payload)
-      : await post('/api/articles', payload);
+    const { data: res, headers } = state.articleId
+      ? await apiResponse(`/api/articles/${encodeURIComponent(state.articleId)}`, { method: 'PATCH', body: payload, headers: ifMatch() })
+      : await apiResponse('/api/articles', { method: 'POST', body: payload });
     const article = res.article;
     const failures = res.media_failures || [];
 
     state.articleId = article.id;
     state.slug = article.slug;
     state.status = article.status;
+    state.etag = headers.get('ETag');
     updateStatusBadge();
-    history.replaceState(null, '', '/editor' + qs({ id: article.id, slug: article.slug }));
+    history.replaceState(null, '', '/editor' + qs({ id: article.id }));
 
     el('media-notices').innerHTML = failures.length
       ? noticeHtml('⚠', `<b>${failures.length} 件の画像を取り込めませんでした。</b> 元の URL のまま残るため、いずれ表示されなくなる可能性があります。<br>${failures.map((f) => `<code>${escapeHtml(f.source_url)}</code> — ${escapeHtml(f.reason)}`).join('<br>')}`)
       : '';
     return article;
   } catch (e) {
-    setSaveNotices(noticeHtml('⚠', `<b>保存できませんでした。</b> ${escapeHtml(errorMessage(e))}`));
+    setSaveNotices(writeFailureHtml(e, '保存'));
     return null;
   } finally {
     busy(false);
@@ -628,12 +648,13 @@ async function publish() {
   if (!article) return;
   busy(true);
   try {
-    await post(`/api/articles/${encodeURIComponent(article.id)}/publish`);
-    state.status = 'published';
+    const { data: published, headers } = await apiResponse(`/api/articles/${encodeURIComponent(article.id)}/publish`, { method: 'POST', headers: ifMatch() });
+    state.status = published.status;
+    state.etag = headers.get('ETag');
     updateStatusBadge();
-    setSaveNotices(noticeHtml('✔', `<b>公開しました。</b> <a href="${articleUrl(article.slug)}">記事を開く</a>`, true));
+    setSaveNotices(noticeHtml('✔', `<b>公開しました。</b> <a href="${articleUrl(published.slug)}">記事を開く</a>`, true));
   } catch (e) {
-    setSaveNotices(noticeHtml('⚠', `<b>公開できませんでした。</b> ${escapeHtml(errorMessage(e))}`));
+    setSaveNotices(writeFailureHtml(e, '公開'));
   } finally {
     busy(false);
   }
@@ -700,15 +721,21 @@ async function main() {
   updateBylinePreview();
   updateNotifyHint();
 
-  // Load an existing article: read by slug, and use the id from the response as the update destination.
-  const ref = state.slug || state.articleId;
-  if (ref) {
+  // Load an existing article by its id. A link carrying only a slug is read by slug (a former slug answers 301, which fetch follows), and the id from the response becomes the update destination.
+  const loadPath = state.articleId
+    ? `/api/articles/by-id/${encodeURIComponent(state.articleId)}`
+    : state.slug ? `/api/articles/${encodeURIComponent(state.slug)}` : null;
+  if (loadPath) {
     try {
-      fillArticle(await get(`/api/articles/${encodeURIComponent(ref)}`));
+      const { data: article, headers } = await apiResponse(loadPath);
+      fillArticle(article);
+      state.etag = headers.get('ETag');
+      history.replaceState(null, '', '/editor' + qs({ id: article.id }));
     } catch (e) {
       setSaveNotices(noticeHtml('⚠', `<b>編集する記事を読み込めませんでした。</b> ${escapeHtml(errorMessage(e))} このまま保存すると新しい記事になります。`));
       state.articleId = null;
       state.slug = null;
+      state.etag = null;
       updateStatusBadge();
     }
   }

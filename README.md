@@ -131,6 +131,17 @@ docker compose up -d --build
 
 DB と画像の実体は名前付きボリュームに残ります。ただし `migrations/` の SQL は再実行されないため、スキーマ変更を含む更新では追加分の SQL を自分で適用してください。`docker compose down -v` は記事・画像を含めすべて消すため注意してください。
 
+## テスト
+
+統合テストは、本番の構成とは独立したテスト用のコンテナで実行します。使い捨ての MySQL(データは tmpfs 上にあり、起動のたびに `migrations/` から作り直します)と pytest の実行コンテナからなり、ポートを公開せず `.env` も読まないため、稼働中のデプロイと並べて動かせます。
+
+```bash
+docker compose -f docker-compose.test.yml run --rm --build tests
+docker compose -f docker-compose.test.yml down -v
+```
+
+1 行目の終了コードが pytest の結果です。テストは `tests/` にあり、設定は `tests/config.test.yaml` を使います。
+
 ## ドキュメント
 
 | ドキュメント | 内容 |

@@ -45,6 +45,8 @@
 - `articles.is_breaking` は速報を表し、通知時に設定したロールを mention する。乱発を防ぐため、フラグを立てられるロールは `settings` 表の `articles.breaking.allowed_role_ids` で絞る(空なら誰も立てられない)。
 - `article_revisions.is_correction` は単なる更新と訂正を区別する。訂正された記事は記事面の冒頭で明示する。
 - `article_revisions.via_token_id` は「誰が実際に投稿したか」の監査証跡であり、`editor_id`(「誰の名前で書かれたか」)とは別物である。`articles:write:any` が他人の署名で記事を出せる以上、これが無いと説明責任が崩れる。
+- **`articles.version` は記事の編集可能な状態の版であり、API の `ETag` が運ぶ値である。**保存のたびと、状態を実際に変える公開のたびに進み、閲覧数の加算では進まない。`article_revisions.revision_number` では代わりにならない。公開(手動・予約)は改版を作らずに `status` / `publisher_id` / `published_at` を書き換えるため、改版番号ではその変更を検出できない。`If-Match` による楽観的排他制御は [docs/api.md](api.md) の「記事の書き込み」を参照。
+- **`article_slug_history` は記事が過去に使っていた slug を持つ。**記事ページと API は過去の slug への要求を現在の slug へ 301 で転送するため、slug を変えても既に配った URL(Discord の embed を含む)は壊れない。過去の slug はその記事のために予約され、他の記事は使えない(古いリンクが別の記事を指さないようにするため)。記事自身が過去の slug に戻ると、その行は消える。
 
 ### 報道社と署名
 
@@ -114,6 +116,7 @@ erDiagram
     tags ||--o{ tag_subscriptions : subscribed_by
     articles ||--o{ article_visibility_roles : restricts
     discord_roles ||--o{ article_visibility_roles : allows
+    articles ||--o{ article_slug_history : formerly
     articles ||--o{ article_revisions : versioned
     users ||--o{ article_revisions : edits
     api_tokens |o--o{ article_revisions : edited_via
@@ -148,7 +151,8 @@ erDiagram
 | tags | 主分類以外の分類軸。記事は複数のタグを持てる。`notify_channel_id` を設定したタグは追加の宛先になる。 |
 | tag_subscriptions | タグの購読。購読したタグの記事が公開されると bot が DM を送る(個人単位のプッシュ)。 |
 | series | 連載(マガジン)。順序を持つ記事のまとまり。 |
-| articles | 記事本体。状態・閲覧範囲・カテゴリ・報道社・連載への所属・本文(Markdown ソースと HTML キャッシュ)を持つ。タグ付けは `article_tags` が持つ。 |
+| articles | 記事本体。状態・閲覧範囲・カテゴリ・報道社・連載への所属・本文(Markdown ソースと HTML キャッシュ)・編集可能な状態の版(`version`)を持つ。タグ付けは `article_tags` が持つ。 |
+| article_slug_history | 記事が過去に使っていた slug。過去の slug への要求を現在の slug へ 301 で転送するために引き、その slug を他の記事に使わせない。 |
 | article_tags | 記事とタグの多対多。 |
 | article_visibility_roles | 閲覧範囲が restricted の記事について、閲覧を許可するロールの集合。 |
 | article_revisions | 記事の改版履歴。編集ごとのスナップショットに加え、訂正か否か(`is_correction`)と実際の投稿経路(`via_token_id`)を持つ。 |

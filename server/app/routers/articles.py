@@ -3,31 +3,38 @@
 An article the caller cannot view returns 404, not 403. A 403 reveals that something is there, and for a limited-visibility article whose very existence is secret, that alone is a leak. The rule applies uniformly to the detail, the revision history and the diff: hiding the article body achieves nothing if the title and body can still be read out of the revision history.
 
 The business rules live in articles.py; this module sticks to receiving requests and assembling responses, so that the scheduled-publishing loop can call the same save and publish procedures.
+
+Reads address an article by slug (the permalink), writes by id (immutable). GET /api/articles/by-id/{id} closes the gap for clients that hold only the id. A slug the article used to have answers 301 to its current slug, but only to a viewer who may see the article; anyone else gets the same 404 as for a slug that never existed.
+
+The detail, by-id, create, update and publish responses carry the article's ETag. PATCH and publish honour If-Match when it is present and answer 412 when the article moved on; without it they behave as before.
 """
 
 from __future__ import annotations
 
 import difflib
+import re
 from typing import Any, Final
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
 
 from common.config import Config
 from common.db import Database
 from common.settings import RuntimeSettings
 from common.snowflake import to_snowflake
 
-from ..articles import ensure_may_edit, has_write_any, publish_article, save_article
+from ..articles import article_etag, ensure_may_edit, has_write_any, publish_article, resolve_moved_slug, save_article
 from ..deps import get_config, get_db, get_principal_optional, get_settings, require_scope
-from ..errors import BadRequest, NotFound
+from ..errors import BadRequest, MovedPermanently, NotFound
 from ..media.service import IngestFailure
 from ..principals import Principal
 from ..schemas import (
+    ArticleCreate,
     ArticleListItem,
     ArticleListOut,
     ArticleOut,
     ArticleSaveOut,
-    ArticleWrite,
+    ArticleUpdate,
     CommentAuthorOut,
     CommentListOut,
     CommentOut,
@@ -48,6 +55,9 @@ _MAX_PER_PAGE: Final = 100
 _DEFAULT_COMMENTS_PER_PAGE: Final = 50
 _MAX_COMMENTS_PER_PAGE: Final = 200
 
+# One entity-tag inside an If-Match list: an optional weak marker and the quoted opaque value.
+_ENTITY_TAG_RE: Final = re.compile(r'\s*(W/)?"([^"]*)"\s*')
+
 # Up/down votes and the comment count are summed over all of the article's notification posts: one article can be notified to several channels, so article_discord_posts holds several rows per article, each with its own independent counts.
 # When the subtraction is done in SQL, always subtract values that have been through SUM(). up_count and down_count are unsigned, so a per-row subtraction (dp.up_count - dp.down_count) does not clamp the moment down-votes exceed up-votes; the statement itself fails. SUM() returns DECIMAL, which can hold negatives.
 # Never alias articles. The condition fragment returned by visibility_sql_filter refers to articles by table name, so an alias makes that fragment name columns it cannot resolve and the listing query dies at runtime.
@@ -56,7 +66,7 @@ _ARTICLE_COLUMNS: Final = """
     articles.cover_image_url, articles.author_id, articles.publisher_id, articles.category_id,
     articles.series_id, articles.series_position, articles.visibility, articles.byline_mode,
     articles.is_breaking, articles.is_sponsored, articles.sponsor_name, articles.status,
-    articles.view_count, articles.scheduled_at, articles.published_at, articles.created_at, articles.updated_at,
+    articles.view_count, articles.version, articles.scheduled_at, articles.published_at, articles.created_at, articles.updated_at,
     u.discord_user_id AS author_discord_user_id, u.username AS author_username,
     u.global_name AS author_global_name, u.avatar_hash AS author_avatar_hash,
     p.role_id AS publisher_role_id, p.slug AS publisher_slug, p.name AS publisher_name,
@@ -256,6 +266,7 @@ async def _article_out(db: Database, settings: RuntimeSettings, row: dict[str, A
     data = _list_item_data(row, tags)
     data.update(
         {
+            'version': int(row['version']),
             'body_md': row['body_md'],
             'body_html': row['body_html'],
             'visibility_role_ids': [role_row['role_id'] for role_row in role_rows],
@@ -284,12 +295,53 @@ async def _load_article(db: Database, *, article_id: int | None = None, slug: st
     return await db.fetch_one(f'SELECT {_ARTICLE_COLUMNS} {_ARTICLE_FROM} WHERE articles.slug = %s', slug)
 
 
-async def _require_viewable(db: Database, settings: RuntimeSettings, principal: Principal | None, slug: str) -> dict[str, Any]:
-    """Load an article by slug and 404 if it cannot be viewed. settings is needed for the admin check, which includes the roles delegated through the settings."""
+def _moved_location(request: Request, new_slug: str) -> str:
+    """The URL of the same endpoint with the slug segment replaced by the article's current slug. Every other path parameter and the query string are kept."""
+    params = {**request.path_params, 'slug': new_slug}
+    path = request.scope['route'].path_format.format(**{name: quote(str(value), safe='') for name, value in params.items()})
+    query = request.url.query
+    return f'{path}?{query}' if query else path
+
+
+async def _require_viewable(db: Database, settings: RuntimeSettings, principal: Principal | None, request: Request, slug: str) -> dict[str, Any]:
+    """Load an article by slug and 404 if it cannot be viewed. settings is needed for the admin check, which includes the roles delegated through the settings.
+
+    A slug the article used to have raises MovedPermanently towards the current one, after the same visibility check: redirecting first would reveal the new slug of an article the viewer cannot see.
+    """
     row = await _load_article(db, slug=slug)
-    if row is None or not await can_view_article(db, principal, row, settings=settings):
+    if row is None:
+        moved_id = await resolve_moved_slug(db, slug)
+        moved = await _load_article(db, article_id=moved_id) if moved_id is not None else None
+        if moved is not None and await can_view_article(db, principal, moved, settings=settings):
+            raise MovedPermanently(_moved_location(request, str(moved['slug'])))
+        raise NotFound('記事が見つかりません。')
+    if not await can_view_article(db, principal, row, settings=settings):
         raise NotFound('記事が見つかりません。')
     return row
+
+
+def _set_etag(response: Response, row: dict[str, Any]) -> None:
+    response.headers['ETag'] = article_etag(int(row['id']), int(row['version']))
+
+
+def _if_match_versions(if_match: str | None, article_id: int) -> frozenset[int] | None:
+    """Read If-Match into the set of versions it accepts for this article.
+
+    None means nothing to check: the header is absent, or is * (any current representation, and the article's existence is checked anyway). Following RFC 9110 the comparison is strong, so a weak entity-tag never matches; neither does a tag of another article or one this server did not issue. A header that names nothing matching yields the empty set, which no version satisfies.
+    """
+    if if_match is None or if_match.strip() == '*':
+        return None
+    versions: set[int] = set()
+    prefix = f'{article_id}-'
+    for part in if_match.split(','):
+        match = _ENTITY_TAG_RE.fullmatch(part)
+        if match is None or match.group(1):
+            continue
+        opaque = match.group(2)
+        version = opaque[len(prefix):]
+        if opaque.startswith(prefix) and version.isascii() and version.isdigit():
+            versions.add(int(version))
+    return frozenset(versions)
 
 
 async def _require_editable(db: Database, settings: RuntimeSettings, principal: Principal, article_id: int) -> dict[str, Any]:
@@ -370,7 +422,8 @@ async def list_articles(
 
 @router.post('/api/articles', response_model=ArticleSaveOut, status_code=201)
 async def create_article(
-    payload: ArticleWrite,
+    payload: ArticleCreate,
+    response: Response,
     db: Database = Depends(get_db),
     config: Config = Depends(get_config),
     settings: RuntimeSettings = Depends(get_settings),
@@ -378,24 +431,35 @@ async def create_article(
 ) -> ArticleSaveOut:
     """Create an article."""
     article_id, failures = await save_article(db, config, settings, principal, article_id=None, payload=payload)
-    return await _save_response(db, settings, article_id, failures)
+    return await _save_response(db, settings, response, article_id, failures)
 
 
 @router.patch('/api/articles/{article_id}', response_model=ArticleSaveOut)
 async def update_article(
     article_id: str,
-    payload: ArticleWrite,
+    payload: ArticleUpdate,
+    response: Response,
+    if_match: str | None = Header(default=None, description='GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。'),
     db: Database = Depends(get_db),
     config: Config = Depends(get_config),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal = Depends(require_scope('articles:write')),
 ) -> ArticleSaveOut:
-    """Update an article."""
-    saved_id, failures = await save_article(db, config, settings, principal, article_id=_parse_id(article_id), payload=payload)
-    return await _save_response(db, settings, saved_id, failures)
+    """Partially update an article: only the fields the body carries change."""
+    parsed = _parse_id(article_id)
+    saved_id, failures = await save_article(
+        db,
+        config,
+        settings,
+        principal,
+        article_id=parsed,
+        payload=payload,
+        expected_versions=_if_match_versions(if_match, parsed),
+    )
+    return await _save_response(db, settings, response, saved_id, failures)
 
 
-async def _save_response(db: Database, settings: RuntimeSettings, article_id: int, failures: list[IngestFailure]) -> ArticleSaveOut:
+async def _save_response(db: Database, settings: RuntimeSettings, response: Response, article_id: int, failures: list[IngestFailure]) -> ArticleSaveOut:
     """Assemble the save response.
 
     Images that could not be ingested always go into the response. A URL that failed to ingest stays in the body as it is, and on an external CDN it eventually expires and the image disappears, so treating the save as a silent success leaves a rotting link in the article that nobody ever notices.
@@ -403,6 +467,7 @@ async def _save_response(db: Database, settings: RuntimeSettings, article_id: in
     row = await _load_article(db, article_id=article_id)
     if row is None:
         raise NotFound('記事が見つかりません。')
+    _set_etag(response, row)
     return ArticleSaveOut(
         article=await _article_out(db, settings, row),
         media_failures=[MediaFailure(source_url=failure.source_url, reason=failure.reason) for failure in failures],
@@ -412,6 +477,8 @@ async def _save_response(db: Database, settings: RuntimeSettings, article_id: in
 @router.post('/api/articles/{article_id}/publish', response_model=ArticleOut)
 async def publish(
     article_id: str,
+    response: Response,
+    if_match: str | None = Header(default=None, description='GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。'),
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal = Depends(require_scope('articles:write')),
@@ -419,34 +486,58 @@ async def publish(
     """Publish an article: freeze the byline and enqueue the notifications in the same transaction."""
     parsed = _parse_id(article_id)
     await _require_editable(db, settings, principal, parsed)
-    await publish_article(db, settings, parsed)
+    await publish_article(db, settings, parsed, expected_versions=_if_match_versions(if_match, parsed))
     row = await _load_article(db, article_id=parsed)
     if row is None:
         raise NotFound('記事が見つかりません。')
+    _set_etag(response, row)
     return await _article_out(db, settings, row)
 
 
 # Detail and revision history
 
 
-@router.get('/api/articles/{slug}', response_model=ArticleOut)
-async def get_article(
-    slug: str,
+@router.get('/api/articles/by-id/{article_id}', response_model=ArticleOut)
+async def get_article_by_id(
+    article_id: str,
+    response: Response,
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> ArticleOut:
-    """Return the article detail. 404 if it cannot be viewed."""
-    row = await _require_viewable(db, settings, principal, slug)
+    """Return the article detail by its immutable id. 404 if it cannot be viewed.
+
+    view_count is not advanced: this is how the editor and API clients load an article they are about to write, which is not a read by a reader.
+    """
+    row = await _load_article(db, article_id=_parse_id(article_id))
+    if row is None or not await can_view_article(db, principal, row, settings=settings):
+        raise NotFound('記事が見つかりません。')
+    _set_etag(response, row)
+    return await _article_out(db, settings, row)
+
+
+@router.get('/api/articles/{slug}', response_model=ArticleOut)
+async def get_article(
+    slug: str,
+    request: Request,
+    response: Response,
+    db: Database = Depends(get_db),
+    settings: RuntimeSettings = Depends(get_settings),
+    principal: Principal | None = Depends(get_principal_optional),
+) -> ArticleOut:
+    """Return the article detail. 404 if it cannot be viewed, 301 if the slug is one the article used to have."""
+    row = await _require_viewable(db, settings, principal, request, slug)
     # updated_at is explicitly written back to its own value. Omit it and ON UPDATE CURRENT_TIMESTAMP fires, advancing the last-updated time on every view, so an article that was edited can no longer be told apart from one that was merely read.
     await db.execute('UPDATE articles SET view_count = view_count + 1, updated_at = updated_at WHERE id = %s', row['id'])
     row['view_count'] = int(row['view_count']) + 1
+    _set_etag(response, row)
     return await _article_out(db, settings, row)
 
 
 @router.get('/api/articles/{slug}/comments', response_model=CommentListOut)
 async def list_comments(
     slug: str,
+    request: Request,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=_DEFAULT_COMMENTS_PER_PAGE, ge=1, le=_MAX_COMMENTS_PER_PAGE),
     db: Database = Depends(get_db),
@@ -461,7 +552,7 @@ async def list_comments(
 
     This API is read-only and accepts no writes. The real comments are the replies in the Discord thread, and that is the only place to write them (thread_url is the entry point).
     """
-    article = await _require_viewable(db, settings, principal, slug)
+    article = await _require_viewable(db, settings, principal, request, slug)
     total = int(await db.fetch_val('SELECT COUNT(*) FROM article_comments WHERE article_id = %s', article['id']) or 0)
     rows = await db.fetch_all(
         """
@@ -511,12 +602,13 @@ async def list_comments(
 @router.get('/api/articles/{slug}/revisions', response_model=list[RevisionListItem])
 async def list_revisions(
     slug: str,
+    request: Request,
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> list[RevisionListItem]:
     """Return the revision history listing."""
-    article = await _require_viewable(db, settings, principal, slug)
+    article = await _require_viewable(db, settings, principal, request, slug)
     rows = await db.fetch_all(f'{_REVISION_SELECT} WHERE r.article_id = %s ORDER BY r.revision_number', article['id'])
     return [RevisionListItem.model_validate(_revision_item_data(row)) for row in rows]
 
@@ -525,12 +617,13 @@ async def list_revisions(
 async def get_revision(
     slug: str,
     revision_number: int,
+    request: Request,
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> RevisionOut:
     """Return a past revision's snapshot."""
-    article = await _require_viewable(db, settings, principal, slug)
+    article = await _require_viewable(db, settings, principal, request, slug)
     row = await _fetch_revision(db, article['id'], revision_number)
     data = _revision_item_data(row)
     data['body_md'] = row['body_md']
@@ -541,12 +634,13 @@ async def get_revision(
 async def get_revision_diff(
     slug: str,
     revision_number: int,
+    request: Request,
     db: Database = Depends(get_db),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
 ) -> RevisionDiffOut:
     """Return the diff against the immediately preceding revision as an array of unified-diff lines."""
-    article = await _require_viewable(db, settings, principal, slug)
+    article = await _require_viewable(db, settings, principal, request, slug)
     current = await _fetch_revision(db, article['id'], revision_number)
     # The immediately preceding revision is not necessarily revision_number - 1. The numbers run from 1 within an article, but taking the largest number below this one as the predecessor keeps the order right even where the history has gaps.
     previous = await db.fetch_one(

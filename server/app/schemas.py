@@ -4,7 +4,7 @@ IDs always cross the wire as strings. A DB BIGINT and a Discord snowflake are bo
 
 Datetimes are handled as naive UTC to match the DB's DATETIME and emitted in JSON as ISO 8601 with a trailing Z (UtcDateTime).
 
-The *Write models serve both creation (POST) and partial update (PATCH), so every field is optional. Telling "omitted" from "explicitly set to null" is done with pydantic's model_fields_set (the field name being in payload.model_fields_set means it was specified). The service layer checks the fields that creation requires.
+The *Write models of the taxonomy and ads serve both creation (POST) and partial update (PATCH), so every field is optional and the service layer checks the fields that creation requires. Articles split the two into ArticleCreate and ArticleUpdate, so the required fields and the non-nullable fields are stated in the types and in the OpenAPI schema. Either way, telling "omitted" from "explicitly set to null" is done with pydantic's model_fields_set (the field name being in payload.model_fields_set means it was specified).
 """
 
 from __future__ import annotations
@@ -425,8 +425,12 @@ class CommentListOut(_OutModel):
 
 
 class ArticleOut(ArticleListItem):
-    """An article's detail. corrections is the listing of revisions recorded as corrections, shown at the top of the article page."""
+    """An article's detail. corrections is the listing of revisions recorded as corrections, shown at the top of the article page.
 
+    id is the article's immutable identifier and the one the write endpoints (PATCH, publish) and GET /api/articles/by-id/{id} take; slug is the permalink and may change. version identifies the editable state and is what the ETag header carries; counting a view does not advance it.
+    """
+
+    version: int
     body_md: str
     body_html: str | None = None
     visibility_role_ids: list[IdOut] = Field(default_factory=list)
@@ -440,45 +444,92 @@ class SeriesDetailOut(SeriesOut):
     articles: list[ArticleListItem] = Field(default_factory=list)
 
 
-class ArticleWrite(_WriteModel):
-    """Request body for creating or updating an article.
+def _drop_default(schema: dict[str, Any]) -> None:
+    """Remove the default from a field's JSON schema. Used for fields whose default None stands for "omitted" rather than for a value a client may send."""
+    schema.pop('default', None)
 
-    Every field is optional. The service layer checks title / body_md / category_id, which creation (POST) requires, and decides what may be specified at all (permission to flag breaking news, which publisher may be published under, whether someone else can be made the author). Only format can be expressed here; a rule that turns on eligibility cannot be decided without knowing the principal the request came from.
+
+def _omittable(**kwargs: Any) -> Any:
+    """A field that may be omitted but never set to null.
+
+    pydantic does not validate defaults, so an omitted field keeps None without error while an explicit null fails the non-nullable type with 422. The None never reaches the service layer as a value: it reads only the fields in model_fields_set.
+    """
+    return Field(default=None, json_schema_extra=_drop_default, **kwargs)
+
+
+class _ArticleWriteBase(_WriteModel):
+    """What creating and updating an article have in common: the metadata of the revision the save records, and the normalization of the list fields.
+
+    The service layer decides what may be specified at all (permission to flag breaking news, which publisher may be published under, whether someone else can be made the author). Only format can be expressed here; a rule that turns on eligibility cannot be decided without knowing the principal the request came from.
 
     tags is an array of tag slugs. Slugs rather than IDs, because a slug is an identifier an auto-posting client can write down stably. A slug that does not exist is turned into an error by the service layer (creating tags falls under taxonomy:admin; posting an article does not add them of its own accord).
+
+    sponsor_name tells the reader whose ad it is, so it requires displayable characters. A name of nothing but zero-width characters would put out the Sponsored label alone while withholding the advertiser, meeting the disclosure requirement (is_sponsored=1 requires sponsor_name) in form only.
     """
 
-    title: str | None = Field(default=None, min_length=1, max_length=300)
-    body_md: str | None = None
+    # The note left on the revision. For a correction, write what was corrected.
+    revision_note: str | None = Field(default=None, max_length=500)
+    is_correction: bool = False
+
+    @field_validator('tags', 'visibility_role_ids', check_fields=False)
+    @classmethod
+    def _unique_items(cls, value: list[str]) -> list[str]:
+        """Collapse duplicates. The primary key of article_tags / article_visibility_roles is (article, target), so inserting duplicates hits a duplicate key."""
+        return list(dict.fromkeys(value))
+
+
+class ArticleCreate(_ArticleWriteBase):
+    """Request body for creating an article (POST /api/articles).
+
+    title / body_md / category_id are required. The other non-nullable fields default to the same values as the DB columns. slug null means generate one from the title; author_id null means the principal.
+    """
+
+    title: str = Field(min_length=1, max_length=300)
+    body_md: str
     excerpt: str | None = Field(default=None, max_length=500)
-    category_id: IdIn | None = None
+    category_id: IdIn
     publisher_id: IdIn | None = None
     series_id: IdIn | None = None
     series_position: int | None = None
-    tags: list[str] | None = None
-    visibility: Visibility | None = None
-    visibility_role_ids: list[IdIn] | None = None
+    tags: list[str] = Field(default_factory=list)
+    visibility: Visibility = 'public'
+    visibility_role_ids: list[IdIn] = Field(default_factory=list)
     cover_image_url: str | None = Field(default=None, max_length=1000)
-    byline_mode: BylineMode | None = None
-    is_breaking: bool | None = None
-    is_sponsored: bool | None = None
-    # This value tells the reader whose ad it is, so it requires displayable characters. A name of nothing but zero-width characters would put out the Sponsored label alone while withholding the advertiser, meeting the disclosure requirement (is_sponsored=1 requires sponsor_name) in form only.
+    byline_mode: BylineMode = 'author'
+    is_breaking: bool = False
+    is_sponsored: bool = False
     sponsor_name: VisibleStr | None = Field(default=None, max_length=100)
     slug: str | None = Field(default=None, min_length=1, max_length=200, pattern=SLUG_PATTERN)
-    status: ArticleStatus | None = None
+    status: ArticleStatus = 'draft'
     scheduled_at: UtcDateTime | None = None
     author_id: IdIn | None = None
-    # The note left on the revision. For a correction, write what was corrected.
-    revision_note: str | None = Field(default=None, max_length=500)
-    is_correction: bool | None = None
 
-    @field_validator('tags', 'visibility_role_ids')
-    @classmethod
-    def _unique_items(cls, value: list[str] | None) -> list[str] | None:
-        """Collapse duplicates. The primary key of article_tags / article_visibility_roles is (article, target), so inserting duplicates hits a duplicate key."""
-        if value is None:
-            return None
-        return list(dict.fromkeys(value))
+
+class ArticleUpdate(_ArticleWriteBase):
+    """Request body for a partial update of an article (PATCH /api/articles/{id}).
+
+    Only the fields the request carries are changed; an omitted field keeps its current value. null erases the value of a nullable field (excerpt, publisher_id, series_id, series_position, cover_image_url, sponsor_name, scheduled_at). A field that cannot be null is declared with _omittable, so sending null to it is a 422 rather than an erasure. tags and visibility_role_ids replace the whole set; send [] to empty them.
+    """
+
+    title: str = _omittable(min_length=1, max_length=300)
+    body_md: str = _omittable()
+    excerpt: str | None = Field(default=None, max_length=500)
+    category_id: IdIn = _omittable()
+    publisher_id: IdIn | None = None
+    series_id: IdIn | None = None
+    series_position: int | None = None
+    tags: list[str] = _omittable()
+    visibility: Visibility = _omittable()
+    visibility_role_ids: list[IdIn] = _omittable()
+    cover_image_url: str | None = Field(default=None, max_length=1000)
+    byline_mode: BylineMode = _omittable()
+    is_breaking: bool = _omittable()
+    is_sponsored: bool = _omittable()
+    sponsor_name: VisibleStr | None = Field(default=None, max_length=100)
+    slug: str = _omittable(min_length=1, max_length=200, pattern=SLUG_PATTERN)
+    status: ArticleStatus = _omittable()
+    scheduled_at: UtcDateTime | None = None
+    author_id: IdIn = _omittable()
 
 
 class MediaFailure(_OutModel):
