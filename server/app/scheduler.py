@@ -2,7 +2,7 @@
 
 **The server decides publication; the bot only sends.** If the bot's polling were the trigger for publication, articles past their scheduled time would stay unpublished for as long as the bot is down, and articles that should be readable on the web would vanish. Because the server publishes and only enqueues the notification, publishing proceeds even while the bot is down, and the bot picks up the backlog and sends it once it recovers.
 
-Never let the loop die on an exception. If one article failing to publish stopped the scheduler, every later scheduled article would stay unpublished and nobody would see it happen. Failures are logged and retried on the next pass.
+The loop survives any exception. If one article failing to publish stopped the scheduler, every later scheduled article would stay unpublished and nobody would see it happen. Failures are logged and retried on the next pass.
 
 Settings are re-read every pass. Reading them once at startup would mean a server restart before a change to the poll interval takes effect. Settings are held briefly, so re-reading does not make every pass a DB query.
 

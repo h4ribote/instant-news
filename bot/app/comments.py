@@ -114,7 +114,7 @@ class CommentMirror:
     async def backfill(self, thread: discord.Thread) -> int:
         """Re-read the thread's whole history and bring the mirror in line with it. Returns the number of comments mirrored.
 
-        Deliberately not built to read only what follows the last mirrored message. History carries 100 messages per request, so reading only the tail — or reading an empty thread — costs almost the same. Reading everything settles three things at once.
+        Deliberately not built to read only what follows the last mirrored message. History carries 100 messages per request, so reading only the tail, or reading an empty thread, costs almost the same. Reading everything settles three things at once.
 
           - Repairing votes on existing comments. History messages carry their reactions along with the body, so the counts can be brought in line without re-fetching each comment one by one. Reading only the tail would leave the missed votes on older comments wrong forever, with nothing to put them right.
           - Catching up on deletions. A deletion made while the bot was down never arrives as an event and appears nowhere in the history, so the only way to catch a row left behind in the mirror is to delete here whatever the history does not contain.

@@ -99,7 +99,7 @@ BylineMode = Literal['author', 'publisher']
 PublisherStance = Literal['independent', 'state']
 Scope = Literal['articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin']
 
-# The base quantity an article ranking orders on. 'views' ranks by view count (アクセスランキング); 'featured' by the reader-facing score plus replies (注目). Both are then weighted by recency in the query; the weighting is not a value set the client chooses. See app.article_query.fetch_ranked_articles.
+# The base quantity an article ranking orders on. 'views' ranks by view count (the access ranking); 'featured' by the reader-facing score plus replies (the featured card). Both are then weighted by recency in the query; the weighting is not a value set the client chooses. See app.article_query.fetch_ranked_articles.
 ArticleRankingMetric = Literal['views', 'featured']
 
 # A slug appears verbatim as a URL path segment, so it must hold no whitespace and no character that turns into a path or query separator.
@@ -281,8 +281,8 @@ class PublisherRankingItem(_OutModel):
 
     score is the sum of a value computed per article by the following rule (up-votes as up, down-votes as down, comment count as c).
 
-      - 2 × down ≥ up … the article is being piled on. score = up + c (down-votes are not added)
-      - 2 × down < up  … it is not being piled on. score = up + (down ÷ 2, floored) + c (down-votes are added at half weight, as evidence of interest)
+      - 2 x down >= up: the article is being piled on. score = up + c (down-votes are not added)
+      - 2 x down < up: it is not being piled on. score = up + (down / 2, floored) + c (down-votes are added at half weight, as evidence of interest)
 
     Down-votes never subtract from the score. A down-vote marks "read, and disagreed with", not "not read", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record.
 
@@ -353,7 +353,7 @@ class RevisionDiffOut(_OutModel):
 class ArticleListItem(_OutModel):
     """An article as it appears in a listing.
 
-    up_count / down_count / comment_count are the totals across all of the article's notification posts (one article can be notified to several channels). score is up_count − down_count and may be negative. The score shown to readers is this subtraction, a different thing from the publisher ranking's score (for that rule see PublisherRankingItem).
+    up_count / down_count / comment_count are the totals across all of the article's notification posts (one article can be notified to several channels). score is up_count - down_count and may be negative. The score shown to readers is this subtraction, a different thing from the publisher ranking's score (for that rule see PublisherRankingItem).
     """
 
     id: IdOut
@@ -376,7 +376,7 @@ class ArticleListItem(_OutModel):
     view_count: int
     up_count: int
     down_count: int
-    # The score shown to readers: up_count − down_count, and it may be negative.
+    # The score shown to readers: up_count - down_count, and it may be negative.
     score: int
     comment_count: int
     published_at: UtcDateTime | None = None
@@ -397,7 +397,7 @@ class DiscordPostOut(_OutModel):
     thread_url: str | None = None
     up_count: int
     down_count: int
-    # The score for this notification post alone (up_count − down_count). May be negative.
+    # The score for this notification post alone (up_count - down_count). May be negative.
     score: int
     comment_count: int
     posted_at: UtcDateTime | None = None
@@ -420,7 +420,7 @@ class CommentOut(_OutModel):
 
     body holds the Discord message's content in Discord's own markup. The server does not format it (interpreting Discord's markup here would mean carrying a second implementation that disagrees with what Discord displays). The UI must always escape it before rendering.
 
-    score is up_count − down_count and may be negative.
+    score is up_count - down_count and may be negative.
     """
 
     id: IdOut

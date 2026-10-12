@@ -121,7 +121,7 @@ CREATE TABLE api_tokens (
 --   ads:admin           Register, update and stop ads, and read their performance stats. Only an admin can issue it.
 --   taxonomy:admin      Manage categories, tags and publishers. Only an admin can issue it.
 --   settings:admin      Read and change the platform settings (the settings table). Only an admin can issue it.
--- The scopes an admin can issue must never be bundled into one. An ad management app is given ads:admin and nothing else; the power to forge an article's byline (articles:write:any) must not be mixed in with it.
+-- The scopes an admin can issue are kept separate rather than bundled into one. An ad management app is given ads:admin and nothing else; the power to forge an article's byline (articles:write:any) is a different scope.
 -- settings:admin can rewrite admin.role_ids, that is, hand out admin eligibility itself, which makes it stronger than any other scope. Grant it knowing that it is effectively delegating admin permissions.
 CREATE TABLE api_token_scopes (
     token_id  BIGINT UNSIGNED NOT NULL,
@@ -180,7 +180,7 @@ CREATE TABLE media (
 
 -- The publishers that publish articles. Affiliation is expressed by a Discord role, so it is referenced through role_id.
 -- A role yields only its members, name, color and ordering; the logo, slug, description and stance cannot be derived from it, which is why this table exists. The role is referenced rather than made the primary key.
--- role_id must never be ON DELETE CASCADE. Deleting a role in Discord makes the bot drop the discord_roles row on the role delete event, and under CASCADE the publisher would vanish with it and every past article's byline would be lost. The past articles of a dissolved publisher are meant to survive.
+-- role_id is not ON DELETE CASCADE. Deleting a role in Discord makes the bot drop the discord_roles row on the role delete event, and under CASCADE the publisher would vanish with it and every past article's byline would be lost. The past articles of a dissolved publisher are meant to survive.
 CREATE TABLE publishers (
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     role_id      BIGINT UNSIGNED NULL,                          -- The Discord role that expresses affiliation. Nullable because a publisher outlives its dissolution.
@@ -369,7 +369,7 @@ CREATE TABLE article_revisions (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- The images an article references. Serving decides permissions from this, so it is recorded as fact rather than inferred.
--- Rows are written by scanning body_md when the body is saved, and must never be deleted: an edit that drops an image from the body leaves past revisions still referencing it, and deleting the row would 404 the image the moment someone opens the revision history.
+-- Rows are written by scanning body_md when the body is saved, and are never deleted: an edit that drops an image from the body leaves past revisions still referencing it, and a deleted row would 404 the image the moment someone opens the revision history.
 CREATE TABLE article_media (
     article_id  BIGINT UNSIGNED NOT NULL,
     media_id    BIGINT UNSIGNED NOT NULL,

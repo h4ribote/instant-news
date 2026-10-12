@@ -4,7 +4,7 @@ When server publishes an article it enqueues one article_discord_posts row with 
 
 Nothing here decides whether an article may be published. The enqueued row *is* the fact that server committed the publication, and the bot only sends it. Letting the bot inspect state and call off a send would split the authority over publishing across two places.
 
-The send interval, the day window for reopening threads and the breaking-news mention target are re-read from the settings table on every pass, because an admin can change each of them from the admin screen and no change may require a bot restart. Only base_url — used for the article URL and the absolute cover image URL — comes from Config, since it is bound to the runtime environment.
+The send interval, the day window for reopening threads and the breaking-news mention target are re-read from the settings table on every pass, because an admin can change each of them from the admin screen and no change may require a bot restart. Only base_url (used for the article URL and the absolute cover image URL) comes from Config, since it is bound to the runtime environment.
 """
 
 from __future__ import annotations

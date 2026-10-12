@@ -3,8 +3,8 @@
 
 There are two startup paths, both using the same app.
 
-    python -m server.main            … starts uvicorn on config.yaml's server.host / server.port.
-    uvicorn server.main:app          … started from an outer process manager; uvicorn's own arguments decide what it listens on.
+    python -m server.main            starts uvicorn on config.yaml's server.host / server.port.
+    uvicorn server.main:app          is started from an outer process manager; uvicorn's own arguments decide what it listens on.
 
 Config, DB and settings live on app.state.config / app.state.db / app.state.settings, and the route implementations reach them from there through the deps.py dependencies. Holding them in module globals would make the app unswappable in tests.
 

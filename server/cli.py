@@ -10,7 +10,7 @@
 
 Issuing keys here is what makes the API usable even before a Web UI exists. Writing keys into the config file is deliberately not an option: the raw value would sit in a file, contradicting the rule that the DB stores only the SHA-256, and such a key could be neither revoked nor listed.
 
-A key is always tied to an existing user. There is no standalone account for a machine — the machine borrows a human's permissions — so responsibility always stays with a human. Permissions are not frozen at issue time but decided from the current roles on every request, so the check here only confirms that this person may issue right now.
+A key is always tied to an existing user. There is no standalone account for a machine - the machine borrows a human's permissions - so responsibility always stays with a human. Permissions are not frozen at issue time but decided from the current roles on every request, so the check here only confirms that this person may issue right now.
 
 The settings commands (list-settings / get-setting / set-setting) are **the only recovery path once you are locked out of the admin screen**. The source of truth for settings is the settings table, normally edited from the frontend's admin screen. But mis-set admin roles (admin.role_ids) leave nobody meeting admin eligibility, putting both the admin screen and the settings API out of reach. Since admin eligibility is re-checked on every request, nothing on the HTTP side can undo that state. Editing the config file does not undo it either, because seed values are read only at first boot. Hence a path that reaches the DB directly is required.
 
@@ -51,7 +51,7 @@ from .app.principals import ADMIN_SCOPES, Principal, is_admin
 # Same set as the api_token_scopes.scope ENUM. The source of truth for the values is migrations/0001_initial.sql.
 SCOPES: Final = ('articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin')
 
-# Key generation — prefix, raw-value length, SHA-256 digest, row insert — belongs to app.auth.create_api_token. Rewriting the same steps here would mean that fixing only one side makes keys issued from the Web UI and keys issued from the CLI differ in shape. The two paths differ only in whom eligibility to issue is checked against, and that check is what lives here.
+# Key generation (prefix, raw-value length, SHA-256 digest, row insert) belongs to app.auth.create_api_token, so keys issued from the Web UI and from the CLI share one shape. The two paths differ only in whom eligibility to issue is checked against, and that check is what lives here.
 
 
 class CliError(Exception):
@@ -97,7 +97,7 @@ async def _issue_token(db: Database, settings: RuntimeSettings, *, discord_user_
         # settings:admin can rewrite admin.role_ids, i.e. hand out admin eligibility itself, which makes it stronger than any other scope. Unlike the other admin scopes it cannot be narrowed to ads only or taxonomy only, so granting it is effectively delegating admin permissions.
         print('警告: settings:admin はプラットフォームの設定を変更でき、その中には管理ロール(admin.role_ids)が含まれます。このキーの持ち主は自分自身や任意の相手へ管理者資格を与えられるため、実質的に管理者権限を委譲することになります。', file=sys.stderr)
     if not user['is_guild_member']:
-        # Issuing is not blocked — the key works as-is once they rejoin. But every request 401s until then, so handing the key over silently would leave the reason it does not work unexplained.
+        # Issuing is not blocked: the key works as-is once they rejoin. But every request 401s until then, so handing the key over silently would leave the reason it does not work unexplained.
         print(f'警告: {_display_name(user)}({discord_user_id})は現在 guild のメンバーではありません。メンバーに戻るまで、このキーによる要求は認証されません。', file=sys.stderr)
 
     # Generation and insert go through the same steps as issuance from the Web UI. The raw value exists only in this return value; the DB keeps nothing but the SHA-256.
@@ -167,7 +167,7 @@ async def _revoke_token(db: Database, *, token_id: int) -> int:
 
 # Platform settings
 
-# Settings reads and writes bypass SettingsStore.raw_values / describe for two reasons. First, raw_values raises if even one registry key is missing, so this last-resort recovery tool would lose list, get and set alike right after a key is added to the registry, while no process has seeded it yet. Second, recovery needs secret raw values printed, and describe hides them. Writes bypass set_many too: set_many refuses settings that are not editable, but that refusal is a restriction on the UI and does not apply here. Only validation is shared — the registry's coerce_value — so a value entered from the UI and one entered from the CLI cannot end up in different shapes.
+# Settings reads and writes bypass SettingsStore.raw_values / describe for two reasons. First, raw_values raises if even one registry key is missing, so this last-resort recovery tool would lose list, get and set alike right after a key is added to the registry, while no process has seeded it yet. Second, recovery needs secret raw values printed, and describe hides them. Writes bypass set_many too: set_many refuses settings that are not editable, but that refusal is a restriction on the UI and does not apply here. Only validation is shared (the registry's coerce_value), so a value entered from the UI and one entered from the CLI cannot end up in different shapes.
 
 
 async def _load_setting_rows(db: Database) -> dict[str, dict[str, Any]]:
@@ -190,7 +190,7 @@ def _decode_stored(row: dict[str, Any]) -> Any:
 def _stored_text(row: dict[str, Any] | None) -> str:
     """Return the stored value in JSON notation, in the exact form you can hand straight back to set-setting.
 
-    It is shown without going through the registry's coerce_value because a stored value the registry no longer accepts — after a minimum was tightened, say — is precisely the state this CLI is here to fix. A read-only operation must not fail validation.
+    It is shown without going through the registry's coerce_value because a stored value the registry no longer accepts (after a minimum was tightened, say) is precisely the state this CLI is here to fix. A read-only operation must not fail validation.
     """
     if row is None:
         # A key in the registry but not in the table: seeding (a server or bot start) has not run yet.
@@ -247,7 +247,7 @@ async def _list_settings(db: Database) -> int:
 async def _get_setting(db: Database, *, key: str) -> int:
     """Get one setting, printing the raw value even for a secret setting.
 
-    The raw value is printed because only someone who can reach the DB can run this CLI, and that person can read the settings table directly, so hiding it would protect nothing. The API hides it because its readers are everyone who can open the UI — not because a secret setting must never be shown to anyone.
+    The raw value is printed because only someone who can reach the DB can run this CLI, and that person can read the settings table directly, so hiding it would protect nothing. The API hides it because its readers are everyone who can open the UI, not because a secret setting is hidden from everyone.
     """
     defn = _require_setting(key)
     stored = await _load_setting_rows(db)
@@ -267,7 +267,7 @@ async def _get_setting(db: Database, *, key: str) -> int:
 def _parse_value(defn: SettingDef, text: str) -> Any:
     """Read a command-line value as that setting's value.
 
-    It is parsed as JSON, so one notation covers arrays (["111","222"]), numbers (60) and strings ("text") alike. Text that does not parse as JSON is taken as a plain string — there is no point making every token or URL be quoted. As a consequence an all-digit string, such as an OAuth client ID, is read as a number and has to be quoted. A mistake always fails validation, so nothing is ever silently stored under a different type.
+    It is parsed as JSON, so one notation covers arrays (["111","222"]), numbers (60) and strings ("text") alike. Text that does not parse as JSON is taken as a plain string, so there is no need to quote every token or URL. As a consequence an all-digit string, such as an OAuth client ID, is read as a number and has to be quoted. A mistake always fails validation, so nothing is ever silently stored under a different type.
     """
     try:
         raw: Any = json.loads(text)
@@ -317,7 +317,7 @@ async def _set_setting(db: Database, *, key: str, text: str) -> int:
 def _load_database_config(path: str | Path | None) -> DatabaseConfig:
     """Read only the database section of the config file.
 
-    The whole file is not validated because all this CLI needs is the MySQL connection target. Validating everything would let a flaw in a seed-value section (discord / admin / articles / media and their max settings) — an unknown key, a wrong type, an out-of-range value — stop even this CLI from starting, though it uses none of those values. The source of truth for them is already the settings table — the very table this CLI came to fix. The last resort for an operator locked out of the admin screen must not presuppose that the seed-value sections are up to date.
+    The whole file is not validated because all this CLI needs is the MySQL connection target. Validating everything would let a flaw in a seed-value section (discord / admin / articles / media and their max settings), such as an unknown key, a wrong type or an out-of-range value, stop even this CLI from starting, though it uses none of those values. The source of truth for them is already the settings table, the very table this CLI exists to repair. As the last resort for an operator locked out of the admin screen, it does not depend on the seed-value sections being up to date.
 
     Discovery and validation reuse common.config as-is: explicit argument, then the environment variable, then config.yaml at the repository root. If the config file read or the content accepted diverged from server and bot, a connection target you thought you had fixed would point at a different DB.
     """
@@ -378,7 +378,7 @@ async def _run(args: argparse.Namespace) -> int:
                 raise CliError('--name を空にはできません。')
             # Collapse duplicates: api_token_scopes has primary key (token_id, scope), so passing the same scope twice would be a duplicate key.
             scopes = list(dict.fromkeys(args.scopes))
-            # The admin check looks at the admin roles, whose source of truth is the settings table — so read them from there, not from config.
+            # The admin check looks at the admin roles, whose source of truth is the settings table, so they are read from there and not from config.
             settings = await SettingsStore(db).snapshot()
             return await _issue_token(db, settings, discord_user_id=args.discord_user_id, name=args.name, scopes=scopes, expires_days=args.expires_days)
         if args.command == 'list-tokens':

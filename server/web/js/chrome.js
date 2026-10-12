@@ -120,12 +120,12 @@ export function errorMessage(e) {
 /**
  * The utility links (tags, series, admin, write an article). Everything that sits in the nav and is not a category originates here alone, and both the nav bar and the drawer are drawn from this list.
  *
- * These used to be hardcoded into each page's HTML: home carried three of them (tags, series, write an article) while the remaining six pages carried only write an article. The same bar was showing different things in the same place — a replay of the very reason chrome.js exists. Now that there are two places to draw them (the nav bar and the drawer), anything but a single origin doubles the divergence.
+ * They are defined once here instead of in each page's HTML, so the same bar shows the same things on every page, which is the reason chrome.js exists. With two places to draw them (the nav bar and the drawer), a single origin keeps both in step.
  *
  * The admin link is shown to admins only. The check uses the is_admin the server returns as-is; the UI never reassembles it from roles, because an admin is the guild owner, or holds a role with the Administrator permission, or holds an admin role, and duplicating that rule in the UI means maintaining it in two places. Withholding the link is no substitute for permission: opening /admin directly is not prevented, but the settings API checks admin eligibility on every request and refuses.
  */
 function utilLinks(viewer) {
-  // tags and series are anchor sections inside home; every other page reaches them via /. The link is a bare fragment only while on home, so that a view narrowed by ?q= or ?series= keeps its filter when jumping to the section — writing /#tags would drop the query and clear the filter.
+  // tags and series are anchor sections inside home; every other page reaches them via /. The link is a bare fragment only while on home, so that a view narrowed by ?q= or ?series= keeps its filter when jumping to the section, whereas /#tags would drop the query and clear the filter.
   const home = location.pathname === '/' ? '' : '/';
   const links = [
     { href: `${home}#tags`, label: 'タグ', kind: 'util' },
@@ -149,7 +149,7 @@ function mountUtilLinks(viewer) {
 
 /**
  * Renders the header's account area: the user name and logout when signed in, the login entry point when not.
- * On phones the elements marked acct come out of the masthead and the drawer takes over the same ones (.masthead .actions .acct in style.css), leaving the masthead with nothing but the logo and 🔍 🌙 ☰.
+ * On phones the elements marked acct come out of the masthead and the drawer takes over the same ones (.masthead .actions .acct in style.css), leaving the masthead with nothing but the logo and the search, theme and menu buttons.
  */
 function mountAccount(actions, viewer) {
   if (!actions) return;
@@ -186,7 +186,7 @@ function wireLogout(root) {
  * Appends the categories (an article's primary classification) to the global nav in position order. The page body still reads without them, so a failed fetch gives up on the nav alone.
  *
  * Passing a category slug as activeCategory marks that section as the current location and clears the active marker from home, so home and the section are never both current. A slug matching no section moves nothing: opening the URL of a section that does not exist must not produce a nav whose current location is nowhere.
- * source takes categories already fetched — an array, or a Promise not yet resolved — so a page that already pulled the same listing for its article list need not issue a second request. Omit it and this fetches them itself.
+ * source takes categories already fetched (an array, or a Promise not yet resolved) so a page that already pulled the same listing for its article list need not issue a second request. Omit it and this fetches them itself.
  */
 async function mountCategories(activeCategory, source) {
   const spacer = document.querySelector('[data-globalnav] .spacer');
@@ -283,7 +283,7 @@ function mountDrawer(viewer) {
       return;
     }
     if (e.key !== 'Tab') return;
-    // Trap focus inside the drawer. Without the trap, tabbing while it is open takes focus out into the article behind and the user can no longer tell what they are touching.
+    // Focus is trapped inside the drawer, so tabbing while it is open cycles within it instead of moving focus into the article behind.
     const items = drawer.querySelectorAll('a[href], button:not([disabled])');
     if (items.length === 0) return;
     const first = items[0];
@@ -304,7 +304,7 @@ function mountDrawer(viewer) {
 }
 
 /**
- * The phone search toggle. The masthead is filled by the logo and the account area, leaving no room for a permanent search field, so it stays folded away until 🔍 is pressed.
+ * The phone search toggle. The masthead is filled by the logo and the account area, leaving no room for a permanent search field, so it stays folded away until the search button is pressed.
  * Once open, the search field wraps onto a row of its own below the logo ([data-search-open] .search in style.css).
  */
 function mountSearchToggle() {

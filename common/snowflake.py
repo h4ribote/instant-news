@@ -1,6 +1,6 @@
 """Normalization of 64-bit IDs (Discord snowflakes and the DB's BIGINT UNSIGNED).
 
-IDs always go into JSON as strings. JavaScript's Number is exact only up to 2^53 and a snowflake is well past that, so an ID passed as a number has its low digits silently rewritten. A corrupted ID raises nothing: it just behaves as "no such article" or "a different user", so the breakage surfaces late. Config files spell IDs as strings for the same reason — written as a YAML integer, the value can still fall into a float somewhere along the path that handles it.
+IDs always go into JSON as strings. JavaScript's Number is exact only up to 2^53 and a snowflake is well past that, so an ID passed as a number has its low digits silently rewritten. A corrupted ID raises nothing: it just behaves as "no such article" or "a different user", so the breakage surfaces late. Config files spell IDs as strings for the same reason: written as a YAML integer, the value can still fall into a float somewhere along the path that handles it.
 """
 
 from __future__ import annotations

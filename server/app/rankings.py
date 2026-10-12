@@ -4,10 +4,10 @@ The real reactions live on Discord: the bot mirrors up-vote (up_count) and down-
 
 The score is computed per article by the rule below and then summed per publisher (up-votes as up, down-votes as down, comment count as c).
 
-  - 2 × down ≥ up … the article is being piled on. The score is up + c; down-votes are not added.
-  - 2 × down < up  … it is not being piled on. The score is up + (down ÷ 2, floored) + c; down-votes are added at half weight, as evidence of interest.
+  - 2 x down >= up: the article is being piled on. The score is up + c; down-votes are not added.
+  - 2 x down < up: it is not being piled on. The score is up + (down / 2, floored) + c; down-votes are added at half weight, as evidence of interest.
 
-Down-votes never subtract from the score. A down-vote marks "read, and disagreed with", not "not read", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record. This is a different quantity from the article score shown to readers (up-votes − down-votes); it exists only to decide the ordering.
+Down-votes never subtract from the score. A down-vote marks "read, and disagreed with", not "not read", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record. This is a different quantity from the article score shown to readers (up-votes - down-votes); it exists only to decide the ordering.
 
 The test is always applied per article. Being piled on is a property of an article: testing it against the publisher's totals would let a single pile-on change the rating of every other article of that publisher at once. The tally is therefore two-stage (fold per article, then fold per publisher). A single GROUP BY leaves nowhere to apply the condition per article.
 

@@ -1,6 +1,6 @@
 """Admin API for categories, tags and publishers (taxonomy:admin).
 
-This router requires exactly one scope: taxonomy:admin. Never bundle the scopes an admin can issue into one — someone trusted to maintain the taxonomy has no reason to also hold the power to forge an article's byline (articles:write:any) or to submit ads (ads:admin).
+This router requires exactly one scope: taxonomy:admin. The scopes an admin can issue are kept separate, so someone trusted to maintain the taxonomy does not also hold the power to forge an article's byline (articles:write:any) or to submit ads (ads:admin).
 
 The taxonomy set differs per deployment, so the core does not fix it; it is edited here. It lives in the DB rather than the config file because articles.category_id references these rows by foreign key, and referential integrity cannot be kept against rows in a config file.
 """
@@ -232,7 +232,7 @@ async def update_tag(tag_id: str, payload: TagWrite, db: Annotated[Database, Dep
 async def delete_tag(tag_id: str, db: Annotated[Database, Depends(get_db)]) -> None:
     """Delete a tag.
 
-    article_tags and tag_subscriptions go with it via CASCADE: the tag comes off the articles and the subscriptions are dropped, but the articles themselves remain — a tag is not a primary classification, so an article still stands without it. That is why, unlike a category, nothing holds the deletion back.
+    article_tags and tag_subscriptions go with it via CASCADE: the tag comes off the articles and the subscriptions are dropped, but the articles themselves remain, because a tag is not a primary classification, so an article still stands without it. That is why, unlike a category, nothing holds the deletion back.
     """
     identifier = _parse_id(tag_id, 'タグ')
     await _fetch_or_404(db, _TAG_SELECT, identifier, 'タグ')

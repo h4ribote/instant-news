@@ -150,7 +150,7 @@ function numberAttrs(d) {
   return attrs.join(' ');
 }
 
-/** The range put into words. Stated as prose on top of the input attributes, because some ranges cannot be expressed as attributes at all — an exclusive minimum on a number, for one. */
+/** The range put into words. Stated as prose on top of the input attributes, because some ranges cannot be expressed as attributes at all, such as an exclusive minimum on a number. */
 function rangeHint(d) {
   if (d.kind !== 'int' && d.kind !== 'number') return '';
   const parts = [];
@@ -261,7 +261,7 @@ function renderSettingsPanel() {
     '<span class="spacer"></span><span class="hint" data-dirty-count></span></div></section>';
 
   panel.querySelector('[data-save]').addEventListener('click', (ev) => saveSettings(ev.currentTarget));
-  // What changed is re-checked on every input. Both input and change are listened to so that a role checkbox and direct text entry are picked up by the same path. The delegation is attached once to the panel element, which is never re-created — re-attaching it on every save would stack up duplicate listeners.
+  // What changed is re-checked on every input. Both input and change are listened to so that a role checkbox and direct text entry are picked up by the same path. The delegation is attached once to the panel element, which is never re-created, so listeners do not stack up across saves.
   if (!panel.dataset.wired) {
     panel.addEventListener('input', refreshSettingsDirty);
     panel.addEventListener('change', refreshSettingsDirty);
@@ -777,7 +777,7 @@ function renderLoginRequired() {
     `<a class="btn-discord" href="${escapeHtml(loginUrl())}">🎮 Discord でログイン</a>`);
 }
 
-/** The explanation for a non-admin user. Having no permission is not itself hidden: the existence of this screen is no secret — the setting values are, and the API does not hand those over. */
+/** The explanation for a non-admin user. Having no permission is not itself hidden: the existence of this screen is no secret; the setting values are, and the API does not hand those over. */
 function renderForbidden() {
   renderMessage('この画面は管理者だけが開けます',
     '<p style="font-size:13px;">プラットフォームの設定と分類を読み書きできるのは管理者だけです。あなたの現在の資格ではこの画面の内容を取得できません。</p>' +

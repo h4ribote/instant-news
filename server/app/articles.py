@@ -326,7 +326,7 @@ async def _unique_slug(db: Database, conn: Connection, base: str, *, exclude_id:
 
 
 async def _ensure_slug_free(db: Database, conn: Connection, slug: str, *, exclude_id: int | None) -> None:
-    """Check that an explicitly given slug is free. Unlike generation, it must never silently append a number and hand back a different URL."""
+    """Check that an explicitly given slug is free. Unlike generation, it never silently appends a number; a taken slug is reported rather than replaced by a different URL."""
     if slug in _RESERVED_SLUGS:
         raise ArticleError(f'この slug は予約されているため使えません: {slug}')
     if await _slug_taken_by_other(db, conn, slug, exclude_id=exclude_id):
@@ -551,7 +551,7 @@ async def save_article(
             for role_id in visibility_role_ids:
                 await db.execute('INSERT INTO article_visibility_roles (article_id, role_id) VALUES (%s, %s)', article_id, role_id, conn=conn)
 
-        # article_media is append-only; a row must never be deleted. An edit that drops an image from the body leaves the past revisions still referencing it, and deleting the row would 404 the image the moment someone opens the revision history.
+        # article_media is append-only: an edit that drops an image from the body leaves the past revisions still referencing it, and a deleted row would 404 the image the moment someone opens the revision history.
         for media_id in media_ids:
             await db.execute('INSERT IGNORE INTO article_media (article_id, media_id) VALUES (%s, %s)', article_id, media_id, conn=conn)
 

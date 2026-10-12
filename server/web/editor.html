@@ -516,7 +516,7 @@ function fillArticle(a) {
   const vis = document.querySelector(`input[name="vis"][value="${a.visibility}"]`);
   if (vis) vis.checked = true;
   // Of the roles the article grants viewing to, the ones the editor does not hold are absent from the options.
-  // Saving in that state would silently widen the visibility — the holders of that role do not lose access; rather the restriction comes off and other people read it — so the raw ID is kept and left checked even when no name can be resolved for it.
+  // Saving in that state would silently widen the visibility: the holders of that role would not lose access, but the restriction would come off and other people could read it. So the raw ID is kept and left checked even when no name can be resolved for it.
   const roleIds = new Set(a.visibility_role_ids || []);
   const known = new Set(state.roles.map((r) => r.id));
   const extra = Array.from(roleIds).filter((id) => !known.has(id));

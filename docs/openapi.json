@@ -1911,7 +1911,7 @@
           "rankings"
         ],
         "summary": "Get Article Ranking",
-        "description": "Return the top articles for one sidebar ranking, ordered by the server.\n\nmetric selects the base quantity (views or featured). The score decays with age in two regimes: within a one-week window time is nearly flat and reactions and comments drive the order, and past it the score decays strongly so older articles sink. No time window cuts the tally off — every viewable article in the latest feed is ranked, so old articles are still ordered and returned (they just rank low) and the ranking is never empty while any such article exists. The rule is stated in full on app.article_query.fetch_ranked_articles.\n\nThe visibility filter is applied per caller (get_principal_optional), exactly as the article listing is, so the ranking never lists an article the caller could not open — a member may see members-only articles they can read, an anonymous caller only public ones. limit is capped so no request can force an unbounded row count.",
+        "description": "Return the top articles for one sidebar ranking, ordered by the server.\n\nmetric selects the base quantity (views or featured). The score decays with age in two regimes: within a one-week window time is nearly flat and reactions and comments drive the order, and past it the score decays strongly so older articles sink. No time window cuts the tally off: every viewable article in the latest feed is ranked, so old articles are still ordered and returned (they just rank low) and the ranking is never empty while any such article exists. The rule is stated in full on app.article_query.fetch_ranked_articles.\n\nThe visibility filter is applied per caller (get_principal_optional), exactly as the article listing is, so the ranking never lists an article the caller could not open: a member may see members-only articles they can read, an anonymous caller only public ones. limit is capped so no request can force an unbounded row count.",
         "operationId": "get_article_ranking_api_rankings_articles_get",
         "parameters": [
           {
@@ -2448,7 +2448,7 @@
           "admin:ads"
         ],
         "summary": "Deactivate Ad",
-        "description": "Stop an ad from running. The row is kept and is_active set to 0.\n\nThis must never be a hard delete: ad_stats_daily references ads with CASCADE, so dropping the row takes the performance stats with it — how many times that ad was shown and how many times it was clicked. An ad whose run has ended is precisely the one you reconcile performance stats against.\n\nThe response is the updated ad itself, so is_active=false shows on the spot that DELETE means stopped, not gone.",
+        "description": "Stop an ad from running. The row is kept and is_active set to 0.\n\nThis is a soft delete, not a hard delete: ad_stats_daily references ads with CASCADE, so dropping the row would take the performance stats with it (how many times that ad was shown and how many times it was clicked). An ad whose run has ended is precisely the one you reconcile performance stats against.\n\nThe response is the updated ad itself, so is_active=false shows on the spot that DELETE means stopped, not gone.",
         "operationId": "deactivate_ad_api_admin_ads__ad_id__delete",
         "parameters": [
           {
@@ -2852,7 +2852,7 @@
           "admin:taxonomy"
         ],
         "summary": "Delete Tag",
-        "description": "Delete a tag.\n\narticle_tags and tag_subscriptions go with it via CASCADE: the tag comes off the articles and the subscriptions are dropped, but the articles themselves remain — a tag is not a primary classification, so an article still stands without it. That is why, unlike a category, nothing holds the deletion back.",
+        "description": "Delete a tag.\n\narticle_tags and tag_subscriptions go with it via CASCADE: the tag comes off the articles and the subscriptions are dropped, but the articles themselves remain, because a tag is not a primary classification, so an article still stands without it. That is why, unlike a category, nothing holds the deletion back.",
         "operationId": "delete_tag_api_admin_tags__tag_id__delete",
         "parameters": [
           {
@@ -3937,7 +3937,7 @@
           "updated_at"
         ],
         "title": "ArticleListItem",
-        "description": "An article as it appears in a listing.\n\nup_count / down_count / comment_count are the totals across all of the article's notification posts (one article can be notified to several channels). score is up_count − down_count and may be negative. The score shown to readers is this subtraction, a different thing from the publisher ranking's score (for that rule see PublisherRankingItem)."
+        "description": "An article as it appears in a listing.\n\nup_count / down_count / comment_count are the totals across all of the article's notification posts (one article can be notified to several channels). score is up_count - down_count and may be negative. The score shown to readers is this subtraction, a different thing from the publisher ranking's score (for that rule see PublisherRankingItem)."
       },
       "ArticleOut": {
         "properties": {
@@ -4729,7 +4729,7 @@
           "posted_at"
         ],
         "title": "CommentOut",
-        "description": "One comment on an article. The real comment is a reply in a Discord thread; this is a mirror of it.\n\nbody holds the Discord message's content in Discord's own markup. The server does not format it (interpreting Discord's markup here would mean carrying a second implementation that disagrees with what Discord displays). The UI must always escape it before rendering.\n\nscore is up_count − down_count and may be negative."
+        "description": "One comment on an article. The real comment is a reply in a Discord thread; this is a mirror of it.\n\nbody holds the Discord message's content in Discord's own markup. The server does not format it (interpreting Discord's markup here would mean carrying a second implementation that disagrees with what Discord displays). The UI must always escape it before rendering.\n\nscore is up_count - down_count and may be negative."
       },
       "DiscordPostOut": {
         "properties": {
@@ -5451,7 +5451,7 @@
           "score"
         ],
         "title": "PublisherRankingItem",
-        "description": "One row of the publisher ranking.\n\nscore is the sum of a value computed per article by the following rule (up-votes as up, down-votes as down, comment count as c).\n\n  - 2 × down ≥ up … the article is being piled on. score = up + c (down-votes are not added)\n  - 2 × down < up  … it is not being piled on. score = up + (down ÷ 2, floored) + c (down-votes are added at half weight, as evidence of interest)\n\nDown-votes never subtract from the score. A down-vote marks \"read, and disagreed with\", not \"not read\", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record.\n\nThe test runs per article because being piled on is a property of the article. Testing it against the publisher's totals would let a single pile-on change the rating of every other article of that publisher at once.\n\nup_count / down_count / comment_count are the raw totals over the period, not a breakdown of score (score passes through a per-article test, so it cannot be recomputed from these three)."
+        "description": "One row of the publisher ranking.\n\nscore is the sum of a value computed per article by the following rule (up-votes as up, down-votes as down, comment count as c).\n\n  - 2 x down >= up: the article is being piled on. score = up + c (down-votes are not added)\n  - 2 x down < up: it is not being piled on. score = up + (down / 2, floored) + c (down-votes are added at half weight, as evidence of interest)\n\nDown-votes never subtract from the score. A down-vote marks \"read, and disagreed with\", not \"not read\", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record.\n\nThe test runs per article because being piled on is a property of the article. Testing it against the publisher's totals would let a single pile-on change the rating of every other article of that publisher at once.\n\nup_count / down_count / comment_count are the raw totals over the period, not a breakdown of score (score passes through a per-article test, so it cannot be recomputed from these three)."
       },
       "PublisherStats": {
         "properties": {

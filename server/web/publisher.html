@@ -158,7 +158,7 @@ function articleRowHtml(a) {
     `</div></li>`;
 }
 
-/** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as —. */
+/** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as a dash. */
 function statValue(v) {
   return v == null ? '—' : escapeHtml(v);
 }

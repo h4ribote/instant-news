@@ -36,7 +36,7 @@ _NOT_FOUND_MESSAGE: Final = '画像が見つかりません。'
 
 # Content-addressed, so what this URL returns never changes again.
 _PUBLIC_CACHE_CONTROL: Final = 'public, max-age=31536000, immutable'
-# Never `public` here. Once it sits in a shared cache (a CDN, a corporate proxy) it is handed to other people with no permission check.
+# Restricted images are `private` because a copy in a shared cache (a CDN, a corporate proxy) would be handed to other people with no permission check.
 _PRIVATE_CACHE_CONTROL: Final = 'private, max-age=300'
 # Execute nothing even if the bytes are somehow interpreted as HTML. With nosniff, this closes off image delivery as an XSS path.
 _MEDIA_CSP: Final = "default-src 'none'; sandbox"
@@ -50,7 +50,7 @@ _UPLOAD_CHUNK_SIZE: Final = 65536
 async def _authorize_upload(db: Database, settings: RuntimeSettings, principal: Principal) -> None:
     """Check eligibility to upload.
 
-    The decision is delegated to the same ensure_scope the article and ad endpoints use. Hand-writing its rules here — any one scope suffices; if only admin scopes satisfy the request, ask for current admin eligibility; do not check scopes on the session path — would leave this one place behind the day the rules change. Concretely, articles:write:any implies articles:write, so code that inspects which scopes a key carries one by one lets a key holding only write:any through without the admin eligibility check.
+    The decision is delegated to the same ensure_scope the article and ad endpoints use. Rules written out here (any one scope suffices; if only admin scopes satisfy the request, current admin eligibility is required; scopes are not checked on the session path) would fall behind the day the rules change. Concretely, articles:write:any implies articles:write, so code that inspects which scopes a key carries one by one lets a key holding only write:any through without the admin eligibility check.
     """
     await ensure_scope(db, settings, principal, *_UPLOAD_SCOPES)
 

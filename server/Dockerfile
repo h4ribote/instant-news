@@ -21,7 +21,7 @@ WORKDIR /app
 COPY server/requirements.txt ./server/requirements.txt
 RUN pip install --no-cache-dir --disable-pip-version-check -r server/requirements.txt
 
-# Every ingested image is decoded and re-encoded to WebP, so a Pillow that cannot handle WebP leaves this service unable to accept a single image. Pillow's wheel bundles libwebp, so the slim image needs no extra OS packages; but where no wheel is available Pillow is built from source and can land without libwebp — importable, yet WebP alone unusable. Fail at build time instead of the moment a user posts an image.
+# Every ingested image is decoded and re-encoded to WebP, so a Pillow that cannot handle WebP leaves this service unable to accept a single image. Pillow's wheel bundles libwebp, so the slim image needs no extra OS packages; but where no wheel is available Pillow is built from source and can land without libwebp: importable, yet WebP alone unusable. The build fails on that, rather than the failure surfacing the moment a user posts an image.
 RUN python -c "from PIL import features; assert features.check('webp'), 'Pillow が WebP を扱えません(libwebp を欠いた状態でビルドされています)'"
 
 COPY common/ ./common/
@@ -52,5 +52,5 @@ FROM base AS runtime
 USER app
 
 # No EXPOSE: the listen port is decided by server.port in config.yaml, so a number written here becomes a lie the moment that config changes. Publishing the port is docker-compose.yml's ports.
-# The listen address and port likewise have config.yaml as their single source of truth, so do not pin them in the start command. server/main.py reads the config and starts uvicorn.
+# The listen address and port likewise have config.yaml as their single source of truth, so the start command pins neither. server/main.py reads the config and starts uvicorn.
 CMD ["python", "-m", "server.main"]

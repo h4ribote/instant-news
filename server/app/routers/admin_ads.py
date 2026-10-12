@@ -322,7 +322,7 @@ async def update_ad(
 async def deactivate_ad(ad_id: str, db: Annotated[Database, Depends(get_db)]) -> AdOut:
     """Stop an ad from running. The row is kept and is_active set to 0.
 
-    This must never be a hard delete: ad_stats_daily references ads with CASCADE, so dropping the row takes the performance stats with it — how many times that ad was shown and how many times it was clicked. An ad whose run has ended is precisely the one you reconcile performance stats against.
+    This is a soft delete, not a hard delete: ad_stats_daily references ads with CASCADE, so dropping the row would take the performance stats with it (how many times that ad was shown and how many times it was clicked). An ad whose run has ended is precisely the one you reconcile performance stats against.
 
     The response is the updated ad itself, so is_active=false shows on the spot that DELETE means stopped, not gone.
     """

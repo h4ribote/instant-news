@@ -144,7 +144,7 @@ async def ensure_scope(db: Database, settings: RuntimeSettings, principal: Princ
     Three stages. Each is decided as of the request; the eligibility held at issue time is never carried forward.
       1. Guild membership. Every scope requires at least this.
       2. On the API key path, the key must hold at least one scope that can satisfy the request, implications included (principals.granting_scopes). Not checked on the session path.
-      3. If the scopes that actually satisfied the request are admin scopes and nothing else, the owner must meet admin eligibility at this very moment. **Carrying the scope on the key is not enough.** A key whose owner no longer qualifies stops at this stage.
+      3. If the scopes that actually satisfied the request are admin scopes and nothing else, the owner must meet admin eligibility at this very moment. **The scope carried on the key does not by itself satisfy this stage.** A key whose owner no longer qualifies stops here.
 
     Stage 3 looks at the scope that actually let the request through, not at the requested scope name. When a key holding only articles:write:any satisfies an articles:write request, the requested name is not an admin scope, yet the power being lent is an admin scope's. Going by the requested name alone would let this path bypass the admin eligibility check entirely. Conversely, actually holding even one scope that does not require admin eligibility satisfies the request on its own, so being an admin is not required.
     """

@@ -2,7 +2,7 @@
 
 Sessions and API keys are two authentication paths folded into one type, Principal. Layers above need only ask "who is this and what do they hold", never "how did they authenticate".
 
-**An API key's permissions must not be frozen at issue time.** A key is a machine borrowing its owner's permissions; the key itself holds none. Permissions are decided on every request from the current snapshot of users / user_roles. Freezing them would leave a demoted admin's key holding admin permissions, and removing the role — the most natural remedy — would stop working. This design is what makes role sync (performed by the bot) the effective means of revoking permissions.
+**An API key's permissions are not frozen at issue time.** A key is a machine borrowing its owner's permissions; the key itself holds none. Permissions are decided on every request from the current snapshot of users / user_roles. Frozen permissions would leave a demoted admin's key holding admin permissions, and removing the role (the most natural remedy) would stop working. This design is what makes role sync (performed by the bot) the effective means of revoking permissions.
 
 Raw values of secrets (session tokens, API keys) are never stored. The DB holds only the SHA-256; lookup hashes the presented raw value by the same procedure and compares. A leaked DB cannot be turned back into a session or a key to impersonate anyone.
 """
@@ -32,7 +32,7 @@ Scope = Literal['articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:a
 ADMIN_SCOPES: Final[frozenset[str]] = frozenset({'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin'})
 
 # Scope implications: the dict key is the requested scope, the value is the set of scopes that can satisfy that request.
-# articles:write:any is "create/update an article naming any author and publisher", which subsumes create/update with the author pinned to the owner (articles:write). Without the implication, a key granted only articles:write:any could not write a single article — the exact opposite of what the scope is defined to mean.
+# articles:write:any is "create/update an article naming any author and publisher", which subsumes create/update with the author pinned to the owner (articles:write). Without the implication, a key granted only articles:write:any could not write a single article, the opposite of what the scope is defined to mean.
 # Even when a request is allowed via an implication, the admin-eligibility check for the scope that allowed it must still run (deps.ensure_scope does this). articles:write:any is an admin scope; using it for an articles:write-equivalent operation does not excuse that check.
 SCOPE_IMPLICATIONS: Final[dict[str, frozenset[str]]] = {
     'articles:write': frozenset({'articles:write', 'articles:write:any'}),
@@ -168,7 +168,7 @@ async def is_admin(db: Database, settings: RuntimeSettings, principal: Principal
       (b) One of the held roles carries Discord's Administrator permission (1 << 3 in discord_roles.permissions).
       (c) One of the held roles is listed in the settings' admin.role_ids. Administrator permits every operation in the guild and is extremely strong; this is the escape hatch that avoids handing it out to someone you only want to run this platform.
 
-    **Do not re-read settings inside this function.** The caller passes settings resolved from the settings table per request (in server, a dependency does this). Passing settings read at startup would mean that anyone who was an admin by that role alone stays an admin until restart, even after the admin role is removed in the UI. The role side of the inputs (principal.role_ids) is a current snapshot re-read on every request, and a skewed state where only the settings side is frozen must never be created.
+    **Settings are not re-read inside this function.** The caller passes settings resolved from the settings table per request (in server, a dependency does this). Passing settings read at startup would mean that anyone who was an admin by that role alone stays an admin until restart, even after the admin role is removed in the UI. The role side of the inputs (principal.role_ids) is a current snapshot re-read on every request, so both sides are always current and the settings side is never frozen while the role side is fresh.
     """
     if principal.is_guild_owner:
         return True

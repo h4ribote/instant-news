@@ -42,8 +42,8 @@ async def get_article_ranking(
 ) -> ItemList[ArticleListItem]:
     """Return the top articles for one sidebar ranking, ordered by the server.
 
-    metric selects the base quantity (views or featured). The score decays with age in two regimes: within a one-week window time is nearly flat and reactions and comments drive the order, and past it the score decays strongly so older articles sink. No time window cuts the tally off — every viewable article in the latest feed is ranked, so old articles are still ordered and returned (they just rank low) and the ranking is never empty while any such article exists. The rule is stated in full on app.article_query.fetch_ranked_articles.
+    metric selects the base quantity (views or featured). The score decays with age in two regimes: within a one-week window time is nearly flat and reactions and comments drive the order, and past it the score decays strongly so older articles sink. No time window cuts the tally off: every viewable article in the latest feed is ranked, so old articles are still ordered and returned (they just rank low) and the ranking is never empty while any such article exists. The rule is stated in full on app.article_query.fetch_ranked_articles.
 
-    The visibility filter is applied per caller (get_principal_optional), exactly as the article listing is, so the ranking never lists an article the caller could not open — a member may see members-only articles they can read, an anonymous caller only public ones. limit is capped so no request can force an unbounded row count.
+    The visibility filter is applied per caller (get_principal_optional), exactly as the article listing is, so the ranking never lists an article the caller could not open: a member may see members-only articles they can read, an anonymous caller only public ones. limit is capped so no request can force an unbounded row count.
     """
     return ItemList[ArticleListItem](items=await fetch_ranked_articles(db, metric=metric, principal=principal, limit=limit))

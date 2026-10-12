@@ -83,7 +83,7 @@ const VISIBILITY_LABELS = { public: '全体公開', members: 'メンバー限定
 const STANCE_LABELS = { independent: '独立系', state: '国営' };
 
 /**
- * A user's display name, for the places that must show one. The shared displayName returns an empty string when there is no name, but in the article byline, the revision's editor line and the writer card, an empty string does not read as "someone with no name" — it reads as if the whole area had vanished.
+ * A user's display name, for the places that must show one. The shared displayName returns an empty string when there is no name, but in the article byline, the revision's editor line and the writer card, an empty string does not read as "someone with no name"; it reads as if the whole area had vanished.
  * Anyone not in `users` (a user who left the guild, another bot, a webhook) comes back with username and global_name both null, so this always emits something.
  */
 function userLabel(user) {
@@ -172,7 +172,7 @@ function articleHtml(a, revisions) {
   crumbs.push(escapeHtml(a.title));
   parts.push(`<div class="breadcrumb">${crumbs.join('<span>›</span>')}</div>`);
 
-  // The publisher's brand goes large at the head of the article. An article carries a dual byline of publisher × reporter, publisher primary and reporter secondary. The byline is frozen at publication, so a reporter's later transfer never moves this display on past articles.
+  // The publisher's brand goes large at the head of the article. An article carries a dual byline of publisher and reporter, publisher primary and reporter secondary. The byline is frozen at publication, so a reporter's later transfer never moves this display on past articles.
   if (a.publisher) {
     const p = a.publisher;
     const label = p.stance === 'state' ? '配信 ・ 国営メディア' : '配信';
@@ -303,7 +303,7 @@ async function showDiff(revisionNumber) {
   } catch (e) {
     box.innerHTML = `<div class="revision">差分を取得できませんでした: ${escapeHtml(errorMessage(e))}</div>`;
   }
-  // Opened from the correction banner, the diff renders at the foot of the article, so carry the reader there — opening it must never look as though nothing happened.
+  // Opened from the correction banner, the diff renders at the foot of the article, so the reader is carried there and opening it visibly does something.
   box.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 

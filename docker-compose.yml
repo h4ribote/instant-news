@@ -1,8 +1,8 @@
-# Runtime environment for instant-news: three services — db (MySQL), server (FastAPI) and bot (Discord bot).
+# Runtime environment for instant-news: three services - db (MySQL), server (FastAPI) and bot (Discord bot).
 #
 # MySQL is not the only place that holds state. This deployment persists two, and they reference each other:
-#   db-data: MySQL's data — articles, users, the catalogue of images (the media table), and the platform settings. Once the seed values are dropped from config.yaml, this is the only copy of discord.guild_id and the OAuth and bot credentials, and a deployment restored without it cannot boot at all: SettingsStore.bootstrap refuses to start for the settings that have no default.
-#   media-data: the image blobs — what each media row points at via content_hash (media.storage_dir in config.yaml).
+#   db-data: MySQL's data - articles, users, the catalogue of images (the media table), and the platform settings. Once the seed values are dropped from config.yaml, this is the only copy of discord.guild_id and the OAuth and bot credentials, and a deployment restored without it cannot boot at all: SettingsStore.bootstrap refuses to start for the settings that have no default.
+#   media-data: the image blobs - what each media row points at via content_hash (media.storage_dir in config.yaml).
 # So back up and restore the two together. Restoring MySQL alone leaves articles pointing at blobs that are not there; wiping only the media table leaves blobs that nothing references. Putting the images on the container filesystem instead of a volume loses every image the moment the container image is replaced, leaving only the DB-side references behind.
 #
 # The build context for both server and bot is the repository root, not each service's own directory: the two share common/, which a narrower context could not copy.
@@ -10,7 +10,7 @@
 # config.yaml is untracked by Git and is never baked into the image (.dockerignore excludes it). It is passed in by mount at run time, so changing config needs no image rebuild. common/config.py looks for config.yaml at the repository root, i.e. /app inside the container, so it is mounted over that path.
 # That reaches only part of the file. Only server / database / media.storage_dir are read from the mount on every boot; everything else in it is a seed value copied into the MySQL settings table at first boot and never read again. The settings table is the source of truth for those and admins change them from /admin, so editing them here and restarting does nothing (common/settings.py, config.example.yaml).
 #
-# compose cannot read the YAML config file, so the DB credentials and the published port — and only those — appear twice, here and in config.yaml. Supply them from a .env at the repository root (keep it untracked by Git) and keep them equal to the corresponding config.yaml values.
+# compose cannot read the YAML config file, so the DB credentials and the published port (and only those) appear twice, here and in config.yaml. Supply them from a .env at the repository root (keep it untracked by Git) and keep them equal to the corresponding config.yaml values.
 
 services:
   db:
@@ -30,7 +30,7 @@ services:
       # Like ngram_token_size, this value is read when the index is built (the value at search time does not affect results), so changing it later requires rebuilding the FULLTEXT index.
       - --innodb-ft-enable-stopword=OFF
       # Memory InnoDB holds data and indexes in. MySQL's default is 128 MiB, too small to hold article bodies (LONGTEXT) plus the ngram full-text index; whatever overflows goes to disk on every read.
-      # The value depends on the host's free memory, so it comes from .env. The db container has no memory limit, so letting MySQL compute the size itself (innodb_dedicated_server) would claim about 75% of the whole host's RAM and squeeze the co-located server and bot — hence an explicit value.
+      # The value depends on the host's free memory, so it comes from .env. The db container has no memory limit, so letting MySQL compute the size itself (innodb_dedicated_server) would claim about 75% of the whole host's RAM and squeeze the co-located server and bot, hence an explicit value.
       - --innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-1G}
       # Binary log retention (7 days). MySQL 8.4 defaults to 30 days, but this deployment has no replica, and backups pair the volumes (see the volumes notes below) rather than archiving binlogs, so 30 days would accumulate in db-data and consume space with no procedure anywhere that uses it.
       # They are kept at all as a grace window: right after a wrong update is applied, mysqlbinlog can read them back to trace what happened.
