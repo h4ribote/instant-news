@@ -1,6 +1,6 @@
 """Admin API for the platform settings (settings:admin).
 
-**settings:admin is stronger than any other scope.** It can rewrite the admin roles (admin.role_ids), which is to say it can hand out admin eligibility itself. Where ads:admin and taxonomy:admin move a bounded set of things — ads, taxonomy — this scope decides who is an admin at all. A key holding it is effectively a delegation of admin permission, and there is no way to narrow what it is delegated over. The principle that the scopes an admin can issue must never be bundled into one weighs especially heavily here.
+**settings:admin is stronger than any other scope.** It can rewrite the admin roles (admin.role_ids), which is to say it can hand out admin eligibility itself. Where ads:admin and taxonomy:admin move a bounded set of things (ads, taxonomy), this scope decides who is an admin at all. A key holding it is effectively a delegation of admin permission, and there is no way to narrow what it is delegated over. The principle that the scopes an admin can issue are kept separate rather than bundled into one weighs especially heavily here.
 
 **The raw value of a secret setting (the bot token, the OAuth client secret) is never returned from this API.** Only whether it is set, which SettingsStore.describe decides. Returning it once means handing the bot token to everyone who can open the UI. Granting the eligibility to read settings is not the same as granting the power to carry the secret itself away.
 
@@ -40,7 +40,7 @@ async def list_settings(store: Annotated[SettingsStore, Depends(get_settings_sto
 
     A secret setting comes back with value null, and is_set says whether it is set. A setting that cannot be changed comes back with editable false, and description says why.
     """
-    return SettingsOut(settings=await _describe(store))
+    return SettingsOut(items=await _describe(store))
 
 
 @router.patch('/api/admin/settings')
@@ -61,4 +61,4 @@ async def update_settings(
         updated = await store.set_many(payload.updates, updated_by=principal.user_id)
     except ValueError as exc:
         raise BadRequest(str(exc)) from exc
-    return SettingsUpdateOut(updated_keys=updated, settings=await _describe(store))
+    return SettingsUpdateOut(updated_keys=updated, items=await _describe(store))

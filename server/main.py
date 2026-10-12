@@ -3,8 +3,8 @@
 
 There are two startup paths, both using the same app.
 
-    python -m server.main            … starts uvicorn on config.yaml's server.host / server.port.
-    uvicorn server.main:app          … started from an outer process manager; uvicorn's own arguments decide what it listens on.
+    python -m server.main            starts uvicorn on config.yaml's server.host / server.port.
+    uvicorn server.main:app          is started from an outer process manager; uvicorn's own arguments decide what it listens on.
 
 Config, DB and settings live on app.state.config / app.state.db / app.state.settings, and the route implementations reach them from there through the deps.py dependencies. Holding them in module globals would make the app unswappable in tests.
 
@@ -31,8 +31,10 @@ from common.settings import MissingSettingsError, SettingsStore
 
 from .app import pages
 from .app.errors import register_exception_handlers
+from .app.rate_limit import RateLimitHeadersMiddleware
 from .app.routers import admin_ads, admin_roles, admin_settings, admin_taxonomy, ads, articles, auth, me, media, rankings, search, taxonomy
 from .app.scheduler import run_publish_scheduler
+from .app.schemas import ErrorOut
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,9 @@ LOG_FORMAT: Final = '%(asctime)s %(levelname)-8s %(name)s: %(message)s'
 
 # Each router owns its URL prefix: routes outside /api span /auth, /media and /ads, so no single prefix can be applied to all of them here.
 _API_ROUTERS: Final = (auth, me, articles, taxonomy, search, rankings, media, ads, admin_ads, admin_taxonomy, admin_settings, admin_roles)
+
+# Every error response, whatever its status, has the one body errors.py builds. Declaring it as the default response states that in the OpenAPI document, and replaces the 422 body FastAPI would otherwise document but this app never sends.
+_ERROR_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {'default': {'model': ErrorOut, 'description': 'エラー。本体の形は状態コードによらず同じ。'}}
 
 
 def _configure_logging() -> None:
@@ -110,13 +115,14 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.state.settings = SettingsStore(app.state.db)
 
     register_exception_handlers(app)
+    app.add_middleware(RateLimitHeadersMiddleware)
 
     # Static assets. pages.py serves the HTML itself, so only css and js are exposed here.
     app.mount('/static/css', StaticFiles(directory=pages.WEB_DIR / 'css'), name='static-css')
     app.mount('/static/js', StaticFiles(directory=pages.WEB_DIR / 'js'), name='static-js')
 
     for module in _API_ROUTERS:
-        app.include_router(module.router)
+        app.include_router(module.router, responses=_ERROR_RESPONSES)
     # Register the page routes last. Starlette matches in registration order, so a route with a variable part like /articles/{slug} must not come before the API, image and static-asset routes.
     app.include_router(pages.router)
     return app

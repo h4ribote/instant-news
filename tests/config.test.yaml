@@ -1,0 +1,30 @@
+# Config for the integration tests run by docker-compose.test.yml. Every credential here is a dummy that only exists inside that throwaway stack.
+
+server:
+  host: 127.0.0.1
+  port: 8000
+  base_url: "http://testserver"
+
+database:
+  host: test-db
+  port: 3306
+  name: instant_news_test
+  user: instant_news_test
+  password: "test-only-password"
+
+media:
+  storage_dir: "/tmp/instant-news-media"
+
+discord:
+  guild_id: "100000000000000001"
+  oauth:
+    client_id: "100000000000000002"
+    client_secret: "test-only-secret"
+  bot:
+    token: "test-only-token"
+    # The tests publish by hand; a long interval keeps the scheduled-publishing loop from acting in the middle of a test.
+    publish_poll_interval_seconds: 3600
+
+articles:
+  # The tests save the same article many times through one key; the per-key limit is not what they exercise.
+  api_rate_limit_per_hour: 100000

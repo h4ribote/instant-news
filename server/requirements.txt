@@ -1,10 +1,11 @@
-fastapi
+# fastapi and pydantic generate the OpenAPI document kept in docs/openapi.json, so they are pinned: an upgrade has to arrive as a deliberate change to that file, not as a contract test failing on a rebuild.
+fastapi==0.143.0
 uvicorn
 httpx
 aiomysql
 cryptography
 pyyaml
-pydantic
+pydantic==2.14.0
 python-multipart
 markdown-it-py
 mdit-py-plugins

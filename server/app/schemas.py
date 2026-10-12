@@ -4,14 +4,14 @@ IDs always cross the wire as strings. A DB BIGINT and a Discord snowflake are bo
 
 Datetimes are handled as naive UTC to match the DB's DATETIME and emitted in JSON as ISO 8601 with a trailing Z (UtcDateTime).
 
-The *Write models serve both creation (POST) and partial update (PATCH), so every field is optional. Telling "omitted" from "explicitly set to null" is done with pydantic's model_fields_set (the field name being in payload.model_fields_set means it was specified). The service layer checks the fields that creation requires.
+The *Write models of the taxonomy and ads serve both creation (POST) and partial update (PATCH), so every field is optional and the service layer checks the fields that creation requires. Articles split the two into ArticleCreate and ArticleUpdate, so the required fields and the non-nullable fields are stated in the types and in the OpenAPI schema. Either way, telling "omitted" from "explicitly set to null" is done with pydantic's model_fields_set (the field name being in payload.model_fields_set means it was specified).
 """
 
 from __future__ import annotations
 
 import unicodedata
 from datetime import date, datetime, timezone
-from typing import Annotated, Any, Final, Generic, Literal, TypeAlias, TypeVar
+from typing import Annotated, Any, Final, Generic, Literal, TypeVar
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, field_validator
 
@@ -99,7 +99,7 @@ BylineMode = Literal['author', 'publisher']
 PublisherStance = Literal['independent', 'state']
 Scope = Literal['articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin']
 
-# The base quantity an article ranking orders on. 'views' ranks by view count (アクセスランキング); 'featured' by the reader-facing score plus replies (注目). Both are then weighted by recency in the query; the weighting is not a value set the client chooses. See app.article_query.fetch_ranked_articles.
+# The base quantity an article ranking orders on. 'views' ranks by view count (the access ranking); 'featured' by the reader-facing score plus replies (the featured card). Both are then weighted by recency in the query; the weighting is not a value set the client chooses. See app.article_query.fetch_ranked_articles.
 ArticleRankingMetric = Literal['views', 'featured']
 
 # A slug appears verbatim as a URL path segment, so it must hold no whitespace and no character that turns into a path or query separator.
@@ -125,13 +125,34 @@ ItemT = TypeVar('ItemT')
 
 
 class Page(_OutModel, Generic[ItemT]):
-    """A listing response. total is the total count after filtering."""
+    """One page of a listing that grows with activity (articles, comments, revisions, ads).
+
+    next_cursor / prev_cursor are opaque; passing one back as ?cursor= returns the following or preceding page, and null means there is none in that direction. total is the count over the whole filtered listing, and is null unless the request asked for it with include_total=true (counting costs a query of its own).
+    """
 
     items: list[ItemT]
-    page: int
     per_page: int
-    total: int
-    has_next: bool
+    next_cursor: str | None = None
+    prev_cursor: str | None = None
+    total: int | None = None
+
+
+class ItemList(_OutModel, Generic[ItemT]):
+    """A complete collection returned whole (categories, tags, the caller's keys and the like). An object rather than a bare array, so fields can be added beside items later."""
+
+    items: list[ItemT]
+
+
+class ErrorDetail(_OutModel):
+    code: str
+    message: str
+    details: dict[str, Any] | None = None
+
+
+class ErrorOut(_OutModel):
+    """The body of every error response, whatever the status code."""
+
+    error: ErrorDetail
 
 
 # Users and roles
@@ -260,8 +281,8 @@ class PublisherRankingItem(_OutModel):
 
     score is the sum of a value computed per article by the following rule (up-votes as up, down-votes as down, comment count as c).
 
-      - 2 × down ≥ up … the article is being piled on. score = up + c (down-votes are not added)
-      - 2 × down < up  … it is not being piled on. score = up + (down ÷ 2, floored) + c (down-votes are added at half weight, as evidence of interest)
+      - 2 x down >= up: the article is being piled on. score = up + c (down-votes are not added)
+      - 2 x down < up: it is not being piled on. score = up + (down / 2, floored) + c (down-votes are added at half weight, as evidence of interest)
 
     Down-votes never subtract from the score. A down-vote marks "read, and disagreed with", not "not read", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record.
 
@@ -332,7 +353,7 @@ class RevisionDiffOut(_OutModel):
 class ArticleListItem(_OutModel):
     """An article as it appears in a listing.
 
-    up_count / down_count / comment_count are the totals across all of the article's notification posts (one article can be notified to several channels). score is up_count − down_count and may be negative. The score shown to readers is this subtraction, a different thing from the publisher ranking's score (for that rule see PublisherRankingItem).
+    up_count / down_count / comment_count are the totals across all of the article's notification posts (one article can be notified to several channels). score is up_count - down_count and may be negative. The score shown to readers is this subtraction, a different thing from the publisher ranking's score (for that rule see PublisherRankingItem).
     """
 
     id: IdOut
@@ -355,7 +376,7 @@ class ArticleListItem(_OutModel):
     view_count: int
     up_count: int
     down_count: int
-    # The score shown to readers: up_count − down_count, and it may be negative.
+    # The score shown to readers: up_count - down_count, and it may be negative.
     score: int
     comment_count: int
     published_at: UtcDateTime | None = None
@@ -376,7 +397,7 @@ class DiscordPostOut(_OutModel):
     thread_url: str | None = None
     up_count: int
     down_count: int
-    # The score for this notification post alone (up_count − down_count). May be negative.
+    # The score for this notification post alone (up_count - down_count). May be negative.
     score: int
     comment_count: int
     posted_at: UtcDateTime | None = None
@@ -399,7 +420,7 @@ class CommentOut(_OutModel):
 
     body holds the Discord message's content in Discord's own markup. The server does not format it (interpreting Discord's markup here would mean carrying a second implementation that disagrees with what Discord displays). The UI must always escape it before rendering.
 
-    score is up_count − down_count and may be negative.
+    score is up_count - down_count and may be negative.
     """
 
     id: IdOut
@@ -413,20 +434,22 @@ class CommentOut(_OutModel):
     edited_at: UtcDateTime | None = None
 
 
-class CommentListOut(_OutModel):
-    """The listing of an article's comments.
+class CommentListOut(Page[CommentOut]):
+    """One page of an article's comments.
 
-    total is not the number returned but the article's total comment count (so the UI can decide whether to offer a read-more control). thread_url is the entry point to the Discord thread, the only place a comment can be written (this API only reads, and accepts no writes).
+    thread_url is the entry point to the Discord thread, the only place a comment can be written (this API only reads, and accepts no writes).
     """
 
-    items: list[CommentOut]
-    total: int
     thread_url: str | None = None
 
 
 class ArticleOut(ArticleListItem):
-    """An article's detail. corrections is the listing of revisions recorded as corrections, shown at the top of the article page."""
+    """An article's detail. corrections is the listing of revisions recorded as corrections, shown at the top of the article page.
 
+    id is the article's immutable identifier and the one the write endpoints (PATCH, publish) and GET /api/articles/by-id/{id} take; slug is the permalink and may change. version identifies the editable state and is what the ETag header carries; counting a view does not advance it.
+    """
+
+    version: int
     body_md: str
     body_html: str | None = None
     visibility_role_ids: list[IdOut] = Field(default_factory=list)
@@ -436,49 +459,92 @@ class ArticleOut(ArticleListItem):
     discord_posts: list[DiscordPostOut] = Field(default_factory=list)
 
 
-class SeriesDetailOut(SeriesOut):
-    articles: list[ArticleListItem] = Field(default_factory=list)
+def _drop_default(schema: dict[str, Any]) -> None:
+    """Remove the default from a field's JSON schema. Used for fields whose default None stands for "omitted" rather than for a value a client may send."""
+    schema.pop('default', None)
 
 
-class ArticleWrite(_WriteModel):
-    """Request body for creating or updating an article.
+def _omittable(**kwargs: Any) -> Any:
+    """A field that may be omitted but never set to null.
 
-    Every field is optional. The service layer checks title / body_md / category_id, which creation (POST) requires, and decides what may be specified at all (permission to flag breaking news, which publisher may be published under, whether someone else can be made the author). Only format can be expressed here; a rule that turns on eligibility cannot be decided without knowing the principal the request came from.
+    pydantic does not validate defaults, so an omitted field keeps None without error while an explicit null fails the non-nullable type with 422. The None never reaches the service layer as a value: it reads only the fields in model_fields_set.
+    """
+    return Field(default=None, json_schema_extra=_drop_default, **kwargs)
+
+
+class _ArticleWriteBase(_WriteModel):
+    """What creating and updating an article have in common: the metadata of the revision the save records, and the normalization of the list fields.
+
+    The service layer decides what may be specified at all (permission to flag breaking news, which publisher may be published under, whether someone else can be made the author). Only format can be expressed here; a rule that turns on eligibility cannot be decided without knowing the principal the request came from.
 
     tags is an array of tag slugs. Slugs rather than IDs, because a slug is an identifier an auto-posting client can write down stably. A slug that does not exist is turned into an error by the service layer (creating tags falls under taxonomy:admin; posting an article does not add them of its own accord).
+
+    sponsor_name tells the reader whose ad it is, so it requires displayable characters. A name of nothing but zero-width characters would put out the Sponsored label alone while withholding the advertiser, meeting the disclosure requirement (is_sponsored=1 requires sponsor_name) in form only.
     """
 
-    title: str | None = Field(default=None, min_length=1, max_length=300)
-    body_md: str | None = None
+    # The note left on the revision. For a correction, write what was corrected.
+    revision_note: str | None = Field(default=None, max_length=500)
+    is_correction: bool = False
+
+    @field_validator('tags', 'visibility_role_ids', check_fields=False)
+    @classmethod
+    def _unique_items(cls, value: list[str]) -> list[str]:
+        """Collapse duplicates. The primary key of article_tags / article_visibility_roles is (article, target), so inserting duplicates hits a duplicate key."""
+        return list(dict.fromkeys(value))
+
+
+class ArticleCreate(_ArticleWriteBase):
+    """Request body for creating an article (POST /api/articles).
+
+    title / body_md / category_id are required. The other non-nullable fields default to the same values as the DB columns. slug null means generate one from the title; author_id null means the principal.
+    """
+
+    title: str = Field(min_length=1, max_length=300)
+    body_md: str
     excerpt: str | None = Field(default=None, max_length=500)
-    category_id: IdIn | None = None
+    category_id: IdIn
     publisher_id: IdIn | None = None
     series_id: IdIn | None = None
     series_position: int | None = None
-    tags: list[str] | None = None
-    visibility: Visibility | None = None
-    visibility_role_ids: list[IdIn] | None = None
+    tags: list[str] = Field(default_factory=list)
+    visibility: Visibility = 'public'
+    visibility_role_ids: list[IdIn] = Field(default_factory=list)
     cover_image_url: str | None = Field(default=None, max_length=1000)
-    byline_mode: BylineMode | None = None
-    is_breaking: bool | None = None
-    is_sponsored: bool | None = None
-    # This value tells the reader whose ad it is, so it requires displayable characters. A name of nothing but zero-width characters would put out the Sponsored label alone while withholding the advertiser, meeting the disclosure requirement (is_sponsored=1 requires sponsor_name) in form only.
+    byline_mode: BylineMode = 'author'
+    is_breaking: bool = False
+    is_sponsored: bool = False
     sponsor_name: VisibleStr | None = Field(default=None, max_length=100)
     slug: str | None = Field(default=None, min_length=1, max_length=200, pattern=SLUG_PATTERN)
-    status: ArticleStatus | None = None
+    status: ArticleStatus = 'draft'
     scheduled_at: UtcDateTime | None = None
     author_id: IdIn | None = None
-    # The note left on the revision. For a correction, write what was corrected.
-    revision_note: str | None = Field(default=None, max_length=500)
-    is_correction: bool | None = None
 
-    @field_validator('tags', 'visibility_role_ids')
-    @classmethod
-    def _unique_items(cls, value: list[str] | None) -> list[str] | None:
-        """Collapse duplicates. The primary key of article_tags / article_visibility_roles is (article, target), so inserting duplicates hits a duplicate key."""
-        if value is None:
-            return None
-        return list(dict.fromkeys(value))
+
+class ArticleUpdate(_ArticleWriteBase):
+    """Request body for a partial update of an article (PATCH /api/articles/{id}).
+
+    Only the fields the request carries are changed; an omitted field keeps its current value. null erases the value of a nullable field (excerpt, publisher_id, series_id, series_position, cover_image_url, sponsor_name, scheduled_at). A field that cannot be null is declared with _omittable, so sending null to it is a 422 rather than an erasure. tags and visibility_role_ids replace the whole set; send [] to empty them.
+    """
+
+    title: str = _omittable(min_length=1, max_length=300)
+    body_md: str = _omittable()
+    excerpt: str | None = Field(default=None, max_length=500)
+    category_id: IdIn = _omittable()
+    publisher_id: IdIn | None = None
+    series_id: IdIn | None = None
+    series_position: int | None = None
+    tags: list[str] = _omittable()
+    visibility: Visibility = _omittable()
+    visibility_role_ids: list[IdIn] = _omittable()
+    cover_image_url: str | None = Field(default=None, max_length=1000)
+    byline_mode: BylineMode = _omittable()
+    is_breaking: bool = _omittable()
+    is_sponsored: bool = _omittable()
+    sponsor_name: VisibleStr | None = Field(default=None, max_length=100)
+    slug: str = _omittable(min_length=1, max_length=200, pattern=SLUG_PATTERN)
+    status: ArticleStatus = _omittable()
+    scheduled_at: UtcDateTime | None = None
+    author_id: IdIn = _omittable()
 
 
 class MediaFailure(_OutModel):
@@ -496,9 +562,6 @@ class ArticleSaveOut(_OutModel):
 
     article: ArticleOut
     media_failures: list[MediaFailure] = Field(default_factory=list)
-
-
-ArticleListOut: TypeAlias = Page[ArticleListItem]
 
 
 # Me, API keys and subscriptions
@@ -676,7 +739,7 @@ class SettingOut(_OutModel):
 class SettingsOut(_OutModel):
     """Every setting. The order is the registry's order, so the order in the UI never varies from request to request."""
 
-    settings: list[SettingOut] = Field(default_factory=list)
+    items: list[SettingOut] = Field(default_factory=list)
 
 
 class SettingsUpdate(_WriteModel):
@@ -693,7 +756,7 @@ class SettingsUpdate(_WriteModel):
 class SettingsUpdateOut(SettingsOut):
     """The response to a settings update.
 
-    updated_keys are the keys actually changed. settings returns every setting as it stands after the update. Returning only the updated values would leave the UI redrawing from the values it sent, and the results of normalization (removing duplicate IDs, dropping a trailing / from a URL, and so on) would not reach the UI until the next reload.
+    updated_keys are the keys actually changed. items returns every setting as it stands after the update. Returning only the updated values would leave the UI redrawing from the values it sent, and the results of normalization (removing duplicate IDs, dropping a trailing / from a URL, and so on) would not reach the UI until the next reload.
     """
 
     updated_keys: list[str] = Field(default_factory=list)

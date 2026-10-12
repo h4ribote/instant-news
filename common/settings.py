@@ -2,9 +2,9 @@
 
 config.yaml stays the source of truth only for what is needed before settings can be read from the DB (server, database) and for what is decided outside the container (the image storage directory, which is meaningless unless it matches the named volume's mount point). Everything else must be changeable by an admin from the frontend, and there is no reason to require editing the config file and restarting the container for it.
 
-The config file must never overwrite the DB on every boot: values changed from the UI would silently revert on the next restart, producing the hardest state of all to diagnose — the value you thought you set is not taking effect. One of the two has to be authoritative, and here it is the DB.
+The config file does not overwrite the DB on every boot, since values changed from the UI would silently revert on the next restart, producing the hardest state of all to diagnose: the value you thought you set is not taking effect. One of the two has to be authoritative, and here it is the DB.
 
-Kind, default, validation, secrecy and whether a change needs a restart are defined in code by this registry (REGISTRY). The settings table holds values only. Adding a setting means adding it to the registry — no table change and no UI change (the UI reads the registry and generates itself).
+Kind, default, validation, secrecy and whether a change needs a restart are defined in code by this registry (REGISTRY). The settings table holds values only. Adding a setting means adding it to the registry, with no table change and no UI change (the UI reads the registry and generates itself).
 
 The JSON representation renders Discord IDs as strings: JavaScript's Number is exact only to 2^53, so snowflakes break silently.
 """
@@ -254,7 +254,7 @@ class MediaFetchConfig:
 
 @dataclass(frozen=True)
 class MediaLimits:
-    """Limits on image ingest. The storage directory (storage_dir) is inseparable from the runtime environment, so it is not here — config.yaml holds it."""
+    """Limits on image ingest. The storage directory (storage_dir) is inseparable from the runtime environment, so it is not here; config.yaml holds it."""
 
     fetch: MediaFetchConfig
     # Max pixels after decoding. A byte limit is no defence against a decompression bomb: a few-KB PNG that expands to tens of GB of pixels.
@@ -415,7 +415,7 @@ class SettingsStore:
 
         Rows that already exist are left alone. Overwriting from config.yaml on every boot would silently revert values changed from the UI at the next restart. When a setting is added, only the new key is seeded here (a setting with a default needs no config.yaml edit).
 
-        The missing keys are read before writing so that a normal restart INSERTs nothing. Running INSERT IGNORE over every key makes MySQL emit a duplicate-key warning for each existing row, which aiomysql relays into a Python warning. A wall of duplicate-key warnings against the settings primary key on every boot reads exactly like the config file overwriting the DB — the opposite of what this design intends.
+        The missing keys are read before writing so that a normal restart INSERTs nothing. Running INSERT IGNORE over every key makes MySQL emit a duplicate-key warning for each existing row, which aiomysql relays into a Python warning. A wall of duplicate-key warnings against the settings primary key on every boot reads exactly like the config file overwriting the DB, the opposite of what this design intends.
         """
         rows = await self._db.fetch_all('SELECT setting_key FROM settings')
         existing = {str(row['setting_key']) for row in rows}

@@ -11,7 +11,7 @@
  *
  * - 901px and up: the intended two columns (main + 300px sidebar).
  * - 900px and down: the sidebar folds under the main column; tablet portrait (768-834px) lands here. The search field stays in the masthead at this tier too.
- * - 600px and down: phone portrait. Real device widths sit within 360-430px on both iPhone and Android, and landscape (640px and up) never reaches this tier. The masthead is cut down to logo + 🔍 🌙 ☰ and the nav bar to categories only; the links dropped from them are taken over by the drawer (assembled by js/chrome.js).
+ * - 600px and down: phone portrait. Real device widths sit within 360-430px on both iPhone and Android, and landscape (640px and up) never reaches this tier. The masthead is cut down to logo + search, theme and menu buttons and the nav bar to categories only; the links dropped from them are taken over by the drawer (assembled by js/chrome.js).
  *
  * Media queries are not collected at the end; each sits immediately after the rule it overrides. Collected, whoever changes a desktop value never has the narrow-width value in front of them, and the two drift apart unnoticed. That is exactly what happened to the timeline (.timeline) rail: when the narrow-width columns were added only one side moved and the rail ended up off the dot centre.
  */
@@ -61,7 +61,7 @@
   --vis-members: #6741d9;    /* members-only */
   --vis-restricted: #e8590c; /* role-restricted */
 
-  /* Votes (:arrow_up: / :arrow_down:). Up/down votes are never carried by colour alone: the ▲▼ glyphs are set alongside so the direction reads regardless of colour vision. */
+  /* Votes (:arrow_up: / :arrow_down:). Up/down votes are never carried by colour alone: the up/down triangle glyphs are set alongside so the direction reads regardless of colour vision. */
   --vote-up: #2b8a3e;
   --vote-down: #c92a2a;
 
@@ -268,7 +268,7 @@ img { max-width: 100%; display: block; }
 }
 
 /*
- * On phones the search field folds away until 🔍 is pressed: the logo and the account area fill the masthead, so it cannot stay up permanently.
+ * On phones the search field folds away until the search button is pressed: the logo and the account area fill the masthead, so it cannot stay up permanently.
  * The opened field wraps at flex-basis:100% and takes a line of its own below the logo (.masthead .container's flex-wrap is what makes this possible).
  * At 601px and up it stays permanent. This used to be a blanket display:none for everything 900px and down, but a 768px device still has 340px left after the logo (about 320px) and the account area (about 78px). Folding it away when there is room to show it means a reader who opened a /?q= result is shown nothing but the "search results for X" heading, unable to see the search term or correct it.
  */
@@ -318,12 +318,12 @@ img { max-width: 100%; display: block; }
 }
 .icon-btn:hover { text-decoration: none; background: var(--chip-bg); }
 
-/* js/chrome.js owns opening and closing the search and the drawer, and their entry points appear on phones only. Hidden by default and shown at narrow widths: the other way round leaves a ☰ that cannot be pressed on a wide screen where JavaScript is disabled. */
+/* js/chrome.js owns opening and closing the search and the drawer, and their entry points appear on phones only. Hidden by default and shown at narrow widths: the other way round leaves a menu button that cannot be pressed on a wide screen where JavaScript is disabled. */
 [data-search-toggle], [data-drawer-toggle] { display: none; }
 
 @media (max-width: 600px) {
   .masthead .container { gap: 10px; }
-  /* The account area (user name, log out, log in, settings) moves into the drawer. Only 🔍 🌙 ☰ stay in the masthead. */
+  /* The account area (user name, log out, log in, settings) moves into the drawer. Only the search, theme and menu buttons stay in the masthead. */
   .masthead .actions .acct { display: none; }
   [data-search-toggle], [data-drawer-toggle] {
     display: grid;
@@ -1125,7 +1125,7 @@ img { max-width: 100%; display: block; }
   background: var(--surface);
 }
 
-/* The up/down subtraction. The direction is shown by both the glyph (▲▼±) and the colour. */
+/* The up/down subtraction. The direction is shown by both the glyph (up triangle, down triangle, plus-minus) and the colour. */
 .score { font-variant-numeric: tabular-nums; }
 .score.up { color: var(--vote-up); }
 .score.down { color: var(--vote-down); }

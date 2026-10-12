@@ -3,6 +3,8 @@
 This router requires exactly one scope: ads:admin. Never bundle the scopes an admin can issue into one. Hand the ad-management app ads:admin and nothing else: mix in the power to forge an article's byline (articles:write:any) and whoever you trusted with ad submission can publish articles under any reporter's name.
 
 There is no API for creating ad slots (ad_slots). Slots are a fixed set that the frontend templates reference by slug, seeded by the migration. Letting the API add slots would achieve nothing without a template to render them, and would only accumulate inexplicable slots that can be created but never appear.
+
+Submitting an ad honours Idempotency-Key, like creating an article: an ad has no unique field, so a resend after a lost response would otherwise run the same creative twice.
 """
 
 from __future__ import annotations
@@ -12,20 +14,22 @@ from datetime import date, datetime
 from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 
 from common.config import MediaConfig
 from common.db import Database
 from common.snowflake import to_snowflake
 
 from ..deps import get_db, get_media_config, require_scope
-from ..errors import BadRequest, MediaError, NotFound
+from ..errors import BadRequest, Conflict, MediaError, NotFound
+from ..idempotency import IdempotencyRace, claim, complete, find_replay, idempotency_request
 from ..media.fetch import FetchError
 from ..media.service import ingest_url
 from ..media.store import VARIANTS
 from ..media.transcode import TranscodeError
+from ..paging import KeysetOrder, PagingParams, SortKey, fetch_keyset, page_request, paging_params
 from ..principals import Principal
-from ..schemas import AdOut, AdSlotOut, AdStatDay, AdStatsOut, AdWrite
+from ..schemas import AdOut, AdSlotOut, AdStatDay, AdStatsOut, AdWrite, ItemList, Page
 
 # Held as a single object: imposed on the whole router, and referenced by the routes that need the principal itself, so FastAPI's dependency cache evaluates it only once per request.
 _ads_admin: Final = require_scope('ads:admin')
@@ -44,6 +48,17 @@ _REQUIRED_ON_CREATE: Final = ('slot_id', 'advertiser_name', 'image_url', 'link_u
 
 # NOT NULL columns. Reject an explicit null in a partial update: the DB does keep nulls out, but failing there is a constraint-violation 500 that says nothing about what was wrong.
 _NOT_NULLABLE: Final = ('slot_id', 'advertiser_name', 'image_url', 'link_url', 'weight', 'is_active')
+
+_CREATE_ENDPOINT: Final = 'POST /api/admin/ads'
+
+_ad_paging: Final = paging_params(20, 100)
+# Newest submission first; the id orders ads submitted in the same second.
+_AD_ORDER: Final = KeysetOrder(
+    (
+        SortKey('a.created_at', lambda row: row['created_at'], 'datetime', descending=True),
+        SortKey('a.id', lambda row: row['id'], 'int', descending=True),
+    )
+)
 
 _AD_SELECT: Final = """
     SELECT a.id, a.slot_id, a.advertiser_name, a.image_url, a.link_url, a.alt_text, a.weight,
@@ -151,27 +166,56 @@ async def _resolve_image_url(db: Database, media: MediaConfig, principal: Princi
 
 
 @router.get('/api/admin/ad-slots')
-async def list_ad_slots(db: Annotated[Database, Depends(get_db)]) -> list[AdSlotOut]:
-    """The ad slot listing. Recommended dimensions are returned so that an external management app can reproduce the appearance itself before submission — the core has no preview endpoint."""
+async def list_ad_slots(db: Annotated[Database, Depends(get_db)]) -> ItemList[AdSlotOut]:
+    """The ad slot listing. Recommended dimensions are returned so that an external management app can reproduce the appearance itself before submission: the core has no preview endpoint."""
     rows = await db.fetch_all('SELECT id, slug, name, description, recommended_width, recommended_height FROM ad_slots ORDER BY id')
-    return [AdSlotOut.model_validate(row) for row in rows]
+    return ItemList[AdSlotOut](items=[AdSlotOut.model_validate(row) for row in rows])
 
 
 @router.get('/api/admin/ads')
-async def list_ads(db: Annotated[Database, Depends(get_db)]) -> list[AdOut]:
-    """The ad listing. Ads that were stopped (is_active=0) are included too: following performance stats requires the stopped ones to stay visible."""
-    rows = await db.fetch_all(f'{_AD_SELECT} ORDER BY a.created_at DESC, a.id DESC')
-    return [_ad_out(row) for row in rows]
+async def list_ads(
+    db: Annotated[Database, Depends(get_db)],
+    paging: Annotated[PagingParams, Depends(_ad_paging)],
+) -> Page[AdOut]:
+    """One page of the ad listing, newest submission first. Ads that were stopped (is_active=0) are included too: following performance stats requires the stopped ones to stay visible."""
+    fetched = await fetch_keyset(
+        db,
+        page_request('ads', {}, paging),
+        select=_AD_SELECT,
+        count_from='FROM ads AS a',
+        where='TRUE',
+        where_args=[],
+        order=_AD_ORDER,
+    )
+    return Page[AdOut](
+        items=[_ad_out(row) for row in fetched.rows],
+        per_page=fetched.per_page,
+        next_cursor=fetched.next_cursor,
+        prev_cursor=fetched.prev_cursor,
+        total=fetched.total,
+    )
 
 
-@router.post('/api/admin/ads', status_code=status.HTTP_201_CREATED)
+@router.post(
+    '/api/admin/ads',
+    status_code=status.HTTP_201_CREATED,
+    responses={201: {'headers': {'Idempotent-Replayed': {'description': '同じ Idempotency-Key の最初の要求の結果を再生したときに true。', 'schema': {'type': 'string'}}}}},
+)
 async def create_ad(
     payload: AdWrite,
+    response: Response,
     principal: Annotated[Principal, Depends(_ads_admin)],
     db: Annotated[Database, Depends(get_db)],
     media: Annotated[MediaConfig, Depends(get_media_config)],
+    idempotency_key: Annotated[str | None, Header(description='再送で広告が重複しないためのキー(UUID など)。同じキーと同じ本体の再送には、最初の要求が登録した広告を返す。')] = None,
 ) -> AdOut:
-    """Submit an ad."""
+    """Submit an ad. A resend under the same Idempotency-Key and body returns the ad the first request created."""
+    idempotency = idempotency_request(_CREATE_ENDPOINT, idempotency_key, payload)
+    if idempotency is not None:
+        replayed = await find_replay(db, principal.user_id, idempotency)
+        if replayed is not None:
+            response.headers['Idempotent-Replayed'] = 'true'
+            return _ad_out(await _fetch_ad(db, replayed.resource_id))
     missing = [name for name in _REQUIRED_ON_CREATE if getattr(payload, name) is None]
     if missing:
         raise BadRequest(f'広告の作成には次の項目が必要です: {", ".join(missing)}')
@@ -180,18 +224,30 @@ async def create_ad(
     _validate_period(payload.starts_at, payload.ends_at)
     link_url = _validated_link_url(payload.link_url)
     image_url = await _resolve_image_url(db, media, principal, payload.image_url)
-    ad_id = await db.execute_insert(
-        'INSERT INTO ads (slot_id, advertiser_name, image_url, link_url, alt_text, weight, starts_at, ends_at, is_active) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
-        slot_id,
-        payload.advertiser_name,
-        image_url,
-        link_url,
-        payload.alt_text,
-        1 if payload.weight is None else payload.weight,
-        payload.starts_at,
-        payload.ends_at,
-        1 if payload.is_active is None else int(payload.is_active),
-    )
+    try:
+        async with db.transaction() as conn:
+            record_id = await claim(db, conn, principal.user_id, idempotency) if idempotency is not None else None
+            ad_id = await db.execute_insert(
+                'INSERT INTO ads (slot_id, advertiser_name, image_url, link_url, alt_text, weight, starts_at, ends_at, is_active) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                slot_id,
+                payload.advertiser_name,
+                image_url,
+                link_url,
+                payload.alt_text,
+                1 if payload.weight is None else payload.weight,
+                payload.starts_at,
+                payload.ends_at,
+                1 if payload.is_active is None else int(payload.is_active),
+                conn=conn,
+            )
+            if record_id is not None:
+                await complete(db, conn, record_id, ad_id)
+    except IdempotencyRace:
+        replayed = await find_replay(db, principal.user_id, idempotency) if idempotency is not None else None
+        if replayed is None:
+            raise Conflict('同じ Idempotency-Key の要求が同時に処理されています。再送してください。') from None
+        response.headers['Idempotent-Replayed'] = 'true'
+        return _ad_out(await _fetch_ad(db, replayed.resource_id))
     return _ad_out(await _fetch_ad(db, ad_id))
 
 
@@ -266,7 +322,7 @@ async def update_ad(
 async def deactivate_ad(ad_id: str, db: Annotated[Database, Depends(get_db)]) -> AdOut:
     """Stop an ad from running. The row is kept and is_active set to 0.
 
-    This must never be a hard delete: ad_stats_daily references ads with CASCADE, so dropping the row takes the performance stats with it — how many times that ad was shown and how many times it was clicked. An ad whose run has ended is precisely the one you reconcile performance stats against.
+    This is a soft delete, not a hard delete: ad_stats_daily references ads with CASCADE, so dropping the row would take the performance stats with it (how many times that ad was shown and how many times it was clicked). An ad whose run has ended is precisely the one you reconcile performance stats against.
 
     The response is the updated ad itself, so is_active=false shows on the spot that DELETE means stopped, not gone.
     """

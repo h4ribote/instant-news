@@ -5,6 +5,8 @@ This module knows nothing about HTTP, so the routers and the background schedule
 The heart of the module is that save and publish treat Discord roles in opposite ways. Eligibility at save time (whose name may be written under, whether breaking news may be flagged) is re-read from the current roles every time, but the byline settled at publish time (articles.publisher_id) is frozen and never moves again, however the roles change afterwards. Who reported under which publisher's name and when is a past fact, not a function of the current affiliation.
 
 Images are ingested on every save rather than at publish time. Discord CDN URLs expire in about 24 hours, so waiting until publish means an article left sitting as a draft is fetched after expiry, when the original image is already gone.
+
+Every save and every publication that changes the row advances articles.version, the value the ETag carries. A caller that passes expected_versions (taken from If-Match) gets PreconditionFailed when the article moved on since it read it, instead of overwriting someone else's edit.
 """
 
 from __future__ import annotations
@@ -12,27 +14,34 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import Any, Final
 
-from aiomysql import Connection
+from aiomysql import Connection, IntegrityError
 
 from common.config import Config, effective_media_config
 from common.db import Database
 from common.settings import RuntimeSettings
 from common.snowflake import to_snowflake
 
-from .errors import ArticleError, ArticleForbidden, Conflict, NotFound, RateLimited
+from .errors import ArticleError, ArticleForbidden, Conflict, NotFound, PreconditionFailed, RateLimited
+from .idempotency import IdempotencyRequest, claim, complete
 from .markdown import render_markdown
 from .media.service import IngestFailure, ingest_article_images
 from .principals import Principal, has_scope, is_admin
-from .schemas import ArticleWrite, visible_text
+from .schemas import ArticleCreate, ArticleUpdate, visible_text
 
 # ArticleError / ArticleForbidden are re-exported from errors.py, never redefined here. Exception-to-HTTP conversion is centralized in errors.py, so a same-named class defined here would fall outside the handler table and business-rule violations would come back as 500 instead of 400 or 403.
 __all__ = [
     'ArticleError',
     'ArticleForbidden',
+    'article_etag',
     'has_write_any',
     'ensure_may_edit',
+    'RATE_LIMIT_WINDOW_SECONDS',
+    'RateLimitStatus',
+    'rate_limit_status',
+    'resolve_moved_slug',
     'save_article',
     'publish_article',
     'resolve_notify_channels',
@@ -49,42 +58,54 @@ _SLUG_BASE_MAX_LENGTH: Final = 190
 _SLUG_FALLBACK: Final = 'article'
 # Where to give up when generated slugs keep colliding.
 _SLUG_MAX_ATTEMPTS: Final = 1000
+# MySQL's ER_DUP_ENTRY.
+_DUPLICATE_ENTRY: Final = 1062
+# Slugs no article may take. /api/articles/by-id/{id} shares its first segment with /api/articles/{slug}/..., so an article slugged by-id would have its sub-resources shadowed.
+_RESERVED_SLUGS: Final = frozenset({'by-id'})
 
 # Columns of the existing row read when saving an article.
 _EXISTING_COLUMNS: Final = (
     'id, slug, author_id, publisher_id, category_id, series_id, series_position, title, excerpt, body_md, '
-    'cover_image_url, status, visibility, byline_mode, is_breaking, is_sponsored, sponsor_name, scheduled_at, published_at'
+    'cover_image_url, status, visibility, byline_mode, is_breaking, is_sponsored, sponsor_name, scheduled_at, published_at, version'
 )
+
+ArticlePayload = ArticleCreate | ArticleUpdate
 
 
 # Small helpers.
 
 
-def _specified(payload: ArticleWrite, name: str) -> bool:
-    """Whether the request named this field explicitly.
+def _specified(payload: ArticlePayload, name: str) -> bool:
+    """Whether the request sets this field.
 
-    ArticleWrite serves both creation and partial update, so every field is optional and the value alone cannot tell "omitted" from "explicitly set to null". The first keeps the existing value, the second erases it: opposite meanings.
+    A creation sets every field: an omitted one takes the default ArticleCreate declares. An update sets only the fields it carries, and the value alone cannot tell "omitted" from "explicitly set to null": the first keeps the existing value, the second erases it.
     """
-    return name in payload.model_fields_set
+    return isinstance(payload, ArticleCreate) or name in payload.model_fields_set
 
 
-def _merged(payload: ArticleWrite, existing: dict[str, Any] | None, name: str, default: Any = None) -> Any:
-    """Return the given value if the request named it, else the existing value, else the default."""
-    if _specified(payload, name):
+def _merged(payload: ArticlePayload, existing: dict[str, Any] | None, name: str) -> Any:
+    """Return the value the request sets, else the existing value."""
+    if _specified(payload, name) or existing is None:
         return getattr(payload, name)
-    if existing is not None:
-        return existing[name]
-    return default
+    return existing[name]
 
 
-def _merged_id(payload: ArticleWrite, existing: dict[str, Any] | None, name: str) -> int | None:
+def _merged_id(payload: ArticlePayload, existing: dict[str, Any] | None, name: str) -> int | None:
     """Merge an ID field, normalizing it to int. Requests carry IDs as strings; the DB stores BIGINT."""
-    if _specified(payload, name):
+    if _specified(payload, name) or existing is None:
         value = getattr(payload, name)
         return None if value is None else to_snowflake(value)
-    if existing is not None:
-        return existing[name]
-    return None
+    return existing[name]
+
+
+def article_etag(article_id: int, version: int) -> str:
+    """The strong ETag for an article's editable state."""
+    return f'"{article_id}-{version}"'
+
+
+def _precondition_failed(article_id: int, version: int) -> PreconditionFailed:
+    """The 412 for a stale If-Match. The current ETag goes into details so the caller can tell which state it is behind."""
+    return PreconditionFailed(details={'etag': article_etag(article_id, version)})
 
 
 def _flag(value: Any) -> int:
@@ -130,6 +151,37 @@ def ensure_may_edit(principal: Principal, existing: dict[str, Any], *, write_any
         raise ArticleForbidden('他の利用者が著者の記事は編集できません。')
 
 
+RATE_LIMIT_WINDOW_SECONDS: Final = 3600
+
+
+@dataclass(frozen=True)
+class RateLimitStatus:
+    """Where one API key stands against the hourly create/update limit. reset_seconds is how long until the oldest save in the window falls out of it and frees one unit; 0 when nothing is used."""
+
+    limit: int
+    used: int
+    reset_seconds: int
+
+    @property
+    def remaining(self) -> int:
+        return max(self.limit - self.used, 0)
+
+
+async def rate_limit_status(db: Database, settings: RuntimeSettings, token_id: int, *, conn: Connection | None = None) -> RateLimitStatus:
+    """Count the key's saves (revisions) in the sliding window. The same count both enforces the limit and is reported to the client."""
+    row = await db.fetch_one(
+        'SELECT COUNT(*) AS used, COALESCE(TIMESTAMPDIFF(SECOND, NOW(), MIN(created_at) + INTERVAL %s SECOND), 0) AS reset_seconds '
+        'FROM article_revisions WHERE via_token_id = %s AND created_at >= NOW() - INTERVAL %s SECOND',
+        RATE_LIMIT_WINDOW_SECONDS,
+        token_id,
+        RATE_LIMIT_WINDOW_SECONDS,
+        conn=conn,
+    )
+    used = int(row['used']) if row else 0
+    reset_seconds = max(int(row['reset_seconds']), 0) if row and used else 0
+    return RateLimitStatus(limit=settings.articles.api_rate_limit_per_hour, used=used, reset_seconds=reset_seconds)
+
+
 async def _ensure_within_rate_limit(db: Database, settings: RuntimeSettings, principal: Principal, *, conn: Connection | None = None) -> None:
     """Check the hourly create/update limit for one API key.
 
@@ -143,26 +195,18 @@ async def _ensure_within_rate_limit(db: Database, settings: RuntimeSettings, pri
         return
     if conn is not None:
         await db.fetch_val('SELECT id FROM api_tokens WHERE id = %s FOR UPDATE', principal.token_id, conn=conn)
-    limit = settings.articles.api_rate_limit_per_hour
-    row = await db.fetch_one(
-        'SELECT COUNT(*) AS used, COALESCE(TIMESTAMPDIFF(SECOND, NOW(), MIN(created_at) + INTERVAL 1 HOUR), 0) AS retry_after '
-        'FROM article_revisions WHERE via_token_id = %s AND created_at >= NOW() - INTERVAL 1 HOUR',
-        principal.token_id,
-        conn=conn,
-    )
-    used = int(row['used']) if row else 0
-    if used < limit:
+    status = await rate_limit_status(db, settings, principal.token_id, conn=conn)
+    if status.used < status.limit:
         return
-    # Seconds until the oldest revision falls out of the window. Even when it already has (0 or less right at the boundary), keep at least 1 second so an immediate retry is not invited.
-    retry_after = max(int(row['retry_after']) if row else 1, 1)
+    # Even when the oldest save has already left the window (0 right at the boundary), keep at least 1 second so an immediate retry is not invited.
     raise RateLimited(
-        f'このキーの記事の作成・更新は 1 時間あたり {limit} 件までです。',
-        retry_after=retry_after,
-        details={'limit': limit, 'used': used},
+        f'このキーの記事の作成・更新は 1 時間あたり {status.limit} 件までです。',
+        retry_after=max(status.reset_seconds, 1),
+        details={'limit': status.limit, 'used': status.used},
     )
 
 
-async def _resolve_author_id(db: Database, principal: Principal, payload: ArticleWrite, existing: dict[str, Any] | None, *, write_any: bool) -> int:
+async def _resolve_author_id(db: Database, principal: Principal, payload: ArticlePayload, existing: dict[str, Any] | None, *, write_any: bool) -> int:
     """Decide the author.
 
     An articles:write key pins the author to the key's owner, holding the power the key grants down to what that person could do by hand from the Web UI. Only articles:write:any (and an admin session) may name someone else as the author.
@@ -247,34 +291,52 @@ async def _resolve_visibility_role_ids(db: Database, role_ids: list[str]) -> lis
     return ids
 
 
-async def _unique_slug(db: Database, conn: Connection, base: str, *, exclude_id: int | None) -> str:
-    """Build an unused slug from base, appending a number on collision."""
-    candidate = base
-    for attempt in range(1, _SLUG_MAX_ATTEMPTS + 1):
-        taken = await db.fetch_val(
-            'SELECT id FROM articles WHERE slug = %s AND (%s IS NULL OR id <> %s)',
-            candidate,
-            exclude_id,
-            exclude_id,
-            conn=conn,
-        )
-        if taken is None:
-            return candidate
-        candidate = f'{base}-{attempt + 1}'
-    raise Conflict('slug を決められませんでした。タイトルを変えるか slug を明示してください。')
+async def _slug_taken_by_other(db: Database, conn: Connection, slug: str, *, exclude_id: int | None) -> bool:
+    """Whether another article holds the slug, either as its current slug or as one it used to have.
 
-
-async def _ensure_slug_free(db: Database, conn: Connection, slug: str, *, exclude_id: int | None) -> None:
-    """Check that an explicitly given slug is free. Unlike generation, it must never silently append a number and hand back a different URL."""
-    taken = await db.fetch_val(
+    A former slug stays reserved for its article, because /articles/{slug} answers it with a redirect: letting another article take it would make an old link point at a different article.
+    """
+    live = await db.fetch_val(
         'SELECT id FROM articles WHERE slug = %s AND (%s IS NULL OR id <> %s)',
         slug,
         exclude_id,
         exclude_id,
         conn=conn,
     )
-    if taken is not None:
-        raise Conflict(f'この slug は既に使われています: {slug}')
+    if live is not None:
+        return True
+    moved = await db.fetch_val(
+        'SELECT article_id FROM article_slug_history WHERE slug = %s AND (%s IS NULL OR article_id <> %s)',
+        slug,
+        exclude_id,
+        exclude_id,
+        conn=conn,
+    )
+    return moved is not None
+
+
+async def _unique_slug(db: Database, conn: Connection, base: str, *, exclude_id: int | None) -> str:
+    """Build an unused slug from base, appending a number on collision or on a reserved slug."""
+    candidate = base
+    for attempt in range(1, _SLUG_MAX_ATTEMPTS + 1):
+        if candidate not in _RESERVED_SLUGS and not await _slug_taken_by_other(db, conn, candidate, exclude_id=exclude_id):
+            return candidate
+        candidate = f'{base}-{attempt + 1}'
+    raise Conflict('slug を決められませんでした。タイトルを変えるか slug を明示してください。')
+
+
+async def _ensure_slug_free(db: Database, conn: Connection, slug: str, *, exclude_id: int | None) -> None:
+    """Check that an explicitly given slug is free. Unlike generation, it never silently appends a number; a taken slug is reported rather than replaced by a different URL."""
+    if slug in _RESERVED_SLUGS:
+        raise ArticleError(f'この slug は予約されているため使えません: {slug}')
+    if await _slug_taken_by_other(db, conn, slug, exclude_id=exclude_id):
+        raise Conflict(f'この slug は既に使われています(過去に他の記事が使っていた slug も含みます): {slug}')
+
+
+async def resolve_moved_slug(db: Database, slug: str) -> int | None:
+    """Return the ID of the article that used to have this slug, or None. Callers redirect to the article's current slug only after checking that the viewer may see it."""
+    article_id = await db.fetch_val('SELECT article_id FROM article_slug_history WHERE slug = %s', slug)
+    return None if article_id is None else int(article_id)
 
 
 # Saving.
@@ -287,11 +349,17 @@ async def save_article(
     principal: Principal,
     *,
     article_id: int | None,
-    payload: ArticleWrite,
+    payload: ArticlePayload,
+    expected_versions: frozenset[int] | None = None,
+    idempotency: IdempotencyRequest | None = None,
 ) -> tuple[int, list[IngestFailure]]:
     """Create or update an article. Returns (article ID, the images that could not be ingested).
 
-    A None article_id creates, anything else updates. Images that could not be ingested are returned rather than raised: a temporary fault at a remote host must never stop an article going out. But a URL that failed stays in the body as it is and will eventually expire, taking the image with it, so the failure is never silently counted as success and is always reported to the caller.
+    A None article_id creates from an ArticleCreate; anything else updates from an ArticleUpdate. Images that could not be ingested are returned rather than raised: a temporary fault at a remote host must never stop an article going out. But a URL that failed stays in the body as it is and will eventually expire, taking the image with it, so the failure is never silently counted as success and is always reported to the caller.
+
+    expected_versions holds the versions If-Match accepts (None when the request carries no If-Match, or carries *); a current version outside it raises PreconditionFailed. Without it the save still refuses with Conflict when another save lands between reading the row here and locking it, because the fields this request omits would otherwise be written back with the values read before that save.
+
+    idempotency, on a creation, records the Idempotency-Key in the creating transaction together with the images that failed (a replay reports them again). It raises IdempotencyRace when another request under the key committed first, and the creation rolls back.
 
     Both config and settings are taken because the settings image ingestion needs come from two different places. The storage location (storage_dir) is bound to the runtime environment and lives in config.yaml; the individual limits live in the settings table, where an admin can change them. effective_media_config folds the two into one.
     """
@@ -304,22 +372,19 @@ async def save_article(
     write_any = await has_write_any(db, settings, principal)
     if existing is not None:
         ensure_may_edit(principal, existing, write_any=write_any)
+        # Checked after the edit permission, so the version of an article the caller may not edit is never disclosed, and before ingesting images, so a stale save costs no remote fetches.
+        if expected_versions is not None and int(existing['version']) not in expected_versions:
+            raise _precondition_failed(int(existing['id']), int(existing['version']))
     # Early estimate only, to avoid fetching images from remote hosts on behalf of a key that is already at the limit. The limit itself is enforced by the check inside the transaction.
     await _ensure_within_rate_limit(db, settings, principal)
 
     author_id = await _resolve_author_id(db, principal, payload, existing, write_any=write_any)
 
     title = _merged(payload, existing, 'title')
-    if not title:
-        raise ArticleError('title は必須です。')
     body_md = _merged(payload, existing, 'body_md')
-    if body_md is None:
-        raise ArticleError('body_md は必須です。')
 
     category_id = _merged_id(payload, existing, 'category_id')
-    if category_id is None:
-        raise ArticleError('category_id は必須です。')
-    if _specified(payload, 'category_id') or existing is None:
+    if _specified(payload, 'category_id'):
         if await db.fetch_val('SELECT id FROM categories WHERE id = %s', category_id) is None:
             raise ArticleError(f'存在しないカテゴリが指定されました: {category_id}')
 
@@ -338,18 +403,18 @@ async def save_article(
         if await db.fetch_val('SELECT id FROM series WHERE id = %s', series_id) is None:
             raise ArticleError(f'存在しない連載が指定されました: {series_id}')
 
-    visibility = _merged(payload, existing, 'visibility', 'public')
-    status = _merged(payload, existing, 'status', 'draft')
+    visibility = _merged(payload, existing, 'visibility')
+    status = _merged(payload, existing, 'status')
     scheduled_at = _merged(payload, existing, 'scheduled_at')
     if status == 'scheduled' and scheduled_at is None:
         raise ArticleError('status が scheduled のときは scheduled_at が必須です。')
 
-    is_breaking = bool(_merged(payload, existing, 'is_breaking', False))
+    is_breaking = bool(_merged(payload, existing, 'is_breaking'))
     # The check runs only for a request that raises the flag. Demanding the permission every time the body of an already-breaking article is fixed would leave only those who may flag breaking news able to correct it.
     if is_breaking and not (existing is not None and existing['is_breaking']):
         _ensure_may_flag_breaking(settings, principal)
 
-    is_sponsored = bool(_merged(payload, existing, 'is_sponsored', False))
+    is_sponsored = bool(_merged(payload, existing, 'is_sponsored'))
     sponsor_name = _merged(payload, existing, 'sponsor_name')
     # The test is whether the name holds a visible character, not whether it is empty once whitespace is stripped. str.strip() only removes characters for which str.isspace() is true, so U+200B (zero-width space) and U+FEFF survive it and masquerade as a non-empty name. With one of those as the sponsor, the article page and the embed show nothing but the Sponsored label, the advertiser appears nowhere, and requiring the disclosure has bought nothing.
     if is_sponsored and not (sponsor_name and visible_text(sponsor_name)):
@@ -357,21 +422,17 @@ async def save_article(
 
     excerpt = _merged(payload, existing, 'excerpt')
     cover_image_url = _merged(payload, existing, 'cover_image_url')
-    byline_mode = _merged(payload, existing, 'byline_mode', 'author')
+    byline_mode = _merged(payload, existing, 'byline_mode')
     series_position = _merged(payload, existing, 'series_position')
 
-    # tags / visibility_role_ids are refreshed to match the request only when the request names them. None means leave them alone.
+    # tags / visibility_role_ids are refreshed to match the request only when the request sets them (a creation always does). None means leave them alone.
     tag_ids: list[int] | None = None
     if _specified(payload, 'tags'):
-        tag_ids = await _resolve_tag_ids(db, payload.tags or [])
-    elif existing is None:
-        tag_ids = []
+        tag_ids = await _resolve_tag_ids(db, payload.tags)
 
     visibility_role_ids: list[int] | None = None
     if _specified(payload, 'visibility_role_ids'):
-        visibility_role_ids = await _resolve_visibility_role_ids(db, payload.visibility_role_ids or [])
-    elif existing is None:
-        visibility_role_ids = []
+        visibility_role_ids = await _resolve_visibility_role_ids(db, payload.visibility_role_ids)
 
     if visibility == 'restricted':
         effective_roles = visibility_role_ids
@@ -393,17 +454,30 @@ async def save_article(
     body_html = render_markdown(body_md)
 
     async with db.transaction() as conn:
+        # The Idempotency-Key is claimed before anything else, so a concurrent resend waits here for this transaction and then replays it.
+        idempotency_record: int | None = None
+        if idempotency is not None and existing is None:
+            idempotency_record = await claim(db, conn, principal.user_id, idempotency)
+
         # This is where the limit is enforced: take the key's row, count, and insert the revision in one transaction, so no other request can slip in after the count. The key's row is taken before the article's so that this path always locks in the order key then article, never forming a pair that waits on each other in reverse.
         await _ensure_within_rate_limit(db, settings, principal, conn=conn)
 
-        if article_id is not None:
+        if existing is not None:
             # Lock the article's row before taking a revision number. Concurrent saves of the same article would read the same MAX(revision_number)+1, and the (article_id, revision_number) unique constraint would drop one of them.
-            if await db.fetch_val('SELECT id FROM articles WHERE id = %s FOR UPDATE', article_id, conn=conn) is None:
+            locked_version = await db.fetch_val('SELECT version FROM articles WHERE id = %s FOR UPDATE', article_id, conn=conn)
+            if locked_version is None:
                 raise NotFound('記事が見つかりません。')
+            # Another save landed after the row was read above. Everything merged from that read is stale.
+            if int(locked_version) != int(existing['version']):
+                if expected_versions is not None:
+                    raise _precondition_failed(int(existing['id']), int(locked_version))
+                raise Conflict('この記事は同時に別の要求で更新されました。最新の内容を読み込み直してから再送してください。')
 
-        if _specified(payload, 'slug') and payload.slug:
+        if _specified(payload, 'slug') and payload.slug is not None:
             slug = payload.slug
-            await _ensure_slug_free(db, conn, slug, exclude_id=article_id)
+            # Re-sending the current slug is not a change, so it passes even if it would no longer be accepted as a new one.
+            if existing is None or slug != existing['slug']:
+                await _ensure_slug_free(db, conn, slug, exclude_id=article_id)
         elif existing is not None:
             # A permalink that changed every time the title was fixed would break URLs already handed out. The slug moves only on an explicit specification.
             slug = existing['slug']
@@ -431,23 +505,41 @@ async def save_article(
             scheduled_at,
         )
         if article_id is None:
-            article_id = await db.execute_insert(
-                'INSERT INTO articles (slug, author_id, publisher_id, category_id, series_id, series_position, title, excerpt, '
-                'body_md, body_html, cover_image_url, status, visibility, byline_mode, is_breaking, is_sponsored, sponsor_name, scheduled_at) '
-                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
-                *columns,
-                conn=conn,
-            )
+            try:
+                article_id = await db.execute_insert(
+                    'INSERT INTO articles (slug, author_id, publisher_id, category_id, series_id, series_position, title, excerpt, '
+                    'body_md, body_html, cover_image_url, status, visibility, byline_mode, is_breaking, is_sponsored, sponsor_name, scheduled_at) '
+                    'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    *columns,
+                    conn=conn,
+                )
+            except IntegrityError as exc:
+                # The slug, the one unique column besides the key, was free when checked but another creation committed it in the meantime (two articles with the same headline at once).
+                if exc.args and exc.args[0] == _DUPLICATE_ENTRY:
+                    raise Conflict(f'この slug は同時に別の記事が使いました。再送してください: {slug}') from exc
+                raise
+            if idempotency_record is not None:
+                await complete(
+                    db,
+                    conn,
+                    idempotency_record,
+                    article_id,
+                    {'media_failures': [{'source_url': failure.source_url, 'reason': failure.reason} for failure in failures]},
+                )
         else:
             await db.execute(
                 'UPDATE articles SET slug = %s, author_id = %s, publisher_id = %s, category_id = %s, series_id = %s, '
                 'series_position = %s, title = %s, excerpt = %s, body_md = %s, body_html = %s, cover_image_url = %s, '
                 'status = %s, visibility = %s, byline_mode = %s, is_breaking = %s, is_sponsored = %s, sponsor_name = %s, '
-                'scheduled_at = %s WHERE id = %s',
+                'scheduled_at = %s, version = version + 1 WHERE id = %s',
                 *columns,
                 article_id,
                 conn=conn,
             )
+            if slug != existing['slug']:
+                # The slug being left keeps answering with a redirect; the slug being taken back stops being a former one.
+                await db.execute('INSERT INTO article_slug_history (slug, article_id) VALUES (%s, %s)', existing['slug'], article_id, conn=conn)
+                await db.execute('DELETE FROM article_slug_history WHERE slug = %s AND article_id = %s', slug, article_id, conn=conn)
 
         if tag_ids is not None:
             await db.execute('DELETE FROM article_tags WHERE article_id = %s', article_id, conn=conn)
@@ -459,7 +551,7 @@ async def save_article(
             for role_id in visibility_role_ids:
                 await db.execute('INSERT INTO article_visibility_roles (article_id, role_id) VALUES (%s, %s)', article_id, role_id, conn=conn)
 
-        # article_media is append-only; a row must never be deleted. An edit that drops an image from the body leaves the past revisions still referencing it, and deleting the row would 404 the image the moment someone opens the revision history.
+        # article_media is append-only: an edit that drops an image from the body leaves the past revisions still referencing it, and a deleted row would 404 the image the moment someone opens the revision history.
         for media_id in media_ids:
             await db.execute('INSERT IGNORE INTO article_media (article_id, media_id) VALUES (%s, %s)', article_id, media_id, conn=conn)
 
@@ -521,8 +613,17 @@ async def _freeze_publisher(db: Database, conn: Connection, article_id: int, aut
     return None
 
 
-async def publish_article(db: Database, settings: RuntimeSettings, article_id: int, *, conn: Connection | None = None) -> None:
+async def publish_article(
+    db: Database,
+    settings: RuntimeSettings,
+    article_id: int,
+    *,
+    expected_versions: frozenset[int] | None = None,
+    conn: Connection | None = None,
+) -> None:
     """Publish an article and enqueue its notifications.
+
+    expected_versions holds the versions If-Match accepts (None when there is nothing to check); a current version outside it raises PreconditionFailed. The version advances only when the row actually changes, so publishing an article that is already published leaves it alone.
 
     Re-publishing does not move published_at (COALESCE). The time an article first went out is a past fact, and fixing it must not reorder it into the listing as a new article. For the same reason the byline is frozen only at the first publication and never moves again, however the author's roles change.
 
@@ -532,25 +633,32 @@ async def publish_article(db: Database, settings: RuntimeSettings, article_id: i
     """
     if conn is None:
         async with db.transaction() as owned:
-            await publish_article(db, settings, article_id, conn=owned)
+            await publish_article(db, settings, article_id, expected_versions=expected_versions, conn=owned)
             return
 
     row = await db.fetch_one(
-        'SELECT id, author_id, publisher_id, published_at FROM articles WHERE id = %s FOR UPDATE',
+        'SELECT id, author_id, publisher_id, published_at, version FROM articles WHERE id = %s FOR UPDATE',
         article_id,
         conn=conn,
     )
     if row is None:
         raise NotFound('記事が見つかりません。')
+    if expected_versions is not None and int(row['version']) not in expected_versions:
+        raise _precondition_failed(article_id, int(row['version']))
 
     if row['published_at'] is not None:
         # A second or later publication. Neither the byline nor the notifications are touched; only the status goes back (restoring from archived comes through here). Re-freezing at this point would let an edit made after a reporter transferred rewrite the old byline retroactively.
-        await db.execute("UPDATE articles SET status = 'published' WHERE id = %s", article_id, conn=conn)
+        # MySQL applies the assignments left to right, so version is computed against the status before this statement changes it.
+        await db.execute(
+            "UPDATE articles SET version = version + (status <> 'published'), status = 'published' WHERE id = %s",
+            article_id,
+            conn=conn,
+        )
         return
 
     publisher_id = await _freeze_publisher(db, conn, article_id, row['author_id'], row['publisher_id'])
     await db.execute(
-        "UPDATE articles SET status = 'published', publisher_id = %s, published_at = COALESCE(published_at, NOW()) WHERE id = %s",
+        "UPDATE articles SET status = 'published', publisher_id = %s, published_at = COALESCE(published_at, NOW()), version = version + 1 WHERE id = %s",
         publisher_id,
         article_id,
         conn=conn,

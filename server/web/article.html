@@ -83,7 +83,7 @@ const VISIBILITY_LABELS = { public: '全体公開', members: 'メンバー限定
 const STANCE_LABELS = { independent: '独立系', state: '国営' };
 
 /**
- * A user's display name, for the places that must show one. The shared displayName returns an empty string when there is no name, but in the article byline, the revision's editor line and the writer card, an empty string does not read as "someone with no name" — it reads as if the whole area had vanished.
+ * A user's display name, for the places that must show one. The shared displayName returns an empty string when there is no name, but in the article byline, the revision's editor line and the writer card, an empty string does not read as "someone with no name"; it reads as if the whole area had vanished.
  * Anyone not in `users` (a user who left the guild, another bot, a webhook) comes back with username and global_name both null, so this always emits something.
  */
 function userLabel(user) {
@@ -125,19 +125,27 @@ function commentHtml(c) {
   return `<article class="c-item">${avatarHtml(author)}<div class="c-body"><div class="c-head"><span class="c-name">${shown}</span><time datetime="${escapeHtml(c.posted_at)}">${escapeHtml(formatDateTime(c.posted_at))}</time>${edited}</div><div class="c-text">${escapeHtml(c.body)}</div><div class="c-foot">${scoreHtml(c.score)}<span class="c-votes">賛成 ${escapeHtml(c.up_count)} ・ 反対 ${escapeHtml(c.down_count)}</span></div></div></article>`;
 }
 
-/** Loads and draws the comments. If the article is readable so are its comments — visibility is the article's. */
-async function loadComments(slug, page, appending) {
+/* The article's comment count, taken from the first page (include_total) and kept for the read-more label of the pages after it. */
+let commentTotal = 0;
+
+/**
+ * Loads and draws one page of comments. If the article is readable so are its comments: visibility is the article's.
+ * Without a cursor this is the first page, which also asks for the total; with one it is the page the read-more button points at, appended to the list.
+ */
+async function loadComments(slug, cursor) {
   const list = document.getElementById('comment-list');
   const more = document.getElementById('comment-more');
   if (!list) return;
+  const appending = Boolean(cursor);
   let data;
   try {
-    data = await get(`/api/articles/${encodeURIComponent(slug)}/comments${qs({ page })}`);
+    data = await get(`/api/articles/${encodeURIComponent(slug)}/comments${qs(appending ? { cursor } : { include_total: 1 })}`);
   } catch (e) {
     list.innerHTML = '<p class="c-empty">コメントを読み込めませんでした。</p>';
     return;
   }
-  const items = Array.isArray(data.items) ? data.items : [];
+  if (!appending) commentTotal = Number(data.total) || 0;
+  const items = listOf(data);
   const html = items.map(commentHtml).join('');
   if (appending) list.insertAdjacentHTML('beforeend', html);
   // On an article with no comments yet, unless we point at where comments can be written the reader cannot tell that this is a read-only mirror; the CTA below supplies the entry point for writing.
@@ -148,8 +156,9 @@ async function loadComments(slug, page, appending) {
     const cta = data.thread_url
       ? `<a class="btn-discord" href="${escapeHtml(data.thread_url)}" target="_blank" rel="noopener noreferrer">Discord でコメントする</a>`
       : '';
-    const rest = data.total - shown;
-    const moreBtn = rest > 0 ? `<button type="button" id="c-more" data-page="${escapeHtml(page + 1)}">残り ${escapeHtml(rest)} 件を読む</button>` : '';
+    const rest = Math.max(commentTotal - shown, 0);
+    const label = rest > 0 ? `残り ${escapeHtml(rest)} 件を読む` : '続きを読む';
+    const moreBtn = data.next_cursor ? `<button type="button" id="c-more" data-cursor="${escapeHtml(data.next_cursor)}">${label}</button>` : '';
     more.innerHTML = `${moreBtn}${cta}`;
   }
 }
@@ -163,7 +172,7 @@ function articleHtml(a, revisions) {
   crumbs.push(escapeHtml(a.title));
   parts.push(`<div class="breadcrumb">${crumbs.join('<span>›</span>')}</div>`);
 
-  // The publisher's brand goes large at the head of the article. An article carries a dual byline of publisher × reporter, publisher primary and reporter secondary. The byline is frozen at publication, so a reporter's later transfer never moves this display on past articles.
+  // The publisher's brand goes large at the head of the article. An article carries a dual byline of publisher and reporter, publisher primary and reporter secondary. The byline is frozen at publication, so a reporter's later transfer never moves this display on past articles.
   if (a.publisher) {
     const p = a.publisher;
     const label = p.stance === 'state' ? '配信 ・ 国営メディア' : '配信';
@@ -252,7 +261,13 @@ function articleHtml(a, revisions) {
   return parts.join('');
 }
 
-/** The revision history listing. Lays out whose name each revision was written under (editor — the byline author as of that revision, not whoever actually posted it; see RevisionListItem in server/app/schemas.py) and when and what was fixed (note / is_correction). */
+/* Revisions fetched per page. The API returns them newest first, so the first page alone already holds the latest revision. */
+const REVISIONS_PER_PAGE = 20;
+
+/* The next_cursor of the last page of revisions loaded: null once the oldest revision is in hand. */
+let revisionCursor = null;
+
+/** The revision history listing, newest first. Lays out whose name each revision was written under (editor: the byline author as of that revision, not whoever actually posted it; see RevisionListItem in server/app/schemas.py) and when and what was fixed (note / is_correction). Older revisions are read on with the button at its foot. */
 function revisionListHtml(revisions) {
   const items = revisions.slice().reverse().map((r) => {
     const bits = [`改版 ${escapeHtml(r.revision_number)}`, escapeHtml(formatDateTime(r.created_at)), escapeHtml(userLabel(r.editor))];
@@ -261,7 +276,15 @@ function revisionListHtml(revisions) {
     if (r.revision_number > 1) bits.push(`<a href="#revisions" data-diff="${escapeHtml(r.revision_number)}">差分</a>`);
     return `<li>${bits.join(' ・ ')}</li>`;
   }).join('');
-  return `<div class="revision"><ul>${items}</ul></div>`;
+  const older = revisionCursor ? '<button type="button" id="rev-more">さらに古い改版を読む</button>' : '';
+  return `<div class="revision"><ul>${items}</ul>${older}</div>`;
+}
+
+/** Fetch one page of the revision history (newest first) and record where the next one starts. */
+async function fetchRevisions(cursor) {
+  const data = await get(`/api/articles/${encodeURIComponent(slug)}/revisions` + qs({ per_page: REVISIONS_PER_PAGE, cursor }));
+  revisionCursor = data.next_cursor || null;
+  return listOf(data);
 }
 
 /** Shows the diff against the immediately preceding revision. It opens straight from the article page so that a reader can check for themselves what a correction rewrote. */
@@ -280,7 +303,7 @@ async function showDiff(revisionNumber) {
   } catch (e) {
     box.innerHTML = `<div class="revision">差分を取得できませんでした: ${escapeHtml(errorMessage(e))}</div>`;
   }
-  // Opened from the correction banner, the diff renders at the foot of the article, so carry the reader there — opening it must never look as though nothing happened.
+  // Opened from the correction banner, the diff renders at the foot of the article, so the reader is carried there and opening it visibly does something.
   box.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
@@ -319,14 +342,14 @@ async function renderSide(a) {
     } catch (e) {
       // The banner still stands as a grey box when the cover cannot be fetched.
     }
+    // The server returns the installments in reading order (by position, unnumbered ones last), so they are laid out as they come.
     let siblings = [];
     try {
-      siblings = listOf(await get('/api/articles' + qs({ series: a.series.slug, per_page: 20 })));
+      siblings = listOf(await get(`/api/series/${encodeURIComponent(a.series.slug)}/articles` + qs({ per_page: 20 })));
     } catch (e) {
       siblings = [];
     }
     if (siblings.length) {
-      siblings.sort((x, y) => (x.series_position || 0) - (y.series_position || 0));
       const items = siblings.map((s) => {
         const badge = s.series_position ? escapeHtml(s.series_position) : '−';
         const when = s.published_at ? escapeHtml(formatDateTime(s.published_at)) : escapeHtml(STATUS_LABELS[s.status] || s.status);
@@ -400,9 +423,10 @@ async function main() {
   document.title = `${article.title} | instant-news`;
 
   // The revision history feeds the revision count, the last-updated line and the correction diff. The article itself still renders when the history cannot be fetched.
+  // Held oldest first, as the byline and the list read it; the first page fetched is the newest revisions.
   let revisions = [];
   try {
-    revisions = listOf(await get(`/api/articles/${encodeURIComponent(slug)}/revisions`));
+    revisions = await fetchRevisions(null);
   } catch (e) {
     revisions = [];
   }
@@ -425,6 +449,20 @@ async function main() {
       const opening = list.style.display === 'none';
       list.style.display = opening ? '' : 'none';
       if (opening && !list.innerHTML) list.innerHTML = revisionListHtml(revisions);
+      return;
+    }
+    const older = ev.target.closest('#rev-more');
+    if (older) {
+      ev.preventDefault();
+      older.disabled = true;
+      fetchRevisions(revisionCursor)
+        .then((page) => {
+          revisions = revisions.concat(page).sort((x, y) => x.revision_number - y.revision_number);
+          document.getElementById('rev-list').innerHTML = revisionListHtml(revisions);
+        })
+        .catch(() => {
+          older.disabled = false;
+        });
     }
   });
 
@@ -433,11 +471,12 @@ async function main() {
     more.addEventListener('click', async (ev) => {
       const btn = ev.target.closest('#c-more');
       if (!btn) return;
-      await loadComments(slug, Number(btn.dataset.page) || 2, true);
+      btn.disabled = true;
+      await loadComments(slug, btn.dataset.cursor);
     });
   }
   // Comments are fetched after the article itself: there are many of them and no reason to delay the article appearing.
-  loadComments(slug, 1, false);
+  loadComments(slug, null);
 
   await Promise.all([
     // Mark this article's section as the current location.

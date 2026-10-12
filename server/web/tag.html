@@ -130,17 +130,9 @@ let subscribed = false;
 /* Year of the timeline item rendered just before. The year is printed only at the boundary where it changes, so it must be remembered across renders. */
 let timelineYear = null;
 
-let articlePage = 0;
-let timelinePage = 0;
-
-/** Whether a next page of results exists. When the response carries no pagination info, assume there is one until a page comes back empty. */
-function hasMore(data, items) {
-  if (data && typeof data.has_more === 'boolean') return data.has_more;
-  if (data && Number.isFinite(data.total) && Number.isFinite(data.page) && Number.isFinite(data.per_page)) {
-    return data.page * data.per_page < data.total;
-  }
-  return items.length > 0;
-}
+/* The next_cursor of the last page loaded, null before the first load. Each listing keeps its own. */
+let articleCursor = null;
+let timelineCursor = null;
 
 /** Badges attached to an article. The sponsored-article disclosure and breaking news are always rendered: a disclosure is a requirement, not decoration, and must not be dropped even in a listing. Visibility is rendered only when it is not public, since spelling out the default adds no information. */
 function badgesHtml(a) {
@@ -197,7 +189,7 @@ function timelineItemHtml(a) {
     `<div class="t-meta">${meta.join(' ・ ')}</div></div></li>`;
 }
 
-/** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as —. */
+/** Renders a count. Showing 0 for an item that has no value reads as "there are none", so an unknown value renders as a dash. */
 function statValue(v) {
   return v == null ? '—' : escapeHtml(v);
 }
@@ -289,24 +281,25 @@ async function loadArticles() {
   const link = document.querySelector('[data-more-articles]');
   let data;
   try {
-    data = await get('/api/articles' + qs({ tag: SLUG, page: articlePage + 1, per_page: PER_PAGE }));
+    data = await get('/api/articles' + qs({ tag: SLUG, per_page: PER_PAGE, cursor: articleCursor }));
   } catch (e) {
     link.hidden = true;
     return;
   }
-  articlePage += 1;
-  const items = listOf(data, 'articles');
+  const first = articleCursor === null;
+  articleCursor = data.next_cursor;
+  const items = listOf(data);
   const card = document.querySelector('[data-articles-card]');
   const list = document.querySelector('[data-articles]');
 
-  if (items.length === 0 && articlePage === 1) {
+  if (items.length === 0 && first) {
     card.hidden = false;
     list.outerHTML = '<div class="body">このタグの記事はまだありません。</div>';
     return;
   }
   list.insertAdjacentHTML('beforeend', items.map(articleRowHtml).join(''));
   card.hidden = false;
-  link.hidden = !hasMore(data, items);
+  link.hidden = !articleCursor;
 }
 
 /** Loads one page of the timeline and appends it to the end. The order is oldest first, so the topic's history reads straight through. */
@@ -314,20 +307,20 @@ async function loadTimeline() {
   const link = document.querySelector('[data-more-timeline]');
   let data;
   try {
-    data = await get(`/api/tags/${encodeURIComponent(SLUG)}/timeline` + qs({ page: timelinePage + 1 }));
+    data = await get(`/api/tags/${encodeURIComponent(SLUG)}/timeline` + qs({ per_page: PER_PAGE, cursor: timelineCursor }));
   } catch (e) {
     link.hidden = true;
     return;
   }
-  timelinePage += 1;
-  const items = listOf(data, 'articles');
+  timelineCursor = data.next_cursor;
+  const items = listOf(data);
   if (items.length === 0) {
     link.hidden = true;
     return;
   }
   document.querySelector('[data-timeline]').insertAdjacentHTML('beforeend', items.map(timelineItemHtml).join(''));
   document.querySelector('[data-timeline-card]').hidden = false;
-  link.hidden = !hasMore(data, items);
+  link.hidden = !timelineCursor;
 }
 
 /**

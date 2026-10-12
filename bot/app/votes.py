@@ -4,7 +4,7 @@ Exactly two reactions are meaningful: :arrow_up: is an up-vote, :arrow_down: is 
 
 The decision lives in one place because the same emoji arrives as two different types: an event's RawReactionActionEvent.emoji is a PartialEmoji, while Reaction.emoji off a re-fetched message is a plain str for unicode emoji. PartialEmoji.__eq__ also returns False for every comparison against a str, so a comparison written for only one of the two silently reports "not a single vote" and raises nothing. Passing both through str() first puts them on the same footing.
 
-The variation selector (U+FE0F) is stripped before comparing for the same reason. Neither Discord nor discord.py normalizes emoji: the bytes the gateway sent become PartialEmoji.name verbatim. ⬆️ can be written as U+2B06 alone or as U+2B06 U+FE0F, and which one arrives is up to the sender's implementation, so we even them out on this side. unicodedata.normalize does not strip U+FE0F, so it is no help here.
+The variation selector (U+FE0F) is stripped before comparing for the same reason. Neither Discord nor discord.py normalizes emoji: the bytes the gateway sent become PartialEmoji.name verbatim. The up arrow emoji can be written as U+2B06 alone or as U+2B06 U+FE0F, and which one arrives is up to the sender's implementation, so we even them out on this side. unicodedata.normalize does not strip U+FE0F, so it is no help here.
 
 Reactions the bot adds itself go the other way: sent in the complete form, variation selector included. The REST path is the emoji URL-encoded as-is, and U+FE0F's presence makes it a different emoji, so anything but the form a reader's emoji picker sends produces two separate reaction stacks of the same emoji.
 """

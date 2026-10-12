@@ -121,13 +121,32 @@ CREATE TABLE api_tokens (
 --   ads:admin           Register, update and stop ads, and read their performance stats. Only an admin can issue it.
 --   taxonomy:admin      Manage categories, tags and publishers. Only an admin can issue it.
 --   settings:admin      Read and change the platform settings (the settings table). Only an admin can issue it.
--- The scopes an admin can issue must never be bundled into one. An ad management app is given ads:admin and nothing else; the power to forge an article's byline (articles:write:any) must not be mixed in with it.
+-- The scopes an admin can issue are kept separate rather than bundled into one. An ad management app is given ads:admin and nothing else; the power to forge an article's byline (articles:write:any) is a different scope.
 -- settings:admin can rewrite admin.role_ids, that is, hand out admin eligibility itself, which makes it stronger than any other scope. Grant it knowing that it is effectively delegating admin permissions.
 CREATE TABLE api_token_scopes (
     token_id  BIGINT UNSIGNED NOT NULL,
     scope     ENUM('articles:write','articles:write:any','ads:admin','taxonomy:admin','settings:admin') NOT NULL,
     PRIMARY KEY (token_id, scope),
     CONSTRAINT fk_api_token_scopes_token FOREIGN KEY (token_id) REFERENCES api_tokens (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Idempotency-Key records for the POSTs that create a resource (an article, an ad). A client that lost the response to a network fault resends with the same key and gets the resource the first request created instead of a duplicate.
+-- The row is written in the same transaction as the resource, so a key is recorded exactly when its resource exists. A concurrent resend waits on the unique index until the first commits and then replays it.
+-- The scope is the user, not the credential: a session and the user's keys follow one rule, and the foreign key stays exact. Keys are expected to be random (a UUID), so two requests of one user never pick the same value by chance.
+-- Rows are kept for 24 hours; the scheduler sweeps older ones, and a lookup ignores them.
+CREATE TABLE idempotency_keys (
+    id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id          BIGINT UNSIGNED NOT NULL,                  -- The user the request was made as.
+    endpoint         VARCHAR(64)     NOT NULL,                  -- The operation the key belongs to (for example POST /api/articles).
+    idempotency_key  VARCHAR(255)    NOT NULL,                  -- The Idempotency-Key header value.
+    request_hash     CHAR(64)        NOT NULL,                  -- SHA-256 of the normalized request body. A resend with a different body under the same key is refused.
+    resource_id      BIGINT UNSIGNED NOT NULL,                  -- The ID of the resource the first request created.
+    replay           JSON            NULL,                      -- Response parts that cannot be rebuilt from the resource (the images an article save could not ingest).
+    created_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_idempotency_keys_user_endpoint_key (user_id, endpoint, idempotency_key),
+    KEY idx_idempotency_keys_created_at (created_at),
+    CONSTRAINT fk_idempotency_keys_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Images
@@ -161,7 +180,7 @@ CREATE TABLE media (
 
 -- The publishers that publish articles. Affiliation is expressed by a Discord role, so it is referenced through role_id.
 -- A role yields only its members, name, color and ordering; the logo, slug, description and stance cannot be derived from it, which is why this table exists. The role is referenced rather than made the primary key.
--- role_id must never be ON DELETE CASCADE. Deleting a role in Discord makes the bot drop the discord_roles row on the role delete event, and under CASCADE the publisher would vanish with it and every past article's byline would be lost. The past articles of a dissolved publisher are meant to survive.
+-- role_id is not ON DELETE CASCADE. Deleting a role in Discord makes the bot drop the discord_roles row on the role delete event, and under CASCADE the publisher would vanish with it and every past article's byline would be lost. The past articles of a dissolved publisher are meant to survive.
 CREATE TABLE publishers (
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     role_id      BIGINT UNSIGNED NULL,                          -- The Discord role that expresses affiliation. Nullable because a publisher outlives its dissolution.
@@ -246,6 +265,7 @@ CREATE TABLE series (
 --   restricted  only logged-in users in the target guild who also hold one of the roles listed in article_visibility_roles
 -- The cover image (cover_image_url) is the exception: it goes into the Discord embed, so it is served without authentication. Even on a restricted article the cover is visible to anyone who knows its URL, so never choose a cover that gives away the contents of a confidential article. Images inside the body go through article_media and get the same check as the body.
 -- publisher_id is frozen at publication. Deriving the publisher from the author's current roles would rewrite the bylines of past articles the moment a reporter transfers.
+-- version cannot be replaced by article_revisions.revision_number: publishing (by hand or by the scheduler) rewrites status, publisher_id and published_at without creating a revision.
 CREATE TABLE articles (
     id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     slug             VARCHAR(200)    NOT NULL,                  -- Unique slug for the permalink.
@@ -266,6 +286,7 @@ CREATE TABLE articles (
     is_sponsored     TINYINT(1)      NOT NULL DEFAULT 0,        -- A sponsored article. The core draws the Sponsored label so that it cannot be removed.
     sponsor_name     VARCHAR(100)    NULL,                      -- Whose ad it is. Required when is_sponsored=1: the Sponsored label on its own is not a disclosure.
     view_count       BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    version          INT UNSIGNED    NOT NULL DEFAULT 1,        -- Version of the editable state, carried by the ETag. Every save and every publication that changes the row advances it; counting a view does not.
     scheduled_at     DATETIME        NULL,                      -- When it is due to publish, for status=scheduled.
     published_at     DATETIME        NULL,                      -- When it was first published.
     created_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -288,6 +309,17 @@ CREATE TABLE articles (
     CONSTRAINT fk_articles_publisher FOREIGN KEY (publisher_id) REFERENCES publishers (id) ON DELETE RESTRICT,
     CONSTRAINT fk_articles_category  FOREIGN KEY (category_id)  REFERENCES categories (id) ON DELETE RESTRICT,
     CONSTRAINT fk_articles_series    FOREIGN KEY (series_id)    REFERENCES series (id)     ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Slugs an article used to have. /articles/{old} and /api/articles/{old}/... answer 301 to the current slug, so links already handed out (the Discord embed among them) keep working after a slug change.
+-- A slug held here is reserved for its article: no other article may take it, so an old URL never comes to point at a different article. The article itself may take it back, which deletes the row.
+CREATE TABLE article_slug_history (
+    slug        VARCHAR(200)    NOT NULL,
+    article_id  BIGINT UNSIGNED NOT NULL,
+    created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,  -- When the article moved off this slug.
+    PRIMARY KEY (slug),
+    KEY idx_article_slug_history_article_id (article_id),
+    CONSTRAINT fk_article_slug_history_article FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Many-to-many between articles and tags.
@@ -337,7 +369,7 @@ CREATE TABLE article_revisions (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- The images an article references. Serving decides permissions from this, so it is recorded as fact rather than inferred.
--- Rows are written by scanning body_md when the body is saved, and must never be deleted: an edit that drops an image from the body leaves past revisions still referencing it, and deleting the row would 404 the image the moment someone opens the revision history.
+-- Rows are written by scanning body_md when the body is saved, and are never deleted: an edit that drops an image from the body leaves past revisions still referencing it, and a deleted row would 404 the image the moment someone opens the revision history.
 CREATE TABLE article_media (
     article_id  BIGINT UNSIGNED NOT NULL,
     media_id    BIGINT UNSIGNED NOT NULL,

@@ -41,6 +41,24 @@ class AppError(Exception):
         return _error_body(self.code, self.message, self.details)
 
 
+class MovedPermanently(AppError):
+    """The target lives at another URL now (an article whose slug changed).
+
+    Cache-Control: no-cache makes caches revalidate before reusing the redirect. An article may take back a slug it gave up, and a 301 cached without revalidation would then bounce between the two slugs.
+    """
+
+    status_code = 301
+    code = 'moved_permanently'
+    default_message = 'この URL は移動しました。'
+
+    def __init__(self, location: str, message: str | None = None) -> None:
+        super().__init__(message, details={'location': location})
+        self.location = location
+
+    def headers(self) -> dict[str, str]:
+        return {'Location': self.location, 'Cache-Control': 'no-cache'}
+
+
 class BadRequest(AppError):
     """The request's content is invalid."""
 
@@ -61,6 +79,13 @@ class MediaError(BadRequest):
 
     code = 'media_error'
     default_message = '画像を処理できませんでした。'
+
+
+class InvalidCursor(BadRequest):
+    """A listing cursor that is malformed, or that was issued for another listing or other filters."""
+
+    code = 'invalid_cursor'
+    default_message = 'cursor が不正です。一覧の応答が返した next_cursor / prev_cursor をそのまま渡してください。'
 
 
 class Unauthorized(AppError):
@@ -108,6 +133,22 @@ class Conflict(AppError):
     default_message = '既存の状態と衝突しています。'
 
 
+class PreconditionFailed(AppError):
+    """The If-Match precondition does not hold: the target changed after the caller last read it."""
+
+    status_code = 412
+    code = 'precondition_failed'
+    default_message = '記事は最後に読み込んだ後で更新されています。最新の内容を読み込み直してください。'
+
+
+class IdempotencyKeyReused(AppError):
+    """An Idempotency-Key already used for a request with a different body. Replaying the first result would answer a request that was never made."""
+
+    status_code = 422
+    code = 'idempotency_key_reused'
+    default_message = 'この Idempotency-Key は内容の異なる要求に使われています。新しい要求には新しいキーを使ってください。'
+
+
 class QuotaExceeded(AppError):
     """A usage quota was exceeded (the total image bytes per user, for instance)."""
 
@@ -149,6 +190,7 @@ _HTTP_STATUS_CODES: Final[dict[int, str]] = {
     404: 'not_found',
     405: 'method_not_allowed',
     409: 'conflict',
+    412: 'precondition_failed',
     413: 'payload_too_large',
     415: 'unsupported_media_type',
     422: 'validation_error',
@@ -167,6 +209,7 @@ _HTTP_STATUS_MESSAGES: Final[dict[int, str]] = {
     404: '見つかりません。',
     405: 'この URL では使えないメソッドです。',
     409: '既存の状態と衝突しています。',
+    412: '前提条件を満たしていません。',
     413: '要求が大きすぎます。',
     415: 'この形式は受け付けられません。',
     422: '要求の形式が不正です。',

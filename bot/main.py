@@ -53,7 +53,7 @@ async def _run(config: Config) -> int:
 
         bot = NewsBot(config, db, store)
         try:
-            # start() rather than discord.Client.run(), because reading the token requires connecting to the DB first and run() calls asyncio.run() itself. The run(log_handler=None) that used to suppress discord.py's own logging setup is unnecessary with start(), which never performs that setup at all.
+            # start() rather than discord.Client.run(), because reading the token requires connecting to the DB first and run() calls asyncio.run() itself. start() never performs discord.py's own logging setup, so no log_handler override is involved.
             async with bot:
                 await bot.start(settings.discord.bot.token)
         except discord.LoginFailure:

@@ -109,7 +109,7 @@ def article_url(config: Config, slug: str) -> str:
 def absolute_url(config: Config, url: str | None) -> str | None:
     """Turn a URL held in the DB into an absolute URL Discord can reach.
 
-    Ingested images are stored as relative URLs like /media/{hash}/{variant}.webp, so the public URL (base_url) has to be prefixed. A URL already stored as an external absolute URL — a publisher hosting its logo elsewhere, say — is left untouched.
+    Ingested images are stored as relative URLs like /media/{hash}/{variant}.webp, so the public URL (base_url) has to be prefixed. A URL already stored as an external absolute URL (a publisher hosting its logo elsewhere, say) is left untouched.
     """
     if not url:
         return None
@@ -243,7 +243,7 @@ def build_channel_message(config: Config, settings: RuntimeSettings, article: Ar
 def build_subscription_dm(config: Config, article: ArticleView, matched_tags: str | None) -> OutgoingMessage:
     """The DM sent to a tag's subscribers.
 
-    The content names which tag's subscription delivered it, so the reader can decide whether to unsubscribe. When the tag cannot be identified — the subscription has since been cancelled, say — the DM is still sent, because the notification rests on the fact that they were subscribed at publish time. Role mentions do not work in a DM, so nothing is mentioned even for breaking news.
+    The content names which tag's subscription delivered it, so the reader can decide whether to unsubscribe. When the tag cannot be identified (the subscription has since been cancelled, say), the DM is still sent, because the notification rests on the fact that they were subscribed at publish time. Role mentions do not work in a DM, so nothing is mentioned even for breaking news.
     """
     if matched_tags:
         content = f'購読中のタグ「{_truncate(matched_tags, 200)}」に新しい記事が公開されました。'

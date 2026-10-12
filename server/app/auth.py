@@ -8,7 +8,7 @@ Neither sessions nor API keys store the raw value. What rides in the cookie and 
 
 The source of truth for the OAuth2 credentials (client_id / client_secret) and the target guild is the settings table, and these functions receive what was read on the current request. Nothing is read at startup and held, so replacing client_secret from the UI means the next login exchanges with that value.
 
-Two things come instead from config.yaml's server.base_url: the URL Discord returns to after authorization (oauth_redirect_uri) and whether cookies carry Secure (_cookies_are_secure). Both are properties of the runtime environment itself — where the public URL is and whether it is https — not settings changeable from the UI. So the functions involved in the authorization flow take both the RuntimeSettings coming from the settings table and the Config coming from config.yaml.
+Two things come instead from config.yaml's server.base_url: the URL Discord returns to after authorization (oauth_redirect_uri) and whether cookies carry Secure (_cookies_are_secure). Both are properties of the runtime environment itself (where the public URL is and whether it is https), not settings changeable from the UI. So the functions involved in the authorization flow take both the RuntimeSettings coming from the settings table and the Config coming from config.yaml.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def sanitize_redirect_to(value: str | None) -> str:
     # Values containing control characters or whitespace are refused: they are a foothold for injecting a newline into the Location header and for exploiting per-browser differences in interpretation.
     if any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F for character in candidate):
         return DEFAULT_REDIRECT_TO
-    # Some browsers read \ as the same separator as /, so /\example.invalid gets treated as //example.invalid — a different host.
+    # Some browsers read \ as the same separator as /, so /\example.invalid gets treated as //example.invalid, a different host.
     if '\\' in candidate:
         return DEFAULT_REDIRECT_TO
     parsed = urlsplit(candidate)
@@ -218,7 +218,7 @@ async def _get_json(client: httpx.AsyncClient, url: str, access_token: str, what
 async def exchange_code(client: httpx.AsyncClient, config: Config, settings: RuntimeSettings, code: str, code_verifier: str) -> str:
     """Exchange the authorization code for an access token.
 
-    The token obtained is used only to fetch identify and the guild member info, and is never stored. Later requests authenticate with our own session, so there is no reason to keep holding Discord credentials — holding them would only widen what leaks when something leaks.
+    The token obtained is used only to fetch identify and the guild member info, and is never stored. Later requests authenticate with our own session, so there is no reason to keep holding Discord credentials, and holding them would only widen what leaks when something leaks.
     """
     form = {
         'client_id': settings.discord.oauth.client_id,
@@ -297,7 +297,7 @@ def _member_role_ids(member: Mapping[str, Any] | None) -> list[int]:
 async def sync_user(db: Database, identity: Mapping[str, Any], member: Mapping[str, Any] | None) -> int:
     """Mirror identify and the guild member info into users / user_roles and return users.id.
 
-    **is_guild_owner is not touched here.** Who the owner is can only be known by the bot, which can read the guild itself; this path — reading yourself with the user's own eligibility — cannot decide it. Writing the default here would wipe the owner's admin eligibility on every login.
+    **is_guild_owner is not touched here.** Who the owner is can only be known by the bot, which can read the guild itself; this path, which reads the user's own record with the user's own eligibility, cannot decide it. Writing a default here would reset the owner's admin eligibility on every login, so the column is left as the bot set it.
     """
     raw_id = identity.get('id')
     try:

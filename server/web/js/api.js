@@ -51,9 +51,9 @@ async function readBody(res) {
 /**
  * Thin wrapper around fetch. credentials is pinned to same-origin so the session cookie is sent.
  * A plain object in options.body is sent as JSON. FormData / Blob / string / URLSearchParams are sent as-is, and Content-Type must not be set by hand for them: multipart in particular needs the browser to pick the boundary string.
- * Throws ApiError on any non-2xx response, and on a failure of fetch itself.
+ * Returns the parsed body together with the response headers, for callers that need a header such as ETag. Throws ApiError on any non-2xx response, and on a failure of fetch itself.
  */
-export async function api(path, options = {}) {
+export async function apiResponse(path, options = {}) {
   const { body, headers, ...rest } = options;
   const init = {
     credentials: 'same-origin',
@@ -80,12 +80,17 @@ export async function api(path, options = {}) {
 
   const data = await readBody(res);
   if (!res.ok) throw new ApiError(res.status, data);
-  return data;
+  return { data, headers: res.headers };
+}
+
+/** Same as apiResponse, returning only the parsed body. */
+export async function api(path, options = {}) {
+  return (await apiResponse(path, options)).data;
 }
 
 export const get = (path) => api(path);
-export const post = (path, body) => api(path, { method: 'POST', body });
-export const patch = (path, body) => api(path, { method: 'PATCH', body });
+export const post = (path, body, headers) => api(path, { method: 'POST', body, headers });
+export const patch = (path, body, headers) => api(path, { method: 'PATCH', body, headers });
 export const del = (path) => api(path, { method: 'DELETE' });
 
 /**

@@ -24,6 +24,7 @@
 - **API キーは発行者ユーザーに紐づく。**独自アカウントを増やすのではなく、既存ユーザーの権限を機械が借りる形にする。これにより責任の所在が必ず人間に残り、記事の著者も必ず実在のユーザーになる。キーの生値は保持せず SHA-256 のみを保存する(`sessions` と同じ設計を踏襲する)。
 - 発行資格(誰が発行できるか)とスコープ(何ができるか)は別の軸として扱う(`api_token_scopes`)。管理者が発行できるスコープを 1 つに束ねてはならない。広告管理アプリに与えるのは `ads:admin` だけであり、記事の署名を偽造する力(`articles:write:any`)を混ぜて渡してはならない。
 - `settings:admin` は `admin.role_ids` を書き換えられる、すなわち管理者の資格そのものを配れるため、他のどのスコープよりも強い。実質的に管理者権限の委譲であることを踏まえて渡す。
+- **`idempotency_keys` は、資源を作る POST(記事の作成・広告の登録)の `Idempotency-Key` を記録する。**行は資源の作成と同じトランザクションで書くため、キーが記録されていることと資源が存在することは常に一致する。範囲は利用者と操作の組(`user_id`, `endpoint`, `idempotency_key`)の一意制約であり、同じキーの同時の要求はこの一意索引で直列化される。`request_hash` は本体の指紋で、同じキーで違う本体を送る要求を見分ける。`replay` は資源から再構成できない応答の部分(記事の保存で取り込めなかった画像)を持つ。行は 24 時間で期限切れになり、予約公開の巡回が順次消す。API の振る舞いは [docs/api.md](api.md) の「冪等性」を参照。
 
 ### 設定
 
@@ -45,6 +46,8 @@
 - `articles.is_breaking` は速報を表し、通知時に設定したロールを mention する。乱発を防ぐため、フラグを立てられるロールは `settings` 表の `articles.breaking.allowed_role_ids` で絞る(空なら誰も立てられない)。
 - `article_revisions.is_correction` は単なる更新と訂正を区別する。訂正された記事は記事面の冒頭で明示する。
 - `article_revisions.via_token_id` は「誰が実際に投稿したか」の監査証跡であり、`editor_id`(「誰の名前で書かれたか」)とは別物である。`articles:write:any` が他人の署名で記事を出せる以上、これが無いと説明責任が崩れる。
+- **`articles.version` は記事の編集可能な状態の版であり、API の `ETag` が運ぶ値である。**保存のたびと、状態を実際に変える公開のたびに進み、閲覧数の加算では進まない。`article_revisions.revision_number` では代わりにならない。公開(手動・予約)は改版を作らずに `status` / `publisher_id` / `published_at` を書き換えるため、改版番号ではその変更を検出できない。`If-Match` による楽観的排他制御は [docs/api.md](api.md) の「記事の書き込み」を参照。
+- **`article_slug_history` は記事が過去に使っていた slug を持つ。**記事ページと API は過去の slug への要求を現在の slug へ 301 で転送するため、slug を変えても既に配った URL(Discord の embed を含む)は壊れない。過去の slug はその記事のために予約され、他の記事は使えない(古いリンクが別の記事を指さないようにするため)。記事自身が過去の slug に戻ると、その行は消える。
 
 ### 報道社と署名
 
@@ -99,6 +102,7 @@ erDiagram
     users ||--o{ sessions : owns
     users ||--o{ api_tokens : issues
     api_tokens ||--o{ api_token_scopes : grants
+    users ||--o{ idempotency_keys : sends
     users |o--o{ settings : updated_by
     users ||--o{ media : uploads
     api_tokens |o--o{ media : uploaded_via
@@ -114,6 +118,7 @@ erDiagram
     tags ||--o{ tag_subscriptions : subscribed_by
     articles ||--o{ article_visibility_roles : restricts
     discord_roles ||--o{ article_visibility_roles : allows
+    articles ||--o{ article_slug_history : formerly
     articles ||--o{ article_revisions : versioned
     users ||--o{ article_revisions : edits
     api_tokens |o--o{ article_revisions : edited_via
@@ -126,7 +131,7 @@ erDiagram
     ads ||--o{ ad_stats_daily : measured_by
 ```
 
-`categories.notify_channel_id` と `tags.notify_channel_id` は Discord のチャンネル スノーフレークであり、DB 内に参照先の実体を持たないため外部キーではない(上図にも現れない)。
+`categories.notify_channel_id` と `tags.notify_channel_id` は Discord のチャンネル スノーフレークであり、DB 内に参照先の実体を持たないため外部キーではない(上図にも現れない)。`idempotency_keys.resource_id` も外部キーではない。`endpoint` によって記事を指すことも広告を指すこともあり、1 つの表を参照先に決められないためである。
 
 上図の `|o`(0 または 1)は NULL 許容の外部キーを表す。`articles.publisher_id`(報道社に属さない個人の記事)・`articles.series_id`(連載に属さない記事)・`publishers.role_id`(解散して所属ロールを失った報道社)・`media.via_token_id` と `article_revisions.via_token_id`(Web UI からの操作)・`settings.updated_by`(初期値の投入のまま変更されていない設定)がこれにあたる。`articles.category_id` だけは NOT NULL であるため `||`(必ず 1)である。
 
@@ -142,13 +147,15 @@ erDiagram
 | settings | プラットフォームの設定の真実。値を JSON で持ち、型・検証・秘密かどうかはコード側の登録簿(`common/settings.py`)が定義する。`config.yaml` の対応する値は初回起動時の初期値としてのみ読まれる。 |
 | api_tokens | 機械クライアントの API キー。発行者ユーザーに紐づき、生値は保持せず SHA-256 のみを保存する。 |
 | api_token_scopes | キーに与えたスコープ(`articles:write` / `articles:write:any` / `ads:admin` / `taxonomy:admin` / `settings:admin`)。 |
+| idempotency_keys | 資源を作る POST の `Idempotency-Key`。利用者・操作・キーの組で一意であり、作った資源の ID と本体の指紋を 24 時間保持する。 |
 | media | 取り込んだ画像の登録簿。実体は内容アドレスでファイルシステムに置き、行は寸法・バイト数・公開可否・取り込み元を持つ。 |
 | publishers | 記事を発行する報道社。所属は Discord ロール(`role_id`)で表し、ロゴ・slug・紹介文・立場(`stance`)を持つ。 |
 | categories | 記事の主分類。記事は単一のカテゴリを必ず持つ。`notify_channel_id` がこの欄の主チャンネルを、`include_in_latest` が新着一覧への掲載可否を決める。 |
 | tags | 主分類以外の分類軸。記事は複数のタグを持てる。`notify_channel_id` を設定したタグは追加の宛先になる。 |
 | tag_subscriptions | タグの購読。購読したタグの記事が公開されると bot が DM を送る(個人単位のプッシュ)。 |
 | series | 連載(マガジン)。順序を持つ記事のまとまり。 |
-| articles | 記事本体。状態・閲覧範囲・カテゴリ・報道社・連載への所属・本文(Markdown ソースと HTML キャッシュ)を持つ。タグ付けは `article_tags` が持つ。 |
+| articles | 記事本体。状態・閲覧範囲・カテゴリ・報道社・連載への所属・本文(Markdown ソースと HTML キャッシュ)・編集可能な状態の版(`version`)を持つ。タグ付けは `article_tags` が持つ。 |
+| article_slug_history | 記事が過去に使っていた slug。過去の slug への要求を現在の slug へ 301 で転送するために引き、その slug を他の記事に使わせない。 |
 | article_tags | 記事とタグの多対多。 |
 | article_visibility_roles | 閲覧範囲が restricted の記事について、閲覧を許可するロールの集合。 |
 | article_revisions | 記事の改版履歴。編集ごとのスナップショットに加え、訂正か否か(`is_correction`)と実際の投稿経路(`via_token_id`)を持つ。 |

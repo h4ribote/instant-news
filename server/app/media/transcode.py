@@ -1,6 +1,6 @@
 """Decode the received bytes and re-encode them as WebP.
 
-Never store the received bytes as they arrived. Decoding and re-encoding is the single most effective measure on this path.
+The received bytes are never stored as they arrived. Decoding and re-encoding is the single most effective measure on this path.
 
 - Polyglots (a file that is valid GIF and valid HTML and valid JavaScript at once) break. The re-encoded output consists solely of bytes written by our own encoder; not one byte of the input survives.
 - EXIF is dropped. Capture coordinates and device identifiers sit embedded in images without their owner ever intending it.
@@ -23,7 +23,7 @@ from PIL import Image, ImageSequence
 # Width per variant. store.VARIANTS holds the list of names; 'orig' is the original size, so it does not appear here.
 VARIANT_WIDTHS: Final[dict[str, int]] = {'1200w': 1200, '400w': 400}
 
-# Lossy quality. When lossless, Pillow reads this value as compression effort instead — only its meaning changes, which is no reason to leave it unset.
+# Lossy quality. When lossless, Pillow reads this value as compression effort instead; only its meaning changes, and it is set in both modes.
 WEBP_QUALITY: Final = 90
 # Encoder effort (0-6). Stills take the best. Animation pays it on every frame, so keep it at a value that does not hold up an article save.
 _METHOD_STILL: Final = 6
@@ -45,7 +45,7 @@ class TranscodeError(Exception):
 class EncodedImage:
     """The result of a conversion. content_hash is the SHA-256 of the post-conversion 'orig', not a hash of the pre-conversion original file.
 
-    Hashing the served bytes themselves makes the URL name the content actually served. Hashing the original file would leave the URL unchanged when a new encoder version changes the output, which stops it being content-addressed — and since permanent caching is allowed, that means an old image would never be updated again.
+    Hashing the served bytes themselves makes the URL name the content actually served. Hashing the original file would leave the URL unchanged when a new encoder version changes the output, which stops it being content-addressed, and since permanent caching is allowed, an old image would never be updated again.
     """
 
     content_hash: str
@@ -72,7 +72,7 @@ def _strip_metadata(image: Image.Image) -> Image.Image:
 
 
 def _to_target_mode(image: Image.Image) -> Image.Image:
-    """Convert to a mode WebP can write. Transparency is kept even when lossy — WebP can hold alpha losslessly on the side."""
+    """Convert to a mode WebP can write. Transparency is kept even when lossy, because WebP can hold alpha losslessly on the side."""
     converted = image.convert('RGBA' if _has_alpha(image) else 'RGB')
     return _strip_metadata(converted)
 

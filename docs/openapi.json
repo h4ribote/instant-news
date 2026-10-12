@@ -1,0 +1,6531 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "instant-news",
+    "description": "Discord コミュニティのためのニュースプラットフォーム。",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/auth/login": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Login",
+        "description": "Send the user to Discord's consent screen.\n\nredirect_to is where the user lands after login, and is restricted to a path inside this site (sanitize_redirect_to does the checking). It is stashed in oauth_states rather than handed back to the browser, so the requested destination cannot be rewritten over the URL round trip.\n\nOf the authorization URL's ingredients, client_id is read from the settings table on every request, while the redirect_uri is derived from base_url in config.yaml (auth.oauth_redirect_uri). config is needed for that derivation and to decide whether the state cookie gets Secure.",
+        "operationId": "login_auth_login_get",
+        "parameters": [
+          {
+            "name": "redirect_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Redirect To"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "転送する。",
+            "headers": {
+              "Location": {
+                "description": "転送先。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Callback",
+        "description": "Take the authorization result, issue a session, and send the user on to the post-login destination.\n\ncode and state are deliberately not declared as required parameters. When the user declines, or the flow fails, Discord comes back carrying only error and no code, so requiring them would surface the perfectly normal \"the user declined\" path as a format error (422).",
+        "operationId": "callback_auth_callback_get",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          },
+          {
+            "name": "error_description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error Description"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "転送する。",
+            "headers": {
+              "Location": {
+                "description": "転送先。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Logout",
+        "description": "Destroy the session and drop the cookie.\n\nRequires no authentication. Logout should hold even when called with an already-invalid cookie; \"you have to be logged in to log out\" is nothing but a dead end for the user. The DB row is deleted, so even if the cookie survives for some reason, that session never passes again. A POST from another site carries no cookie (SameSite=Lax), so nobody can be walked into an unintended logout either.",
+        "operationId": "logout_auth_logout_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Read Me",
+        "description": "Your own info, the roles you hold, your affiliated publishers, whether you are an admin, and your subscribed tags.\n\nReadable even by a user who has left the guild: returning is_guild_member false is the answer. A 403 here would leave the UI with no way to tell why nothing can be written.",
+        "operationId": "read_me_api_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/tokens": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Read Tokens",
+        "description": "Listing of your own API keys. The raw value is not in the DB so it cannot be returned, and no design may ever make it returnable.",
+        "operationId": "read_tokens_api_me_tokens_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_TokenOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Issue Token",
+        "description": "Issue an API key. The raw value is returned in this response only and can never be retrieved again.\n\nEligibility to issue is decided from the settings and roles as they are now. Passing here does not mean the key will pass later: a key's permissions are decided afresh on every request.",
+        "operationId": "issue_token_api_me_tokens_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCreated"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/tokens/{token_id}": {
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Delete Token",
+        "description": "Revoke your own API key. The row is kept and revoked_at is set, so the record of what was stopped and when survives.",
+        "operationId": "delete_token_api_me_tokens__token_id__delete",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/subscriptions": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Read Subscriptions",
+        "description": "Listing of the tags you subscribe to.",
+        "operationId": "read_subscriptions_api_me_subscriptions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_TagOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/subscriptions/{tag_slug}": {
+      "put": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Subscribe Tag",
+        "description": "Subscribe to a tag. Already being subscribed still counts as success: repeating the same PUT lands on the same state however many times it is sent.",
+        "operationId": "subscribe_tag_api_me_subscriptions__tag_slug__put",
+        "parameters": [
+          {
+            "name": "tag_slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tag Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Unsubscribe Tag",
+        "description": "Unsubscribe from a tag. Not being subscribed still counts as success, since the desired end state is the same.",
+        "operationId": "unsubscribe_tag_api_me_subscriptions__tag_slug__delete",
+        "parameters": [
+          {
+            "name": "tag_slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tag Slug"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles": {
+      "get": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "List Articles",
+        "description": "Return published articles newest first. The visibility filter is always applied, and no admin clause is added on top of it: see visibility_sql_filter for what that leaves out.\n\nEach filter is a condition on articles' own columns (a subquery resolves a slug to its ID), so the listing runs on the articles indexes and the total, when asked for, counts over articles alone.",
+        "operationId": "list_articles_api_articles_get",
+        "parameters": [
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "カテゴリの slug で絞る。",
+              "title": "Category"
+            },
+            "description": "カテゴリの slug で絞る。"
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "タグの slug で絞る。",
+              "title": "Tag"
+            },
+            "description": "タグの slug で絞る。"
+          },
+          {
+            "name": "publisher",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "報道社の slug で絞る。",
+              "title": "Publisher"
+            },
+            "description": "報道社の slug で絞る。"
+          },
+          {
+            "name": "series",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "連載の slug で絞る。",
+              "title": "Series"
+            },
+            "description": "連載の slug で絞る。"
+          },
+          {
+            "name": "author",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "著者の利用者 ID で絞る。",
+              "title": "Author"
+            },
+            "description": "著者の利用者 ID で絞る。"
+          },
+          {
+            "name": "latest_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "新着一覧に載せるカテゴリの記事だけを返す。",
+              "default": false,
+              "title": "Latest Only"
+            },
+            "description": "新着一覧に載せるカテゴリの記事だけを返す。"
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "1 ページの件数。",
+              "default": 20,
+              "title": "Per Page"
+            },
+            "description": "1 ページの件数。"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。",
+              "title": "Cursor"
+            },
+            "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。"
+          },
+          {
+            "name": "include_total",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "一覧全体の件数(total)も数えるか。",
+              "default": false,
+              "title": "Include Total"
+            },
+            "description": "一覧全体の件数(total)も数えるか。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ArticleListItem_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "Create Article",
+        "description": "Create an article.\n\nWith an Idempotency-Key, a key already used with the same body replays the article it created (checked before the rate limit and before any image is fetched, so a replay costs neither), and one used with a different body is refused.",
+        "operationId": "create_article_api_articles_post",
+        "parameters": [
+          {
+            "name": "idempotency-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "再送で記事が重複しないためのキー(UUID など)。同じキーと同じ本体の再送には、最初の要求が作った記事を返す。",
+              "title": "Idempotency-Key"
+            },
+            "description": "再送で記事が重複しないためのキー(UUID など)。同じキーと同じ本体の再送には、最初の要求が作った記事を返す。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArticleCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleSaveOut"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "記事の編集可能な状態を表す強い ETag(\"<id>-<version>\")。",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Limit": {
+                "description": "API キーの 1 時間あたりの作成・更新の上限。API キー経由の要求にだけ付く。",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Remaining": {
+                "description": "この応答の時点で残っている回数。",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Reset": {
+                "description": "窓内で最も古い保存が窓を抜け、1 回分が空くまでの秒数。使用が 0 なら 0。",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Policy": {
+                "description": "IETF 草案の形式の方針。\"articles-write\";q=<上限>;w=3600",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "RateLimit": {
+                "description": "IETF 草案の形式の残量。\"articles-write\";r=<残り>;t=<秒数>",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Idempotent-Replayed": {
+                "description": "同じ Idempotency-Key の最初の要求の結果を再生したときに true。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{article_id}": {
+      "patch": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "Update Article",
+        "description": "Partially update an article: only the fields the body carries change.",
+        "operationId": "update_article_api_articles__article_id__patch",
+        "parameters": [
+          {
+            "name": "article_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Article Id"
+            }
+          },
+          {
+            "name": "if-match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。",
+              "title": "If-Match"
+            },
+            "description": "GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArticleUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleSaveOut"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "記事の編集可能な状態を表す強い ETag(\"<id>-<version>\")。",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Limit": {
+                "description": "API キーの 1 時間あたりの作成・更新の上限。API キー経由の要求にだけ付く。",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Remaining": {
+                "description": "この応答の時点で残っている回数。",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Reset": {
+                "description": "窓内で最も古い保存が窓を抜け、1 回分が空くまでの秒数。使用が 0 なら 0。",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Policy": {
+                "description": "IETF 草案の形式の方針。\"articles-write\";q=<上限>;w=3600",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "RateLimit": {
+                "description": "IETF 草案の形式の残量。\"articles-write\";r=<残り>;t=<秒数>",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{article_id}/publish": {
+      "post": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "Publish",
+        "description": "Publish an article: freeze the byline and enqueue the notifications in the same transaction.",
+        "operationId": "publish_api_articles__article_id__publish_post",
+        "parameters": [
+          {
+            "name": "article_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Article Id"
+            }
+          },
+          {
+            "name": "if-match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。",
+              "title": "If-Match"
+            },
+            "description": "GET / 保存の応答の ETag。付いていれば、記事がその版から更新されていた場合に 412 を返す。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleOut"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "記事の編集可能な状態を表す強い ETag(\"<id>-<version>\")。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/by-id/{article_id}": {
+      "get": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "Get Article By Id",
+        "description": "Return the article detail by its immutable id. 404 if it cannot be viewed.\n\nview_count is not advanced: this is how the editor and API clients load an article they are about to write, which is not a read by a reader.",
+        "operationId": "get_article_by_id_api_articles_by_id__article_id__get",
+        "parameters": [
+          {
+            "name": "article_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Article Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleOut"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "記事の編集可能な状態を表す強い ETag(\"<id>-<version>\")。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}": {
+      "get": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "Get Article",
+        "description": "Return the article detail. 404 if it cannot be viewed, 301 if the slug is one the article used to have.",
+        "operationId": "get_article_api_articles__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArticleOut"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "記事の編集可能な状態を表す強い ETag(\"<id>-<version>\")。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "301": {
+            "description": "記事が過去に使っていた slug。同じ URL の slug を現在のものに替えた先へ転送する。",
+            "headers": {
+              "Location": {
+                "description": "転送先。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}/comments": {
+      "get": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "List Comments",
+        "description": "Return one page of an article's comments, oldest first. 404 if the article cannot be viewed.\n\nA comment's visibility is the article's visibility itself. Returning comments to someone who cannot read the article leaks what was said about it and how much, while the body stays hidden. The check is delegated to the same _require_viewable the article detail uses; a separate check written here would go stale on its own the day the article-side rule changes.\n\nOldest first because comments are a conversation. Sorting by score puts a reply ahead of the message it answers and breaks the context.\n\nThis API is read-only and accepts no writes. The real comments are the replies in the Discord thread, and that is the only place to write them (thread_url is the entry point).",
+        "operationId": "list_comments_api_articles__slug__comments_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "description": "1 ページの件数。",
+              "default": 50,
+              "title": "Per Page"
+            },
+            "description": "1 ページの件数。"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。",
+              "title": "Cursor"
+            },
+            "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。"
+          },
+          {
+            "name": "include_total",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "一覧全体の件数(total)も数えるか。",
+              "default": false,
+              "title": "Include Total"
+            },
+            "description": "一覧全体の件数(total)も数えるか。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentListOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "301": {
+            "description": "記事が過去に使っていた slug。同じ URL の slug を現在のものに替えた先へ転送する。",
+            "headers": {
+              "Location": {
+                "description": "転送先。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}/revisions": {
+      "get": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "List Revisions",
+        "description": "Return one page of the revision history, newest first.",
+        "operationId": "list_revisions_api_articles__slug__revisions_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "1 ページの件数。",
+              "default": 20,
+              "title": "Per Page"
+            },
+            "description": "1 ページの件数。"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。",
+              "title": "Cursor"
+            },
+            "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。"
+          },
+          {
+            "name": "include_total",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "一覧全体の件数(total)も数えるか。",
+              "default": false,
+              "title": "Include Total"
+            },
+            "description": "一覧全体の件数(total)も数えるか。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_RevisionListItem_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "301": {
+            "description": "記事が過去に使っていた slug。同じ URL の slug を現在のものに替えた先へ転送する。",
+            "headers": {
+              "Location": {
+                "description": "転送先。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}/revisions/{revision_number}": {
+      "get": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "Get Revision",
+        "description": "Return a past revision's snapshot.",
+        "operationId": "get_revision_api_articles__slug__revisions__revision_number__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "revision_number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Revision Number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "301": {
+            "description": "記事が過去に使っていた slug。同じ URL の slug を現在のものに替えた先へ転送する。",
+            "headers": {
+              "Location": {
+                "description": "転送先。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/articles/{slug}/revisions/{revision_number}/diff": {
+      "get": {
+        "tags": [
+          "articles"
+        ],
+        "summary": "Get Revision Diff",
+        "description": "Return the diff against the immediately preceding revision as an array of unified-diff lines.",
+        "operationId": "get_revision_diff_api_articles__slug__revisions__revision_number__diff_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "revision_number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Revision Number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionDiffOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "301": {
+            "description": "記事が過去に使っていた slug。同じ URL の slug を現在のものに替えた先へ転送する。",
+            "headers": {
+              "Location": {
+                "description": "転送先。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/categories": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "List Categories",
+        "description": "The category listing, returned in the navigation's order (position), with the article count attached.",
+        "operationId": "list_categories_api_categories_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_CategoryListItem_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tags": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "List Tags",
+        "description": "The tag listing, most articles first, ties ordered by name.",
+        "operationId": "list_tags_api_tags_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_TagDetailOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tags/{slug}": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Get Tag",
+        "description": "A single tag. Used for the heading of the tag page (the topic hub).",
+        "operationId": "get_tag_api_tags__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagDetailOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tags/{slug}/timeline": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Tag Timeline",
+        "description": "The timeline: that tag's articles walked in ascending published_at order.\n\nUnlike the latest listing, this one runs oldest-first because it is read for how a topic unfolded, not for the newest events. On a geopolitical topic the value is in the founding of a state, a change of territory and the signing of a treaty standing in chronological order; descending order presents that thread backwards.",
+        "operationId": "tag_timeline_api_tags__slug__timeline_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "1 ページの件数。",
+              "default": 20,
+              "title": "Per Page"
+            },
+            "description": "1 ページの件数。"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。",
+              "title": "Cursor"
+            },
+            "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。"
+          },
+          {
+            "name": "include_total",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "一覧全体の件数(total)も数えるか。",
+              "default": false,
+              "title": "Include Total"
+            },
+            "description": "一覧全体の件数(total)も数えるか。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ArticleListItem_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/publishers": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "List Publishers",
+        "description": "The publisher listing. Dissolved publishers (role_id NULL) are not dropped, because they live on as the byline of past articles.",
+        "operationId": "list_publishers_api_publishers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_PublisherOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/publishers/{slug}": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Get Publisher",
+        "description": "A publisher's profile, affiliated reporters and track record. Its articles are the paged listing /api/articles?publisher=.\n\nThe track record counts only the published articles the caller can view. Counting every article would leak the existence of unreadable articles and the size of their reactions as numbers, and would make the article count in the track record disagree with the publisher's article listing.",
+        "operationId": "get_publisher_api_publishers__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublisherDetailOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/series": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "List Series",
+        "description": "The series listing, most recently updated first.",
+        "operationId": "list_series_api_series_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_SeriesOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/series/{slug}": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Get Series",
+        "description": "A single series. Its articles are the paged listing /api/series/{slug}/articles.",
+        "operationId": "get_series_api_series__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeriesOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/series/{slug}/articles": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Series Articles",
+        "description": "The articles of a series in installment order.\n\nA series is an ordered whole, so its articles are ordered by ascending series_position. Articles with no position set go to the end, oldest published first among them (a series is read from installment 1, and ordering it latest-first reverses the thread).",
+        "operationId": "series_articles_api_series__slug__articles_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "1 ページの件数。",
+              "default": 20,
+              "title": "Per Page"
+            },
+            "description": "1 ページの件数。"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。",
+              "title": "Cursor"
+            },
+            "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。"
+          },
+          {
+            "name": "include_total",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "一覧全体の件数(total)も数えるか。",
+              "default": false,
+              "title": "Include Total"
+            },
+            "description": "一覧全体の件数(total)も数えるか。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ArticleListItem_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "summary": "Search Articles",
+        "description": "Full-text search articles, most relevant first, ties broken newest-first.\n\nAn empty (or whitespace-only) term returns an empty page of results without touching the index: MATCH on an empty term matches nothing anyway, and merely opening the search field is no reason to hit the full-text index.",
+        "operationId": "search_articles_api_search_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "1 ページの件数。",
+              "default": 20,
+              "title": "Per Page"
+            },
+            "description": "1 ページの件数。"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。",
+              "title": "Cursor"
+            },
+            "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。"
+          },
+          {
+            "name": "include_total",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "一覧全体の件数(total)も数えるか。",
+              "default": false,
+              "title": "Include Total"
+            },
+            "description": "一覧全体の件数(total)も数えるか。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ArticleListItem_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/rankings/publishers": {
+      "get": {
+        "tags": [
+          "rankings"
+        ],
+        "summary": "Get Publisher Ranking",
+        "description": "Return the publisher ranking for the last days days, descending by score (reactions + replies).\n\nThe tally is restricted to status='published' articles with visibility='public', so that articles with access restrictions are not mixed into a public ranking. No authentication is required because the ranking is a single public artefact, identical for everyone; the order never varies with the caller.\n\ndays and limit are capped so that no request can force a tally over everything by naming an unbounded period or row count.",
+        "operationId": "get_publisher_ranking_api_rankings_publishers_get",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 365,
+              "minimum": 1,
+              "default": 7,
+              "title": "Days"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 10,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_PublisherRankingItem_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/rankings/articles": {
+      "get": {
+        "tags": [
+          "rankings"
+        ],
+        "summary": "Get Article Ranking",
+        "description": "Return the top articles for one sidebar ranking, ordered by the server.\n\nmetric selects the base quantity (views or featured). The score decays with age in two regimes: within a one-week window time is nearly flat and reactions and comments drive the order, and past it the score decays strongly so older articles sink. No time window cuts the tally off: every viewable article in the latest feed is ranked, so old articles are still ordered and returned (they just rank low) and the ranking is never empty while any such article exists. The rule is stated in full on app.article_query.fetch_ranked_articles.\n\nThe visibility filter is applied per caller (get_principal_optional), exactly as the article listing is, so the ranking never lists an article the caller could not open: a member may see members-only articles they can read, an anonymous caller only public ones. limit is capped so no request can force an unbounded row count.",
+        "operationId": "get_article_ranking_api_rankings_articles_get",
+        "parameters": [
+          {
+            "name": "metric",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "views",
+                "featured"
+              ],
+              "type": "string",
+              "description": "並べ替えの基準。views はアクセス数、featured は反応(賛否+コメント)。",
+              "default": "views",
+              "title": "Metric"
+            },
+            "description": "並べ替えの基準。views はアクセス数、featured は反応(賛否+コメント)。"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 5,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_ArticleListItem_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media": {
+      "post": {
+        "summary": "Upload Media",
+        "description": "Ingest an image.",
+        "operationId": "upload_media_api_media_post",
+        "parameters": [
+          {
+            "name": "is_public",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "認証なしで配信してよいか。カバー・広告・ロゴ・アイコンは公開、本文中の画像は非公開。",
+              "default": false,
+              "title": "Is Public"
+            },
+            "description": "認証なしで配信してよいか。カバー・広告・ロゴ・アイコンは公開、本文中の画像は非公開。"
+          },
+          {
+            "name": "lossless",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "可逆で符号化するか。ロゴ・アイコンなどの線画に使う。",
+              "default": false,
+              "title": "Lossless"
+            },
+            "description": "可逆で符号化するか。ロゴ・アイコンなどの線画に使う。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_media_api_media_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/media/{content_hash}/{variant}.webp": {
+      "get": {
+        "summary": "Serve Media",
+        "description": "Serve an image. Where the blobs live (storage_dir) is inseparable from the runtime environment, so it is taken straight from config. The admin roles the visibility check needs live in the settings table, so they are taken from settings.",
+        "operationId": "serve_media_media__content_hash___variant__webp_get",
+        "parameters": [
+          {
+            "name": "content_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Content Hash"
+            }
+          },
+          {
+            "name": "variant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Variant"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "画像(WebP)。",
+            "content": {
+              "image/webp": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ads/serve": {
+      "get": {
+        "tags": [
+          "ads"
+        ],
+        "summary": "Serve Ad",
+        "description": "Select one ad for the slot; the response itself counts as one impression.\n\nWith no candidates, ad comes back null and the frontend removes the slot itself. Leaving an empty slot keeps only the pretence that something should be there.\n\nAn unknown slot slug is a 404. Slots are a fixed set seeded by the migration, so a slug we do not know is an error in the frontend template. Treating it as zero candidates (ad: null) would let that error hide, indistinguishable from a slot that happens to have no ads.",
+        "operationId": "serve_ad_api_ads_serve_get",
+        "parameters": [
+          {
+            "name": "slot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "ad_slots.slug。フロントエンドのテンプレートが参照する枠の識別子。",
+              "title": "Slot"
+            },
+            "description": "ad_slots.slug。フロントエンドのテンプレートが参照する枠の識別子。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdServeOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ads/{ad_id}/click": {
+      "get": {
+        "tags": [
+          "ads"
+        ],
+        "summary": "Click Ad",
+        "description": "Count one click and forward to the ad's click destination.\n\nDeliberately not filtered by run period or is_active: a click on an ad that was shown really happened, even if the run has since ended. Rejecting it here would count the impression but not the click, so the click-through rate would read lower than reality.\n\nThe click destination is an arbitrary URL, but only an ads:admin principal can set it (submission also checks it is an absolute http / https URL), so this is not an open redirector anyone can plant a destination in.",
+        "operationId": "click_ad_ads__ad_id__click_get",
+        "parameters": [
+          {
+            "name": "ad_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ad Id"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "広告のリンク先へ転送する。",
+            "headers": {
+              "Location": {
+                "description": "リンク先。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/ad-slots": {
+      "get": {
+        "tags": [
+          "admin:ads"
+        ],
+        "summary": "List Ad Slots",
+        "description": "The ad slot listing. Recommended dimensions are returned so that an external management app can reproduce the appearance itself before submission: the core has no preview endpoint.",
+        "operationId": "list_ad_slots_api_admin_ad_slots_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_AdSlotOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/ads": {
+      "get": {
+        "tags": [
+          "admin:ads"
+        ],
+        "summary": "List Ads",
+        "description": "One page of the ad listing, newest submission first. Ads that were stopped (is_active=0) are included too: following performance stats requires the stopped ones to stay visible.",
+        "operationId": "list_ads_api_admin_ads_get",
+        "parameters": [
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "1 ページの件数。",
+              "default": 20,
+              "title": "Per Page"
+            },
+            "description": "1 ページの件数。"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。",
+              "title": "Cursor"
+            },
+            "description": "前の応答の next_cursor または prev_cursor。省略すると先頭のページ。"
+          },
+          {
+            "name": "include_total",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "一覧全体の件数(total)も数えるか。",
+              "default": false,
+              "title": "Include Total"
+            },
+            "description": "一覧全体の件数(total)も数えるか。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AdOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin:ads"
+        ],
+        "summary": "Create Ad",
+        "description": "Submit an ad. A resend under the same Idempotency-Key and body returns the ad the first request created.",
+        "operationId": "create_ad_api_admin_ads_post",
+        "parameters": [
+          {
+            "name": "idempotency-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "再送で広告が重複しないためのキー(UUID など)。同じキーと同じ本体の再送には、最初の要求が登録した広告を返す。",
+              "title": "Idempotency-Key"
+            },
+            "description": "再送で広告が重複しないためのキー(UUID など)。同じキーと同じ本体の再送には、最初の要求が登録した広告を返す。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdOut"
+                }
+              }
+            },
+            "headers": {
+              "Idempotent-Replayed": {
+                "description": "同じ Idempotency-Key の最初の要求の結果を再生したときに true。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/ads/{ad_id}": {
+      "get": {
+        "tags": [
+          "admin:ads"
+        ],
+        "summary": "Get Ad",
+        "operationId": "get_ad_api_admin_ads__ad_id__get",
+        "parameters": [
+          {
+            "name": "ad_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ad Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "admin:ads"
+        ],
+        "summary": "Update Ad",
+        "description": "Partially update an ad. Omitted fields keep their current value.\n\nOmitted and explicitly set to null are treated as different things, told apart by pydantic's model_fields_set. A null for alt_text, starts_at or ends_at is a meaningful instruction: drop the alt text, start the run immediately, leave the end of the run open.",
+        "operationId": "update_ad_api_admin_ads__ad_id__patch",
+        "parameters": [
+          {
+            "name": "ad_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ad Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin:ads"
+        ],
+        "summary": "Deactivate Ad",
+        "description": "Stop an ad from running. The row is kept and is_active set to 0.\n\nThis is a soft delete, not a hard delete: ad_stats_daily references ads with CASCADE, so dropping the row would take the performance stats with it (how many times that ad was shown and how many times it was clicked). An ad whose run has ended is precisely the one you reconcile performance stats against.\n\nThe response is the updated ad itself, so is_active=false shows on the spot that DELETE means stopped, not gone.",
+        "operationId": "deactivate_ad_api_admin_ads__ad_id__delete",
+        "parameters": [
+          {
+            "name": "ad_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ad Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/ads/{ad_id}/stats": {
+      "get": {
+        "tags": [
+          "admin:ads"
+        ],
+        "summary": "Get Ad Stats",
+        "description": "An ad's daily performance stats. The totals are over the range returned, and always agree with the per-day values.\n\nA day with no stats has no row: no zero row is written for a day with 0 impressions. A gap in the dates means there were no impressions that day.",
+        "operationId": "get_ad_stats_api_admin_ads__ad_id__stats_get",
+        "parameters": [
+          {
+            "name": "ad_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ad Id"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "集計の開始日(この日を含む)。省略すると下限を設けない。",
+              "title": "From"
+            },
+            "description": "集計の開始日(この日を含む)。省略すると下限を設けない。"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "集計の終了日(この日を含む)。省略すると上限を設けない。",
+              "title": "To"
+            },
+            "description": "集計の終了日(この日を含む)。省略すると上限を設けない。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdStatsOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/categories": {
+      "get": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "List Categories",
+        "operationId": "list_categories_api_admin_categories_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_CategoryOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Create Category",
+        "description": "Create a category. A category whose notify_channel_id is omitted (or null) notifies no channel at all.",
+        "operationId": "create_category_api_admin_categories_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategoryWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoryOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/categories/{category_id}": {
+      "patch": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Update Category",
+        "description": "Partially update a category. Omitted fields keep their current value. An explicit null for notify_channel_id says this section notifies nowhere.",
+        "operationId": "update_category_api_admin_categories__category_id__patch",
+        "parameters": [
+          {
+            "name": "category_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Category Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategoryWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoryOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Delete Category",
+        "description": "Delete a category. Refused while even one article belongs to it.\n\narticles.category_id references it NOT NULL and RESTRICT, so deleting a category that still has articles would strip those articles of their primary classification. The DB refuses this (the constraint violation is mapped to 409 here), but the articles are counted first so the response can say what happened. Move the articles to another category, then delete.",
+        "operationId": "delete_category_api_admin_categories__category_id__delete",
+        "parameters": [
+          {
+            "name": "category_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Category Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/tags": {
+      "get": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "List Tags",
+        "operationId": "list_tags_api_admin_tags_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_TagOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Create Tag",
+        "description": "Create a tag. A tag with a notify_channel_id becomes an additional notify channel on top of the primary channel the category decides.",
+        "operationId": "create_tag_api_admin_tags_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/tags/{tag_id}": {
+      "patch": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Update Tag",
+        "description": "Partially update a tag. Omitted fields keep their current value. An explicit null for notify_channel_id says this tag takes no part in routing notifications.",
+        "operationId": "update_tag_api_admin_tags__tag_id__patch",
+        "parameters": [
+          {
+            "name": "tag_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tag Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Delete Tag",
+        "description": "Delete a tag.\n\narticle_tags and tag_subscriptions go with it via CASCADE: the tag comes off the articles and the subscriptions are dropped, but the articles themselves remain, because a tag is not a primary classification, so an article still stands without it. That is why, unlike a category, nothing holds the deletion back.",
+        "operationId": "delete_tag_api_admin_tags__tag_id__delete",
+        "parameters": [
+          {
+            "name": "tag_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tag Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/publishers": {
+      "get": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "List Publishers",
+        "operationId": "list_publishers_api_admin_publishers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_PublisherOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Create Publisher",
+        "description": "Create a publisher. role_id is the Discord role standing for affiliation: holding it is what decides whether a reporter may publish under that publisher.",
+        "operationId": "create_publisher_api_admin_publishers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublisherWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublisherOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/publishers/{publisher_id}": {
+      "patch": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Update Publisher",
+        "description": "Partially update a publisher. Omitted fields keep their current value.\n\nAn explicit null for role_id says the publisher is dissolved: nobody can publish under it any more. The publisher row itself remains, so the bylines on past articles are preserved.",
+        "operationId": "update_publisher_api_admin_publishers__publisher_id__patch",
+        "parameters": [
+          {
+            "name": "publisher_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Publisher Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublisherWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublisherOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin:taxonomy"
+        ],
+        "summary": "Delete Publisher",
+        "description": "Delete a publisher. Refused while even one article is tied to it.\n\narticles.publisher_id references it with RESTRICT. Deleting a publisher that still has articles would lose the byline on every past article it published. Past articles of a dissolved publisher are meant to remain, and dissolution is expressed by setting role_id to null rather than by deleting: nobody can publish under it any more, and the byline is all that is left.",
+        "operationId": "delete_publisher_api_admin_publishers__publisher_id__delete",
+        "parameters": [
+          {
+            "name": "publisher_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Publisher Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/settings": {
+      "get": {
+        "tags": [
+          "admin:settings"
+        ],
+        "summary": "List Settings",
+        "description": "List the settings definitions and their current values. The UI builds its input fields from this response.\n\nA secret setting comes back with value null, and is_set says whether it is set. A setting that cannot be changed comes back with editable false, and description says why.",
+        "operationId": "list_settings_api_admin_settings_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "admin:settings"
+        ],
+        "summary": "Update Settings",
+        "description": "Partially update the settings. Only the keys listed in updates change; an omitted key keeps its current value.\n\nupdated_by gets principal.user_id on the session path and the API key path alike. A key is the owner's permission borrowed by a machine; the key itself did not change the setting. Recording the issuer keeps responsibility with a human.\n\nAn unknown key, a type mismatch, a value outside the range, and a change to a setting that is not editable (discord.guild_id) are all rejected by set_many with ValueError. **Never swallow that and silently ignore it.** The caller reads the request as a success, and all that is left is a value they believe they changed that is not in effect. Return the message, reason and all, as a 400.\n\nset_many validates every entry up front, so a single bad key means nothing is written and no half-applied settings state can arise.",
+        "operationId": "update_settings_api_admin_settings_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsUpdateOut"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/roles": {
+      "get": {
+        "tags": [
+          "admin:roles"
+        ],
+        "summary": "List Roles",
+        "description": "The target guild's role listing. Used for the fields of settings that point at roles and for the publisher affiliation-role options.\n\nThe source of truth is Discord; this table is a snapshot the bot mirrors as it receives role create / update / delete events. A freshly created role can stay absent for a very short while, so the UI must keep direct ID entry as well.",
+        "operationId": "list_roles_api_admin_roles_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemList_AdminRoleOut_"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "エラー。本体の形は状態コードによらず同じ。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AdOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slot": {
+            "$ref": "#/components/schemas/AdSlotOut"
+          },
+          "advertiser_name": {
+            "type": "string",
+            "title": "Advertiser Name"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url"
+          },
+          "link_url": {
+            "type": "string",
+            "title": "Link Url"
+          },
+          "alt_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alt Text"
+          },
+          "weight": {
+            "type": "integer",
+            "title": "Weight"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slot",
+          "advertiser_name",
+          "image_url",
+          "link_url",
+          "weight",
+          "is_active",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AdOut"
+      },
+      "AdServeOut": {
+        "properties": {
+          "ad": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdServed"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "AdServeOut",
+        "description": "The serve response for a slot. ad is null when there is no candidate; the frontend then removes the slot itself."
+      },
+      "AdServed": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slot": {
+            "type": "string",
+            "title": "Slot"
+          },
+          "advertiser_name": {
+            "type": "string",
+            "title": "Advertiser Name"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url"
+          },
+          "click_url": {
+            "type": "string",
+            "title": "Click Url"
+          },
+          "alt_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alt Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slot",
+          "advertiser_name",
+          "image_url",
+          "click_url"
+        ],
+        "title": "AdServed",
+        "description": "One served ad. click_url is returned rather than link_url so that click tracking can be interposed."
+      },
+      "AdSlotOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "recommended_width": {
+            "type": "integer",
+            "title": "Recommended Width"
+          },
+          "recommended_height": {
+            "type": "integer",
+            "title": "Recommended Height"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "recommended_width",
+          "recommended_height"
+        ],
+        "title": "AdSlotOut",
+        "description": "An ad slot. The recommended dimensions are returned so that an external management app can reproduce the appearance itself before submitting a creative."
+      },
+      "AdStatDay": {
+        "properties": {
+          "stat_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Stat Date"
+          },
+          "impressions": {
+            "type": "integer",
+            "title": "Impressions"
+          },
+          "clicks": {
+            "type": "integer",
+            "title": "Clicks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "stat_date",
+          "impressions",
+          "clicks"
+        ],
+        "title": "AdStatDay"
+      },
+      "AdStatsOut": {
+        "properties": {
+          "ad_id": {
+            "type": "string",
+            "title": "Ad Id"
+          },
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/AdStatDay"
+            },
+            "type": "array",
+            "title": "Days"
+          },
+          "total_impressions": {
+            "type": "integer",
+            "title": "Total Impressions"
+          },
+          "total_clicks": {
+            "type": "integer",
+            "title": "Total Clicks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ad_id",
+          "total_impressions",
+          "total_clicks"
+        ],
+        "title": "AdStatsOut"
+      },
+      "AdWrite": {
+        "properties": {
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id"
+          },
+          "advertiser_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Advertiser Name"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "link_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Link Url"
+          },
+          "alt_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alt Text"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AdWrite",
+        "description": "Submitting or updating an ad. Stopping the run is is_active=false, not deleting the row (so the performance stats survive)."
+      },
+      "AdminRoleOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "color": {
+            "type": "integer",
+            "title": "Color"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position"
+          },
+          "is_administrator": {
+            "type": "boolean",
+            "title": "Is Administrator"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "color",
+          "position",
+          "is_administrator"
+        ],
+        "title": "AdminRoleOut",
+        "description": "The guild roles the admin screen lists as choices.\n\nis_administrator is the resolved Administrator bit of discord_roles.permissions. **The permission bits themselves are not exposed.** Once the UI starts interpreting bits, the definition of an admin splits between principals.is_admin and the UI, and one of the two is always left behind (the same reason RoleOut withholds the permission bits).\n\nThe UI needs this so the admin roles field (admin.role_ids) can show that a role holding Administrator is treated as an admin without being put there. Without that, adding an already-admin role to the admin roles looks like a useful thing to do, and admin.role_ids fills up with roles nobody can explain the presence of."
+      },
+      "ArticleCreate": {
+        "properties": {
+          "revision_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision Note"
+          },
+          "is_correction": {
+            "type": "boolean",
+            "title": "Is Correction",
+            "default": false
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "body_md": {
+            "type": "string",
+            "title": "Body Md"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "category_id": {
+            "type": "string",
+            "title": "Category Id"
+          },
+          "publisher_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publisher Id"
+          },
+          "series_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Id"
+          },
+          "series_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Position"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "members",
+              "restricted"
+            ],
+            "title": "Visibility",
+            "default": "public"
+          },
+          "visibility_role_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Visibility Role Ids"
+          },
+          "cover_image_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cover Image Url"
+          },
+          "byline_mode": {
+            "type": "string",
+            "enum": [
+              "author",
+              "publisher"
+            ],
+            "title": "Byline Mode",
+            "default": "author"
+          },
+          "is_breaking": {
+            "type": "boolean",
+            "title": "Is Breaking",
+            "default": false
+          },
+          "is_sponsored": {
+            "type": "boolean",
+            "title": "Is Sponsored",
+            "default": false
+          },
+          "sponsor_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sponsor Name"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[^\\s/?#&=%]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "in_review",
+              "scheduled",
+              "published",
+              "archived"
+            ],
+            "title": "Status",
+            "default": "draft"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "author_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "title",
+          "body_md",
+          "category_id"
+        ],
+        "title": "ArticleCreate",
+        "description": "Request body for creating an article (POST /api/articles).\n\ntitle / body_md / category_id are required. The other non-nullable fields default to the same values as the DB columns. slug null means generate one from the title; author_id null means the principal."
+      },
+      "ArticleListItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "cover_image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cover Image Url"
+          },
+          "author": {
+            "$ref": "#/components/schemas/UserBrief"
+          },
+          "publisher": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublisherOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "$ref": "#/components/schemas/CategoryOut"
+          },
+          "series": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeriesBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "series_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Position"
+          },
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/TagOut"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "members",
+              "restricted"
+            ],
+            "title": "Visibility"
+          },
+          "byline_mode": {
+            "type": "string",
+            "enum": [
+              "author",
+              "publisher"
+            ],
+            "title": "Byline Mode"
+          },
+          "is_breaking": {
+            "type": "boolean",
+            "title": "Is Breaking"
+          },
+          "is_sponsored": {
+            "type": "boolean",
+            "title": "Is Sponsored"
+          },
+          "sponsor_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sponsor Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "in_review",
+              "scheduled",
+              "published",
+              "archived"
+            ],
+            "title": "Status"
+          },
+          "view_count": {
+            "type": "integer",
+            "title": "View Count"
+          },
+          "up_count": {
+            "type": "integer",
+            "title": "Up Count"
+          },
+          "down_count": {
+            "type": "integer",
+            "title": "Down Count"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          },
+          "comment_count": {
+            "type": "integer",
+            "title": "Comment Count"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "author",
+          "category",
+          "visibility",
+          "byline_mode",
+          "is_breaking",
+          "is_sponsored",
+          "status",
+          "view_count",
+          "up_count",
+          "down_count",
+          "score",
+          "comment_count",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ArticleListItem",
+        "description": "An article as it appears in a listing.\n\nup_count / down_count / comment_count are the totals across all of the article's notification posts (one article can be notified to several channels). score is up_count - down_count and may be negative. The score shown to readers is this subtraction, a different thing from the publisher ranking's score (for that rule see PublisherRankingItem)."
+      },
+      "ArticleOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "cover_image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cover Image Url"
+          },
+          "author": {
+            "$ref": "#/components/schemas/UserBrief"
+          },
+          "publisher": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublisherOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "$ref": "#/components/schemas/CategoryOut"
+          },
+          "series": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeriesBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "series_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Position"
+          },
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/TagOut"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "members",
+              "restricted"
+            ],
+            "title": "Visibility"
+          },
+          "byline_mode": {
+            "type": "string",
+            "enum": [
+              "author",
+              "publisher"
+            ],
+            "title": "Byline Mode"
+          },
+          "is_breaking": {
+            "type": "boolean",
+            "title": "Is Breaking"
+          },
+          "is_sponsored": {
+            "type": "boolean",
+            "title": "Is Sponsored"
+          },
+          "sponsor_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sponsor Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "in_review",
+              "scheduled",
+              "published",
+              "archived"
+            ],
+            "title": "Status"
+          },
+          "view_count": {
+            "type": "integer",
+            "title": "View Count"
+          },
+          "up_count": {
+            "type": "integer",
+            "title": "Up Count"
+          },
+          "down_count": {
+            "type": "integer",
+            "title": "Down Count"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          },
+          "comment_count": {
+            "type": "integer",
+            "title": "Comment Count"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "body_md": {
+            "type": "string",
+            "title": "Body Md"
+          },
+          "body_html": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body Html"
+          },
+          "visibility_role_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Visibility Role Ids"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "corrections": {
+            "items": {
+              "$ref": "#/components/schemas/RevisionListItem"
+            },
+            "type": "array",
+            "title": "Corrections"
+          },
+          "discord_posts": {
+            "items": {
+              "$ref": "#/components/schemas/DiscordPostOut"
+            },
+            "type": "array",
+            "title": "Discord Posts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "author",
+          "category",
+          "visibility",
+          "byline_mode",
+          "is_breaking",
+          "is_sponsored",
+          "status",
+          "view_count",
+          "up_count",
+          "down_count",
+          "score",
+          "comment_count",
+          "created_at",
+          "updated_at",
+          "version",
+          "body_md"
+        ],
+        "title": "ArticleOut",
+        "description": "An article's detail. corrections is the listing of revisions recorded as corrections, shown at the top of the article page.\n\nid is the article's immutable identifier and the one the write endpoints (PATCH, publish) and GET /api/articles/by-id/{id} take; slug is the permalink and may change. version identifies the editable state and is what the ETag header carries; counting a view does not advance it."
+      },
+      "ArticleSaveOut": {
+        "properties": {
+          "article": {
+            "$ref": "#/components/schemas/ArticleOut"
+          },
+          "media_failures": {
+            "items": {
+              "$ref": "#/components/schemas/MediaFailure"
+            },
+            "type": "array",
+            "title": "Media Failures"
+          }
+        },
+        "type": "object",
+        "required": [
+          "article"
+        ],
+        "title": "ArticleSaveOut",
+        "description": "The response to saving an article."
+      },
+      "ArticleUpdate": {
+        "properties": {
+          "revision_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision Note"
+          },
+          "is_correction": {
+            "type": "boolean",
+            "title": "Is Correction",
+            "default": false
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "body_md": {
+            "type": "string",
+            "title": "Body Md"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "category_id": {
+            "type": "string",
+            "title": "Category Id"
+          },
+          "publisher_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publisher Id"
+          },
+          "series_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Id"
+          },
+          "series_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Series Position"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "members",
+              "restricted"
+            ],
+            "title": "Visibility"
+          },
+          "visibility_role_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Visibility Role Ids"
+          },
+          "cover_image_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cover Image Url"
+          },
+          "byline_mode": {
+            "type": "string",
+            "enum": [
+              "author",
+              "publisher"
+            ],
+            "title": "Byline Mode"
+          },
+          "is_breaking": {
+            "type": "boolean",
+            "title": "Is Breaking"
+          },
+          "is_sponsored": {
+            "type": "boolean",
+            "title": "Is Sponsored"
+          },
+          "sponsor_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sponsor Name"
+          },
+          "slug": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\s/?#&=%]+$",
+            "title": "Slug"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "in_review",
+              "scheduled",
+              "published",
+              "archived"
+            ],
+            "title": "Status"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "author_id": {
+            "type": "string",
+            "title": "Author Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ArticleUpdate",
+        "description": "Request body for a partial update of an article (PATCH /api/articles/{id}).\n\nOnly the fields the request carries are changed; an omitted field keeps its current value. null erases the value of a nullable field (excerpt, publisher_id, series_id, series_position, cover_image_url, sponsor_name, scheduled_at). A field that cannot be null is declared with _omittable, so sending null to it is a 422 rather than an erasure. tags and visibility_role_ids replace the whole set; send [] to empty them."
+      },
+      "Body_upload_media_api_media_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "取り込む画像。復号して WebP へ再符号化したものだけを保存する。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_media_api_media_post"
+      },
+      "CategoryListItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position"
+          },
+          "notify_channel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notify Channel Id"
+          },
+          "include_in_latest": {
+            "type": "boolean",
+            "title": "Include In Latest"
+          },
+          "article_count": {
+            "type": "integer",
+            "title": "Article Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "position",
+          "include_in_latest",
+          "article_count"
+        ],
+        "title": "CategoryListItem",
+        "description": "An item of the category listing.\n\narticle_count counts only the published articles the caller can view. Counting every article would leak the existence and the number of unreadable articles through the count."
+      },
+      "CategoryOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position"
+          },
+          "notify_channel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notify Channel Id"
+          },
+          "include_in_latest": {
+            "type": "boolean",
+            "title": "Include In Latest"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "position",
+          "include_in_latest"
+        ],
+        "title": "CategoryOut"
+      },
+      "CategoryWrite": {
+        "properties": {
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[^\\s/?#&=%]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "notify_channel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notify Channel Id"
+          },
+          "include_in_latest": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Include In Latest"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CategoryWrite"
+      },
+      "CommentAuthorOut": {
+        "properties": {
+          "discord_user_id": {
+            "type": "string",
+            "title": "Discord User Id"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "global_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Name"
+          },
+          "avatar_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avatar Hash"
+          }
+        },
+        "type": "object",
+        "required": [
+          "discord_user_id"
+        ],
+        "title": "CommentAuthorOut",
+        "description": "The commenter.\n\nSome are not in users (a user who left the guild, another bot, a webhook). For those, all that can be returned is the Discord user ID: username and avatar_hash are both null. The UI has to be built on that premise."
+      },
+      "CommentListOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CommentOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "prev_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prev Cursor"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          },
+          "thread_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "per_page"
+        ],
+        "title": "CommentListOut",
+        "description": "One page of an article's comments.\n\nthread_url is the entry point to the Discord thread, the only place a comment can be written (this API only reads, and accepts no writes)."
+      },
+      "CommentOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "author": {
+            "$ref": "#/components/schemas/CommentAuthorOut"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "up_count": {
+            "type": "integer",
+            "title": "Up Count"
+          },
+          "down_count": {
+            "type": "integer",
+            "title": "Down Count"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          },
+          "posted_at": {
+            "type": "string",
+            "title": "Posted At"
+          },
+          "edited_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "message_id",
+          "author",
+          "body",
+          "up_count",
+          "down_count",
+          "score",
+          "posted_at"
+        ],
+        "title": "CommentOut",
+        "description": "One comment on an article. The real comment is a reply in a Discord thread; this is a mirror of it.\n\nbody holds the Discord message's content in Discord's own markup. The server does not format it (interpreting Discord's markup here would mean carrying a second implementation that disagrees with what Discord displays). The UI must always escape it before rendering.\n\nscore is up_count - down_count and may be negative."
+      },
+      "DiscordPostOut": {
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "title": "Channel Id"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          },
+          "thread_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Url"
+          },
+          "up_count": {
+            "type": "integer",
+            "title": "Up Count"
+          },
+          "down_count": {
+            "type": "integer",
+            "title": "Down Count"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          },
+          "comment_count": {
+            "type": "integer",
+            "title": "Comment Count"
+          },
+          "posted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posted At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "channel_id",
+          "up_count",
+          "down_count",
+          "score",
+          "comment_count"
+        ],
+        "title": "DiscordPostOut",
+        "description": "One notification post for an article. One article can be notified to several channels, so the article detail holds an array of these.\n\nThe server assembles thread_url. A Discord thread URL needs the target guild's ID, which exists only in the settings (discord.guild_id); the UI has no way to know it, so the job of assembling the URL cannot be handed to the UI. It is null on rows that are unsent (message_id NULL) or whose thread does not exist yet (thread_id NULL)."
+      },
+      "ErrorDetail": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail"
+      },
+      "ErrorOut": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "ErrorOut",
+        "description": "The body of every error response, whatever the status code."
+      },
+      "ItemList_AdSlotOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdSlotOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[AdSlotOut]"
+      },
+      "ItemList_AdminRoleOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminRoleOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[AdminRoleOut]"
+      },
+      "ItemList_ArticleListItem_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ArticleListItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[ArticleListItem]"
+      },
+      "ItemList_CategoryListItem_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CategoryListItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[CategoryListItem]"
+      },
+      "ItemList_CategoryOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CategoryOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[CategoryOut]"
+      },
+      "ItemList_PublisherOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PublisherOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[PublisherOut]"
+      },
+      "ItemList_PublisherRankingItem_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PublisherRankingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[PublisherRankingItem]"
+      },
+      "ItemList_SeriesOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SeriesOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[SeriesOut]"
+      },
+      "ItemList_TagDetailOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TagDetailOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[TagDetailOut]"
+      },
+      "ItemList_TagOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TagOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[TagOut]"
+      },
+      "ItemList_TokenOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TokenOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ItemList[TokenOut]"
+      },
+      "MeOut": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          },
+          "roles": {
+            "items": {
+              "$ref": "#/components/schemas/RoleOut"
+            },
+            "type": "array",
+            "title": "Roles"
+          },
+          "publishers": {
+            "items": {
+              "$ref": "#/components/schemas/PublisherOut"
+            },
+            "type": "array",
+            "title": "Publishers"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin"
+          },
+          "subscriptions": {
+            "items": {
+              "$ref": "#/components/schemas/TagOut"
+            },
+            "type": "array",
+            "title": "Subscriptions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user",
+          "is_admin"
+        ],
+        "title": "MeOut",
+        "description": "Your own information. publishers are the publishers you are affiliated with, looked up from the roles you hold."
+      },
+      "MediaFailure": {
+        "properties": {
+          "source_url": {
+            "type": "string",
+            "title": "Source Url"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_url",
+          "reason"
+        ],
+        "title": "MediaFailure",
+        "description": "An image that could not be ingested while saving an article.\n\nA URL that failed to ingest stays in the body as it is (a temporary fault at a remote host must never stop an article going out). Since it stays, that URL will eventually expire and the image will vanish, so this is never silently treated as success: the writer is always told."
+      },
+      "MediaOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "content_hash": {
+            "type": "string",
+            "title": "Content Hash"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "content_hash",
+          "url"
+        ],
+        "title": "MediaOut",
+        "description": "An ingested image. url is the delivery URL (/media/{hash}/{variant}.webp)."
+      },
+      "Page_AdOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "prev_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prev Cursor"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "per_page"
+        ],
+        "title": "Page[AdOut]"
+      },
+      "Page_ArticleListItem_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ArticleListItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "prev_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prev Cursor"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "per_page"
+        ],
+        "title": "Page[ArticleListItem]"
+      },
+      "Page_RevisionListItem_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RevisionListItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "prev_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prev Cursor"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "per_page"
+        ],
+        "title": "Page[RevisionListItem]"
+      },
+      "PublisherDetailOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "role_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "stance": {
+            "type": "string",
+            "enum": [
+              "independent",
+              "state"
+            ],
+            "title": "Stance"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/UserBrief"
+            },
+            "type": "array",
+            "title": "Members"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/PublisherStats"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "stance",
+          "stats"
+        ],
+        "title": "PublisherDetailOut",
+        "description": "A publisher's profile, reporters and track record. Affiliation is looked up from the users holding role_id."
+      },
+      "PublisherOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "role_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "stance": {
+            "type": "string",
+            "enum": [
+              "independent",
+              "state"
+            ],
+            "title": "Stance"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "stance"
+        ],
+        "title": "PublisherOut",
+        "description": "A publisher. role_id is the Discord role that marks affiliation; a dissolved publisher has role_id NULL."
+      },
+      "PublisherRankingItem": {
+        "properties": {
+          "publisher": {
+            "$ref": "#/components/schemas/PublisherOut"
+          },
+          "article_count": {
+            "type": "integer",
+            "title": "Article Count"
+          },
+          "up_count": {
+            "type": "integer",
+            "title": "Up Count"
+          },
+          "down_count": {
+            "type": "integer",
+            "title": "Down Count"
+          },
+          "comment_count": {
+            "type": "integer",
+            "title": "Comment Count"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "publisher",
+          "article_count",
+          "up_count",
+          "down_count",
+          "comment_count",
+          "score"
+        ],
+        "title": "PublisherRankingItem",
+        "description": "One row of the publisher ranking.\n\nscore is the sum of a value computed per article by the following rule (up-votes as up, down-votes as down, comment count as c).\n\n  - 2 x down >= up: the article is being piled on. score = up + c (down-votes are not added)\n  - 2 x down < up: it is not being piled on. score = up + (down / 2, floored) + c (down-votes are added at half weight, as evidence of interest)\n\nDown-votes never subtract from the score. A down-vote marks \"read, and disagreed with\", not \"not read\", so as long as it stays small relative to the up-votes it counts as a measure of attention. An article whose down-votes come close to its up-votes, on the other hand, does not get that attention counted towards the track record.\n\nThe test runs per article because being piled on is a property of the article. Testing it against the publisher's totals would let a single pile-on change the rating of every other article of that publisher at once.\n\nup_count / down_count / comment_count are the raw totals over the period, not a breakdown of score (score passes through a per-article test, so it cannot be recomputed from these three)."
+      },
+      "PublisherStats": {
+        "properties": {
+          "article_count": {
+            "type": "integer",
+            "title": "Article Count"
+          },
+          "up_count": {
+            "type": "integer",
+            "title": "Up Count"
+          },
+          "down_count": {
+            "type": "integer",
+            "title": "Down Count"
+          },
+          "comment_count": {
+            "type": "integer",
+            "title": "Comment Count"
+          },
+          "score": {
+            "type": "integer",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "article_count",
+          "up_count",
+          "down_count",
+          "comment_count",
+          "score"
+        ],
+        "title": "PublisherStats",
+        "description": "A publisher's track record. score is the ranking order itself; the rule that computes it is stated on PublisherRankingItem."
+      },
+      "PublisherWrite": {
+        "properties": {
+          "role_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role Id"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[^\\s/?#&=%]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "logo_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Url"
+          },
+          "stance": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "independent",
+                  "state"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stance"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PublisherWrite"
+      },
+      "RevisionDiffOut": {
+        "properties": {
+          "revision_number": {
+            "type": "integer",
+            "title": "Revision Number"
+          },
+          "previous_revision_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Revision Number"
+          },
+          "diff": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Diff"
+          }
+        },
+        "type": "object",
+        "required": [
+          "revision_number",
+          "diff"
+        ],
+        "title": "RevisionDiffOut",
+        "description": "The diff against the immediately preceding revision. diff is a unified diff split into lines."
+      },
+      "RevisionListItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "revision_number": {
+            "type": "integer",
+            "title": "Revision Number"
+          },
+          "editor": {
+            "$ref": "#/components/schemas/UserBrief"
+          },
+          "via_token_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Via Token Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "is_correction": {
+            "type": "boolean",
+            "title": "Is Correction"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "revision_number",
+          "editor",
+          "title",
+          "is_correction",
+          "created_at"
+        ],
+        "title": "RevisionListItem",
+        "description": "An item in the revision listing.\n\neditor is whose name it was written under; via_token_id is which key actually posted it. The two are different things. Since articles:write:any can publish an article under someone else's byline, accountability cannot be traced without the latter."
+      },
+      "RevisionOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "revision_number": {
+            "type": "integer",
+            "title": "Revision Number"
+          },
+          "editor": {
+            "$ref": "#/components/schemas/UserBrief"
+          },
+          "via_token_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Via Token Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "is_correction": {
+            "type": "boolean",
+            "title": "Is Correction"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "body_md": {
+            "type": "string",
+            "title": "Body Md"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "revision_number",
+          "editor",
+          "title",
+          "is_correction",
+          "created_at",
+          "body_md"
+        ],
+        "title": "RevisionOut",
+        "description": "The past revision itself."
+      },
+      "RoleOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "color": {
+            "type": "integer",
+            "title": "Color"
+          },
+          "position": {
+            "type": "integer",
+            "title": "Position"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "color",
+          "position"
+        ],
+        "title": "RoleOut",
+        "description": "A Discord role. The permission bitfield is not exposed (whether you are an admin is handed over already resolved, as MeOut.is_admin)."
+      },
+      "SeriesBrief": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "title"
+        ],
+        "title": "SeriesBrief"
+      },
+      "SeriesOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "cover_image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cover Image Url"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/UserBrief"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "owner",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SeriesOut"
+      },
+      "SettingOut": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "id",
+              "id_list",
+              "int",
+              "number",
+              "str",
+              "secret"
+            ],
+            "title": "Kind"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "editable": {
+            "type": "boolean",
+            "title": "Editable"
+          },
+          "restart_required": {
+            "type": "boolean",
+            "title": "Restart Required"
+          },
+          "secret": {
+            "type": "boolean",
+            "title": "Secret"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "role"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "minimum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum"
+          },
+          "exclusive_minimum": {
+            "type": "boolean",
+            "title": "Exclusive Minimum",
+            "default": false
+          },
+          "maximum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "is_set": {
+            "type": "boolean",
+            "title": "Is Set"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "updated_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "kind",
+          "label",
+          "description",
+          "editable",
+          "restart_required",
+          "secret",
+          "is_set"
+        ],
+        "title": "SettingOut",
+        "description": "One setting's definition and current value. Assembled by SettingsStore.describe in common.settings.\n\nThe UI generates its input fields from this response. The definition (kind, label, description, whether it is editable) is returned together with the value so that the UI never hardcodes keys. Hardcoded, every added setting would have to be fixed in both the registry and the UI, and whichever side was forgotten would be left settable but absent from the UI, or present in the UI but unsavable.\n\nvalue is a JSON value matching kind: id is a string, id_list an array of strings. **A setting whose secret is true always has value null and reports only is_set.** The moment the raw value is returned, the bot token is handed to everyone who can open the UI. Eligibility to read the settings and being able to carry off the secret itself are different things."
+      },
+      "SettingsOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SettingOut"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "SettingsOut",
+        "description": "Every setting. The order is the registry's order, so the order in the UI never varies from request to request."
+      },
+      "SettingsUpdate": {
+        "properties": {
+          "updates": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Updates"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "updates"
+        ],
+        "title": "SettingsUpdate",
+        "description": "Request body for a partial update of the settings.\n\nOnly the keys carried in updates are changed; an omitted key keeps its current value. **Being a partial update is also the only way to express leaving a secret setting unchanged.** Since the UI cannot read a secret's raw value, it cannot resend a secret it is not changing, and a send-everything scheme would always corrupt the secrets.\n\nThe value's type, its range and whether that key may be changed are not checked here. Types differ per key, and the source of truth for those definitions is the settings registry (common.settings). Writing the types here would split the definition across two places, and any setting added to the registry but forgotten here would be rejected with 422 before it ever reached the registry's own check. SettingsStore.set_many performs the check, and its ValueError is mapped to 400."
+      },
+      "SettingsUpdateOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SettingOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "updated_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Updated Keys"
+          }
+        },
+        "type": "object",
+        "title": "SettingsUpdateOut",
+        "description": "The response to a settings update.\n\nupdated_keys are the keys actually changed. items returns every setting as it stands after the update. Returning only the updated values would leave the UI redrawing from the values it sent, and the results of normalization (removing duplicate IDs, dropping a trailing / from a URL, and so on) would not reach the UI until the next reload."
+      },
+      "TagDetailOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Url"
+          },
+          "notify_channel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notify Channel Id"
+          },
+          "article_count": {
+            "type": "integer",
+            "title": "Article Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "article_count"
+        ],
+        "title": "TagDetailOut",
+        "description": "The information shown on the tag page."
+      },
+      "TagOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Url"
+          },
+          "notify_channel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notify Channel Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name"
+        ],
+        "title": "TagOut"
+      },
+      "TagWrite": {
+        "properties": {
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[^\\s/?#&=%]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Url"
+          },
+          "notify_channel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notify Channel Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TagWrite"
+      },
+      "TokenCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "scopes": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "articles:write",
+                "articles:write:any",
+                "ads:admin",
+                "taxonomy:admin",
+                "settings:admin"
+              ]
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Scopes"
+          },
+          "expires_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3650.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires Days"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "scopes"
+        ],
+        "title": "TokenCreate",
+        "description": "A request to issue an API key.\n\nOnly someone who meets admin eligibility at the moment of the request may issue the admin scopes (articles:write:any / ads:admin / taxonomy:admin / settings:admin). The service layer performs that check.\n\nsettings:admin can rewrite the admin roles (admin.role_ids), that is, hand out admin eligibility itself, which makes it stronger than any other scope. A key granted it is effectively a delegation of admin permissions, and its reach cannot be narrowed to ads only or taxonomy only the way the other admin scopes can."
+      },
+      "TokenCreated": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "token_prefix": {
+            "type": "string",
+            "title": "Token Prefix"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "scopes": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "articles:write",
+                "articles:write:any",
+                "ads:admin",
+                "taxonomy:admin",
+                "settings:admin"
+              ]
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "token_prefix",
+          "name",
+          "created_at",
+          "token"
+        ],
+        "title": "TokenCreated",
+        "description": "The response right after issuing a key. The raw value is returned in this response only; after that it can never be retrieved again."
+      },
+      "TokenOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "token_prefix": {
+            "type": "string",
+            "title": "Token Prefix"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "scopes": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "articles:write",
+                "articles:write:any",
+                "ads:admin",
+                "taxonomy:admin",
+                "settings:admin"
+              ]
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "token_prefix",
+          "name",
+          "created_at"
+        ],
+        "title": "TokenOut",
+        "description": "The representation used in the API key listing. The raw value cannot be returned: it is not in the DB (only the SHA-256 is stored)."
+      },
+      "UserBrief": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "discord_user_id": {
+            "type": "string",
+            "title": "Discord User Id"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "global_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Name"
+          },
+          "avatar_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avatar Hash"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "discord_user_id",
+          "username"
+        ],
+        "title": "UserBrief",
+        "description": "The minimal representation of a user, for an article's byline and for listings of a publisher's reporters."
+      },
+      "UserOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "discord_user_id": {
+            "type": "string",
+            "title": "Discord User Id"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "global_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Name"
+          },
+          "avatar_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avatar Hash"
+          },
+          "is_guild_member": {
+            "type": "boolean",
+            "title": "Is Guild Member"
+          },
+          "is_guild_owner": {
+            "type": "boolean",
+            "title": "Is Guild Owner"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "discord_user_id",
+          "username",
+          "is_guild_member",
+          "is_guild_owner"
+        ],
+        "title": "UserOut",
+        "description": "Your own information. Guild membership and ownership are exposed because they bear directly on visibility and permissions."
+      }
+    }
+  }
+}

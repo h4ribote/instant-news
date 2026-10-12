@@ -18,12 +18,13 @@ from typing import Any, Final
 from urllib.parse import quote, urljoin
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from common.config import Config
 from common.db import Database
 from common.settings import RuntimeSettings
 
+from .articles import resolve_moved_slug
 from .deps import get_config, get_db, get_principal_optional, get_settings
 from .errors import AppError, NotFound
 from .principals import Principal
@@ -185,15 +186,23 @@ def _serve(filename: str) -> FileResponse:
     return FileResponse(_page_path(filename))
 
 
-async def render_article_page(db: Database, config: Config, settings: RuntimeSettings, slug: str, principal: Principal | None) -> HTMLResponse:
+async def render_article_page(db: Database, config: Config, settings: RuntimeSettings, slug: str, principal: Principal | None) -> Response:
     """Build and return the article page.
 
     An article the viewer cannot see returns 404, not 403. A 403 reveals that something exists at that slug, and for a limited-visibility article whose very existence is secret, that alone is a leak.
 
+    A slug the article used to have answers 301 to its current page, so links already handed out (the Discord embed among them) survive a slug change. The visibility check comes first: the redirect itself would reveal the new slug. Cache-Control: no-cache keeps a cached redirect from looping when the article later takes the old slug back.
+
     config is used to build public URLs (og:url / og:image), settings to run the visibility check. Both are taken because their sources differ: config.yaml for the former, the settings table for the latter.
     """
     article = await db.fetch_one('SELECT * FROM articles WHERE slug = %s', slug)
-    if article is None or not await can_view_article(db, principal, article, settings=settings):
+    if article is None:
+        moved_id = await resolve_moved_slug(db, slug)
+        moved = await db.fetch_one('SELECT * FROM articles WHERE id = %s', moved_id) if moved_id is not None else None
+        if moved is not None and await can_view_article(db, principal, moved, settings=settings):
+            return RedirectResponse(f'/articles/{quote(str(moved["slug"]), safe="")}', status_code=301, headers={'Cache-Control': 'no-cache'})
+        raise NotFound('記事が見つかりません。')
+    if not await can_view_article(db, principal, article, settings=settings):
         raise NotFound('記事が見つかりません。')
     return HTMLResponse(_inject_meta(_read_template('article.html'), _build_meta(config, article)))
 
@@ -214,7 +223,7 @@ async def article_page(
     config: Config = Depends(get_config),
     settings: RuntimeSettings = Depends(get_settings),
     principal: Principal | None = Depends(get_principal_optional),
-) -> HTMLResponse:
+) -> Response:
     """The article page. The only one built dynamically, because og meta is injected into it."""
     return await render_article_page(db, config, settings, slug, principal)
 

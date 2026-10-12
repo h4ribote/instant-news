@@ -26,7 +26,7 @@ async def can_view_article(db: Database, principal: Principal | None, article: M
 
     article is a row from articles and must carry id / author_id / status / visibility. The row itself is passed in so that callers which already hold it, such as listings, do not re-fetch it.
 
-    settings is needed for the admin check: the third condition of admin eligibility — holding a role listed in the settings' admin.role_ids — cannot be decided without them, and making them optional would leave a caller that forgot to pass them quietly failing to treat a delegated admin as an admin. Pass the settings resolved from the settings table on this request, because a change to the admin roles has to reach the visibility check immediately.
+    settings is needed for the admin check: the third condition of admin eligibility (holding a role listed in the settings' admin.role_ids) cannot be decided without them, and making them optional would leave a caller that forgot to pass them quietly failing to treat a delegated admin as an admin. The caller passes the settings resolved from the settings table on this request, because a change to the admin roles has to reach the visibility check immediately.
     """
     author_id = article.get('author_id')
     if principal is not None and author_id is not None and int(author_id) == principal.user_id:
@@ -47,7 +47,7 @@ async def can_view_article(db: Database, principal: Principal | None, article: M
         return True
     if visibility == 'restricted':
         return await _has_visibility_role(db, principal, int(article['id']))
-    # Refuse an unknown visibility. When the enum grows, being invisible until the check is extended is the correct side to fall on; the reverse — visible by default — is a leak.
+    # Refuse an unknown visibility. When the enum grows, being invisible until the check is extended is the correct side to fall on, whereas visible by default would leak.
     return False
 
 
@@ -86,7 +86,7 @@ async def can_view_media(db: Database, principal: Principal | None, media_id: in
     """
     if is_public:
         return True
-    # Pull the referencing articles. article_media is a fact recorded when the body was saved; do not re-read the body and guess.
+    # Pull the referencing articles. article_media is a fact recorded when the body was saved, so the body is not re-read to guess.
     articles = await db.fetch_all(
         'SELECT a.id, a.author_id, a.status, a.visibility'
         ' FROM article_media am JOIN articles a ON a.id = am.article_id'
