@@ -24,7 +24,7 @@ from common.settings import RuntimeSettings
 # Administrator in Discord's permission bitfield. A holder of a role with this bit set can perform every operation in that guild.
 ADMINISTRATOR_BIT: Final = 1 << 3
 
-# The source of truth for this value set is api_token_scopes.scope in migrations/0001_initial.sql.
+# The source of truth for this value set is api_token_scopes.scope in the schema migrations/ builds.
 Scope = Literal['articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin']
 
 # Scopes that require admin eligibility. Carrying one on a key is not enough: the owner is checked for admin on every request.

@@ -41,6 +41,7 @@ const GROUP_LABELS = {
   admin: 'プラットフォーム管理',
   articles: '記事',
   media: '画像',
+  site: 'サイトの表示',
 };
 
 /* Notices attached to particular settings only. The registry owns the value's description; what goes here is the operational warning of what can happen if you touch this field. */
@@ -152,6 +153,7 @@ function numberAttrs(d) {
 
 /** The range put into words. Stated as prose on top of the input attributes, because some ranges cannot be expressed as attributes at all, such as an exclusive minimum on a number. */
 function rangeHint(d) {
+  if (d.kind === 'str' || d.kind === 'str_list') return textLimitHint(d);
   if (d.kind !== 'int' && d.kind !== 'number') return '';
   const parts = [];
   if (d.minimum != null) parts.push(d.exclusive_minimum ? `${d.minimum} より大きい` : `${d.minimum} 以上`);
@@ -159,9 +161,28 @@ function rangeHint(d) {
   return parts.length ? `値域: ${parts.join('、')}。` : '';
 }
 
+/** The text limits put into words, from max_length / max_items / allow_empty in the response. */
+function textLimitHint(d) {
+  const parts = [];
+  if (d.kind === 'str_list') {
+    parts.push('1 行に 1 件');
+    if (d.max_items != null) parts.push(`最大 ${d.max_items} 件`);
+    if (d.max_length != null) parts.push(`各 ${d.max_length} 文字以下`);
+  } else {
+    if (d.max_length != null) parts.push(`${d.max_length} 文字以下`);
+    if (d.allow_empty) parts.push('空欄にできます');
+  }
+  return parts.length ? `制約: ${parts.join('、')}。` : '';
+}
+
+/** Characters as the server counts them (code points), so an emoji is one character on both sides. */
+function charCount(s) {
+  return Array.from(s).length;
+}
+
 /** The display string for rendering a not-editable setting read-only. */
 function readonlyText(d) {
-  if (d.kind === 'id_list') return (d.value || []).map(String).join(', ');
+  if (d.kind === 'id_list' || d.kind === 'str_list') return (d.value || []).map(String).join(', ');
   return d.value === null || d.value === undefined ? '' : String(d.value);
 }
 
@@ -188,8 +209,20 @@ function controlHtml(d, id) {
   if (d.kind === 'id_list') {
     return `<textarea ${field} rows="3" placeholder="ID をカンマ区切り、または 1 行に 1 件。空にすると「指定なし」になります。">${escapeHtml((d.value || []).map(String).join('\n'))}</textarea>`;
   }
+  if (d.kind === 'str_list') {
+    const lines = (d.value || []).map(String);
+    return `<textarea ${field} rows="${Math.max(3, lines.length + 1)}" placeholder="1 行に 1 件。空にすると「なし」になります。">${escapeHtml(lines.join('\n'))}</textarea>`;
+  }
+  if (d.kind === 'color') {
+    /* The value is #rrggbb or null (the theme's default colour). A color input cannot be empty, so the null is expressed by the checkbox, and data-field goes on the container. */
+    const useDefault = d.value === null || d.value === undefined;
+    return `<div class="color-field" data-field="${escapeHtml(d.key)}">` +
+      `<input type="color" id="${id}" data-color value="${escapeHtml(useDefault ? '#000000' : d.value)}"${useDefault ? ' disabled' : ''}>` +
+      `<label><input type="checkbox" data-color-default${useDefault ? ' checked' : ''}>テーマの既定色を使う</label></div>`;
+  }
   const numeric = d.kind === 'id' ? ' inputmode="numeric"' : '';
-  return `<input type="text" ${field}${numeric} value="${escapeHtml(d.value)}">`;
+  const maxlength = d.max_length != null ? ` maxlength="${escapeHtml(d.max_length)}"` : '';
+  return `<input type="text" ${field}${numeric}${maxlength} value="${escapeHtml(d.value)}">`;
 }
 
 /** The badges showing a setting's state. */
@@ -264,6 +297,11 @@ function renderSettingsPanel() {
   // What changed is re-checked on every input. Both input and change are listened to so that a role checkbox and direct text entry are picked up by the same path. The delegation is attached once to the panel element, which is never re-created, so listeners do not stack up across saves.
   if (!panel.dataset.wired) {
     panel.addEventListener('input', refreshSettingsDirty);
+    // The colour picker is inert while the theme's default is chosen, so it never looks like it holds the value.
+    panel.addEventListener('change', (ev) => {
+      const useDefault = ev.target.closest('[data-color-default]');
+      if (useDefault) useDefault.closest('[data-field]').querySelector('[data-color]').disabled = useDefault.checked;
+    });
     panel.addEventListener('change', refreshSettingsDirty);
     panel.dataset.wired = '1';
   }
@@ -281,6 +319,22 @@ function readSettingField(d) {
 
   const el = document.querySelector(`[data-field="${d.key}"]`);
   if (!el) return { changed: false };
+
+  if (d.kind === 'color') {
+    const value = el.querySelector('[data-color-default]').checked ? null : el.querySelector('[data-color]').value.toLowerCase();
+    return { changed: value !== (d.value ?? null), value };
+  }
+
+  if (d.kind === 'str_list') {
+    const items = el.value.split('\n').map((s) => s.trim()).filter((s) => s !== '');
+    if (d.max_items != null && items.length > d.max_items) return { error: `${d.label}: ${d.max_items} 件以下にしてください(現在 ${items.length} 件)。` };
+    const tooLong = items.findIndex((s) => d.max_length != null && charCount(s) > d.max_length);
+    if (tooLong >= 0) return { error: `${d.label}: ${tooLong + 1} 行目が ${d.max_length} 文字を超えています。` };
+    const before = (d.value || []).map(String);
+    /* Order is part of the value (it is the rotation order), so unlike an ID set the lists are compared in order. */
+    const changed = items.length !== before.length || items.some((s, i) => s !== before[i]);
+    return { changed, value: items };
+  }
 
   if (d.kind === 'id_list') {
     const items = el.value.split(/[\s,]+/).filter((s) => s !== '');
@@ -304,6 +358,11 @@ function readSettingField(d) {
     const rangeError = checkRange(d, num);
     if (rangeError) return { error: rangeError };
     return { changed: num !== Number(d.value), value: num };
+  }
+
+  if (d.kind === 'str') {
+    if (text === '' && !d.allow_empty) return { error: `${d.label}: 空にできません。` };
+    if (d.max_length != null && charCount(text) > d.max_length) return { error: `${d.label}: ${d.max_length} 文字以下にしてください。` };
   }
 
   return { changed: text !== String(d.value === null || d.value === undefined ? '' : d.value), value: text };

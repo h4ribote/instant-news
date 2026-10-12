@@ -1,4 +1,6 @@
-# Runtime environment for instant-news: three services - db (MySQL), server (FastAPI) and bot (Discord bot).
+# Runtime environment for instant-news: three long-running services - db (MySQL), server (FastAPI) and bot (Discord bot) - and migrate, a one-shot that applies the schema migrations before server and bot start.
+#
+# Updating a deployment is scripts/update.sh: it fast-forwards the checkout, builds, backs the database up and stops server and bot when migrations are pending, migrates, and starts everything again. A plain `docker compose up -d --build` is also safe, because server and bot wait for migrate and refuse to start on a schema that does not match their code (docs/migrations.md).
 #
 # MySQL is not the only place that holds state. This deployment persists two, and they reference each other:
 #   db-data: MySQL's data - articles, users, the catalogue of images (the media table), and the platform settings. Once the seed values are dropped from config.yaml, this is the only copy of discord.guild_id and the OAuth and bot credentials, and a deployment restored without it cannot boot at all: SettingsStore.bootstrap refuses to start for the settings that have no default.
@@ -41,29 +43,40 @@ services:
       MYSQL_USER: ${MYSQL_USER:-instant_news}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?config.yaml の database.password と同じ値を .env の MYSQL_PASSWORD に設定してください}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MySQL の root パスワードを .env の MYSQL_ROOT_PASSWORD に設定してください(アプリケーションは root を使わず、保守用です)}
+    # The schema is not created here: the migrate service builds and updates it, and records what it applied.
     volumes:
       - db-data:/var/lib/mysql
-      # Runs only when the data directory is empty, i.e. on first boot, and creates the schema. It does not run where data already exists, so it is not a way to apply schema changes.
-      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # Check over TCP with an explicit 127.0.0.1: localhost would connect over the UNIX socket, which also reaches the temporary server that runs during initialization.
-      # MySQL initializes on a temporary server with networking disabled, so connecting over TCP at all means initialization has finished. The query then goes to the target database with the application's own credentials, confirming the user and the schema are in place too.
+      # MySQL initializes on a temporary server with networking disabled, so connecting over TCP at all means initialization has finished. The query then goes to the target database with the application's own credentials, confirming the user and the database are in place too.
       test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u \"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" -D \"$$MYSQL_DATABASE\" -e 'SELECT 1' > /dev/null 2>&1"]
       interval: 5s
       timeout: 5s
       retries: 30
-      # Failing is expected until schema initialization finishes; do not let failures in that window count as unhealthy.
+      # Failing is expected until initialization finishes; do not let failures in that window count as unhealthy.
       start_period: 60s
 
-  server:
-    build:
+  # Applies the pending schema migrations and exits. It runs on every `up`, and with nothing pending it changes nothing. It uses the server image, which carries migrations/ and the CLI.
+  migrate:
+    build: &server-build
       context: .
       dockerfile: server/Dockerfile
-    restart: unless-stopped
+    restart: "no"
+    command: ["python", "-m", "server.cli", "migrate"]
     depends_on:
       db:
-        # Wait for schema initialization before starting. The db container coming up and MySQL being able to accept connections are two different things.
+        # The db container coming up and MySQL being able to accept connections are two different things.
         condition: service_healthy
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+
+  server:
+    build: *server-build
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        # A failed migration leaves server down rather than serving against a half-changed schema.
+        condition: service_completed_successfully
     # What is published is server.port from config.yaml. compose cannot read config.yaml, so moving off the 8000 default means changing both server.port there and INSTANT_NEWS_PORT in .env (the same number is used inside and outside the container).
     ports:
       - "${INSTANT_NEWS_PORT:-8000}:${INSTANT_NEWS_PORT:-8000}"
@@ -85,8 +98,8 @@ services:
       dockerfile: bot/Dockerfile
     restart: unless-stopped
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # bot does not depend on server. server decides an article's publication and enqueues the notification post; bot reads the queue and sends it to Discord. The only thing joining the two is the DB queues (article_discord_posts / article_subscription_notices), so bot can still send what is already enqueued while server is down, and server can still publish and enqueue while bot is down.
     volumes:
       - ./config.yaml:/app/config.yaml:ro

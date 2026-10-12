@@ -10,20 +10,13 @@
 </head>
 <body>
 
-<!-- Top utility bar -->
-<div class="topbar">
-  <div class="container">
-    <span class="promo">Discord サーバーのメンバーとロールに基づいて閲覧範囲が決まるニュースプラットフォームです</span>
-  </div>
-</div>
+<!-- Top bar. server/app/site_chrome.py replaces the marker with the messages from the site.promo.* settings; js/chrome.js rotates them. -->
+<!-- site:topbar -->
 
-<!-- Logo, search, login -->
+<!-- Logo, search, login. The logo comes from the site.logo.* settings, rendered by server/app/site_chrome.py. -->
 <header class="masthead">
   <div class="container">
-    <a class="logo" href="/">
-      <span class="mark">instant<span>-news</span></span>
-      <span class="tag">Discord コミュニティの報道社連合</span>
-    </a>
+    <!-- site:logo -->
     <!-- The search form targets the home page itself (/?q=). There is no dedicated search-results page: filtering the article listing is expressed as a state of the home page. -->
     <form class="search" action="/" method="get">
       <input type="text" name="q" id="search-input" placeholder="記事を検索" aria-label="記事を検索">

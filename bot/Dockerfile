@@ -23,6 +23,8 @@ RUN pip install --no-cache-dir --disable-pip-version-check -r bot/requirements.t
 
 COPY common/ ./common/
 COPY bot/ ./bot/
+# Startup checks the database against the schema migrations before doing anything else.
+COPY migrations/ ./migrations/
 
 # No reason to run as root. The sources stay root-owned, so the application cannot rewrite its own code.
 RUN useradd --create-home --uid 10001 app

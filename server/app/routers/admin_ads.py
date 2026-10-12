@@ -43,11 +43,14 @@ _MEDIA_URL_PATTERN: Final = re.compile(r'^/media/(?P<hash>[0-9a-f]{64})/(?P<vari
 
 _LINK_SCHEMES: Final = ('http', 'https')
 
-# Required on create. AdWrite doubles as the partial-update body, so every field is optional on the model and the create-time requirement is checked here.
-_REQUIRED_ON_CREATE: Final = ('slot_id', 'advertiser_name', 'image_url', 'link_url')
+# A text creative is shown on one line of the top bar, where a line break would only be collapsed into a space nobody wrote.
+_CONTROL_CHARS: Final = re.compile(r'[\x00-\x1f\x7f]')
 
-# NOT NULL columns. Reject an explicit null in a partial update: the DB does keep nulls out, but failing there is a constraint-violation 500 that says nothing about what was wrong.
-_NOT_NULLABLE: Final = ('slot_id', 'advertiser_name', 'image_url', 'link_url', 'weight', 'is_active')
+# Required on create. AdWrite doubles as the partial-update body, so every field is optional on the model and the create-time requirement is checked here. The creative (image_url or body_text) is required according to the slot's format, by _validate_creative.
+_REQUIRED_ON_CREATE: Final = ('slot_id', 'advertiser_name', 'link_url')
+
+# NOT NULL columns. Reject an explicit null in a partial update: the DB does keep nulls out, but failing there is a constraint-violation 500 that says nothing about what was wrong. image_url and body_text may be nulled, because moving an ad to a slot of the other format swaps one for the other; _validate_creative checks the result.
+_NOT_NULLABLE: Final = ('slot_id', 'advertiser_name', 'link_url', 'weight', 'is_active')
 
 _CREATE_ENDPOINT: Final = 'POST /api/admin/ads'
 
@@ -61,10 +64,11 @@ _AD_ORDER: Final = KeysetOrder(
 )
 
 _AD_SELECT: Final = """
-    SELECT a.id, a.slot_id, a.advertiser_name, a.image_url, a.link_url, a.alt_text, a.weight,
+    SELECT a.id, a.slot_id, a.advertiser_name, a.image_url, a.body_text, a.link_url, a.alt_text, a.weight,
            a.starts_at, a.ends_at, a.is_active, a.created_at, a.updated_at,
-           s.slug AS slot_slug, s.name AS slot_name, s.description AS slot_description,
-           s.recommended_width AS slot_recommended_width, s.recommended_height AS slot_recommended_height
+           s.slug AS slot_slug, s.name AS slot_name, s.description AS slot_description, s.format AS slot_format,
+           s.recommended_width AS slot_recommended_width, s.recommended_height AS slot_recommended_height,
+           s.max_text_length AS slot_max_text_length
     FROM ads AS a
     JOIN ad_slots AS s ON s.id = a.slot_id
 """
@@ -78,11 +82,14 @@ def _ad_out(row: dict[str, Any]) -> AdOut:
             slug=row['slot_slug'],
             name=row['slot_name'],
             description=row['slot_description'],
+            format=row['slot_format'],
             recommended_width=row['slot_recommended_width'],
             recommended_height=row['slot_recommended_height'],
+            max_text_length=row['slot_max_text_length'],
         ),
         advertiser_name=row['advertiser_name'],
         image_url=row['image_url'],
+        body_text=row['body_text'],
         link_url=row['link_url'],
         alt_text=row['alt_text'],
         weight=row['weight'],
@@ -109,9 +116,37 @@ async def _fetch_ad(db: Database, ad_id: int) -> dict[str, Any]:
     return row
 
 
-async def _require_slot(db: Database, slot_id: int) -> None:
-    if await db.fetch_val('SELECT id FROM ad_slots WHERE id = %s', slot_id) is None:
+async def _require_slot(db: Database, slot_id: int) -> dict[str, Any]:
+    """The slot an ad is submitted to, with the format and limit its creative is checked against."""
+    row = await db.fetch_one('SELECT id, slug, format, max_text_length FROM ad_slots WHERE id = %s', slot_id)
+    if row is None:
         raise BadRequest(f'広告枠がありません: {slot_id}。枠は移行で投入された固定の集合であり、作成の API は無い。GET /api/admin/ad-slots で一覧を取得すること。')
+    return row
+
+
+def _validate_creative(slot: dict[str, Any], image_url: str | None, body_text: str | None, alt_text: str | None) -> None:
+    """Check that the creative matches the slot's format: an image slot carries image_url, a text slot carries one line of body_text within the slot's max length.
+
+    A creative of the wrong kind is rejected rather than ignored. Stored, it would never be shown, and the submitter would believe it runs.
+    """
+    slug = slot['slug']
+    if slot['format'] == 'image':
+        if image_url is None:
+            raise BadRequest(f'広告枠 {slug} は画像の枠のため、image_url が必要です。')
+        if body_text is not None:
+            raise BadRequest(f'広告枠 {slug} は画像の枠のため、body_text は指定できません。')
+        return
+    if body_text is None:
+        raise BadRequest(f'広告枠 {slug} はテキストの枠のため、body_text が必要です。')
+    if image_url is not None or alt_text is not None:
+        raise BadRequest(f'広告枠 {slug} はテキストの枠のため、image_url と alt_text は指定できません。')
+    if _CONTROL_CHARS.search(body_text):
+        raise BadRequest('body_text に改行や制御文字は使えません。')
+    if not body_text.strip():
+        raise BadRequest('body_text を空白だけにはできません。')
+    limit = slot['max_text_length']
+    if limit is not None and len(body_text) > limit:
+        raise BadRequest(f'広告枠 {slug} の body_text は {limit} 文字以下である必要があります(実際は {len(body_text)} 文字)。')
 
 
 def _validated_link_url(link_url: str) -> str:
@@ -167,8 +202,8 @@ async def _resolve_image_url(db: Database, media: MediaConfig, principal: Princi
 
 @router.get('/api/admin/ad-slots')
 async def list_ad_slots(db: Annotated[Database, Depends(get_db)]) -> ItemList[AdSlotOut]:
-    """The ad slot listing. Recommended dimensions are returned so that an external management app can reproduce the appearance itself before submission: the core has no preview endpoint."""
-    rows = await db.fetch_all('SELECT id, slug, name, description, recommended_width, recommended_height FROM ad_slots ORDER BY id')
+    """The ad slot listing. Each slot's format, recommended dimensions and max text length are returned so that an external management app can reproduce the appearance itself before submission: the core has no preview endpoint."""
+    rows = await db.fetch_all('SELECT id, slug, name, description, format, recommended_width, recommended_height, max_text_length FROM ad_slots ORDER BY id')
     return ItemList[AdSlotOut](items=[AdSlotOut.model_validate(row) for row in rows])
 
 
@@ -220,18 +255,20 @@ async def create_ad(
     if missing:
         raise BadRequest(f'広告の作成には次の項目が必要です: {", ".join(missing)}')
     slot_id = to_snowflake(payload.slot_id)
-    await _require_slot(db, slot_id)
+    slot = await _require_slot(db, slot_id)
+    _validate_creative(slot, payload.image_url, payload.body_text, payload.alt_text)
     _validate_period(payload.starts_at, payload.ends_at)
     link_url = _validated_link_url(payload.link_url)
-    image_url = await _resolve_image_url(db, media, principal, payload.image_url)
+    image_url = None if payload.image_url is None else await _resolve_image_url(db, media, principal, payload.image_url)
     try:
         async with db.transaction() as conn:
             record_id = await claim(db, conn, principal.user_id, idempotency) if idempotency is not None else None
             ad_id = await db.execute_insert(
-                'INSERT INTO ads (slot_id, advertiser_name, image_url, link_url, alt_text, weight, starts_at, ends_at, is_active) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                'INSERT INTO ads (slot_id, advertiser_name, image_url, body_text, link_url, alt_text, weight, starts_at, ends_at, is_active) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
                 slot_id,
                 payload.advertiser_name,
                 image_url,
+                payload.body_text,
                 link_url,
                 payload.alt_text,
                 1 if payload.weight is None else payload.weight,
@@ -266,7 +303,9 @@ async def update_ad(
 ) -> AdOut:
     """Partially update an ad. Omitted fields keep their current value.
 
-    Omitted and explicitly set to null are treated as different things, told apart by pydantic's model_fields_set. A null for alt_text, starts_at or ends_at is a meaningful instruction: drop the alt text, start the run immediately, leave the end of the run open.
+    Omitted and explicitly set to null are treated as different things, told apart by pydantic's model_fields_set. A null for alt_text, starts_at or ends_at is a meaningful instruction: drop the alt text, start the run immediately, leave the end of the run open. A null for image_url or body_text drops that creative, which is how an ad moves to a slot of the other format.
+
+    The creative is checked against the slot as it will stand after the update, with every unspecified field filled in from the current ad, so moving to a slot of the other format without swapping the creative is rejected.
     """
     identifier = _parse_ad_id(ad_id)
     current = await _fetch_ad(db, identifier)
@@ -274,6 +313,16 @@ async def update_ad(
     for name in _NOT_NULLABLE:
         if name in fields and getattr(payload, name) is None:
             raise BadRequest(f'{name} には null を指定できません。')
+    if 'slot_id' in fields:
+        slot = await _require_slot(db, to_snowflake(payload.slot_id))
+    else:
+        slot = {'id': current['slot_id'], 'slug': current['slot_slug'], 'format': current['slot_format'], 'max_text_length': current['slot_max_text_length']}
+    _validate_creative(
+        slot,
+        payload.image_url if 'image_url' in fields else current['image_url'],
+        payload.body_text if 'body_text' in fields else current['body_text'],
+        payload.alt_text if 'alt_text' in fields else current['alt_text'],
+    )
     # Validate the period with the unspecified side filled in from the current value, so that updating only one end cannot produce an ad whose period runs backwards.
     _validate_period(
         payload.starts_at if 'starts_at' in fields else current['starts_at'],
@@ -283,16 +332,17 @@ async def update_ad(
     assignments: list[str] = []
     args: list[Any] = []
     if 'slot_id' in fields:
-        slot_id = to_snowflake(payload.slot_id)
-        await _require_slot(db, slot_id)
         assignments.append('slot_id = %s')
-        args.append(slot_id)
+        args.append(slot['id'])
     if 'advertiser_name' in fields:
         assignments.append('advertiser_name = %s')
         args.append(payload.advertiser_name)
     if 'image_url' in fields:
         assignments.append('image_url = %s')
-        args.append(await _resolve_image_url(db, media, principal, payload.image_url))
+        args.append(None if payload.image_url is None else await _resolve_image_url(db, media, principal, payload.image_url))
+    if 'body_text' in fields:
+        assignments.append('body_text = %s')
+        args.append(payload.body_text)
     if 'link_url' in fields:
         assignments.append('link_url = %s')
         args.append(_validated_link_url(payload.link_url))

@@ -24,6 +24,7 @@ import discord
 from bot.app.client import NewsBot
 from common.config import Config, load_config
 from common.db import Database
+from common.migrations import MigrationError, ensure_current
 from common.settings import MissingSettingsError, SettingsStore
 
 logger = logging.getLogger('bot')
@@ -39,6 +40,11 @@ async def _run(config: Config) -> int:
     db = Database(config.database)
     await db.connect()
     try:
+        try:
+            await ensure_current(db)
+        except MigrationError as exc:
+            logger.error('%s', exc)
+            return 1
         store = SettingsStore(db)
         try:
             inserted = await store.bootstrap(config.bootstrap)

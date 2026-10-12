@@ -3,7 +3,7 @@
 #   docker compose -f docker-compose.test.yml run --rm --build tests
 #   docker compose -f docker-compose.test.yml down -v
 #
-# The run's exit status is pytest's. The database lives on tmpfs and starts empty on every stack start, built from migrations/ in file order, so the tests also cover that the migrations apply cleanly.
+# The run's exit status is pytest's. The database lives on tmpfs and starts empty on every stack start, and the migrate service builds it exactly as in production, so the tests also cover that the migrations apply cleanly through the real runner.
 
 name: instant-news-test
 
@@ -25,22 +25,32 @@ services:
     tmpfs:
       - /var/lib/mysql
     volumes:
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      # Creates the scratch database the migration runner's own tests apply throwaway migrations to.
+      - ./tests/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      # TCP on 127.0.0.1 answers only after initialization (the temporary init server has networking off), and the query proves the schema and the user exist.
+      # TCP on 127.0.0.1 answers only after initialization (the temporary init server has networking off), and the query proves the database and the user exist.
       test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u \"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" -D \"$$MYSQL_DATABASE\" -e 'SELECT 1' > /dev/null 2>&1"]
       interval: 2s
       timeout: 5s
       retries: 60
       start_period: 60s
 
-  tests:
-    build:
+  migrate:
+    build: &test-build
       context: .
       dockerfile: server/Dockerfile
       target: test
+    command: ["python", "-m", "server.cli", "migrate"]
     depends_on:
       test-db:
         condition: service_healthy
+    environment:
+      INSTANT_NEWS_CONFIG: /app/tests/config.test.yaml
+
+  tests:
+    build: *test-build
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     environment:
       INSTANT_NEWS_CONFIG: /app/tests/config.test.yaml

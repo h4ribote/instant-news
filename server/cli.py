@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI for managing API keys and platform settings.
+"""CLI for managing API keys, platform settings and schema migrations.
 
     python -m server.cli issue-token --discord-user-id <id> --name <name> --scope <scope> [--scope <scope>...] [--expires-days <n>]
     python -m server.cli list-tokens [--discord-user-id <id>]
@@ -7,6 +7,11 @@
     python -m server.cli list-settings
     python -m server.cli get-setting <key>
     python -m server.cli set-setting <key> <json-value>
+    python -m server.cli migrate
+    python -m server.cli migration-status [--check]
+    python -m server.cli resolve-migration <version> {retry,applied}
+
+The migration commands are the operator side of common/migrations.py; docs/migrations.md describes the procedure. migration-status --check exits 0 when the schema is current, 3 when versions are pending and 1 on a problem that blocks applying, which is what scripts/update.sh branches on.
 
 Issuing keys here is what makes the API usable even before a Web UI exists. Writing keys into the config file is deliberately not an option: the raw value would sit in a file, contradicting the rule that the DB stores only the SHA-256, and such a key could be neither revoked nor listed.
 
@@ -32,6 +37,7 @@ from typing import Any, Final
 # load_database_config reads only the database config section, unlike load_config which reads the whole file: this CLI needs nothing but the DB connection target, and a flaw in another config section must not cost us the recovery path.
 from common.config import DatabaseConfig, load_database_config
 from common.db import Database
+from common.migrations import MigrationError, apply_pending, resolve_dirty, status
 from common.settings import (
     CACHE_TTL_SECONDS,
     DEFS_BY_KEY,
@@ -48,7 +54,7 @@ from common.snowflake import to_snowflake
 from .app.auth import create_api_token
 from .app.principals import ADMIN_SCOPES, Principal, is_admin
 
-# Same set as the api_token_scopes.scope ENUM. The source of truth for the values is migrations/0001_initial.sql.
+# Same set as the api_token_scopes.scope ENUM. The source of truth for the values is the schema migrations/ builds.
 SCOPES: Final = ('articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin')
 
 # Key generation (prefix, raw-value length, SHA-256 digest, row insert) belongs to app.auth.create_api_token, so keys issued from the Web UI and from the CLI share one shape. The two paths differ only in whom eligibility to issue is checked against, and that check is what lives here.
@@ -311,6 +317,55 @@ async def _set_setting(db: Database, *, key: str, text: str) -> int:
     return 0
 
 
+# Schema migrations
+
+PENDING_EXIT_CODE: Final = 3
+
+
+async def _migrate(config: DatabaseConfig) -> int:
+    applied = await apply_pending(config)
+    if not applied:
+        print('未適用のマイグレーションはありません。')
+        return 0
+    for migration in applied:
+        print(f'適用しました: {migration.filename}')
+    return 0
+
+
+async def _migration_status(config: DatabaseConfig, *, check: bool) -> int:
+    current = await status(config)
+    for migration in current.migrations:
+        row = current.applied.get(migration.version)
+        if row is None:
+            state = '未適用'
+        elif row.dirty:
+            state = f'未完了(開始 {row.started_at})'
+        elif migration in current.mismatched:
+            state = f'適用後に変更あり(適用 {row.finished_at})'
+        else:
+            state = f'適用済み({row.finished_at})'
+        print(f'{migration.filename}  {state}')
+    for row in current.unknown:
+        print(f'{row.version:04d}_{row.name}.sql  コードに無い版(適用 {row.finished_at or row.started_at})')
+    problems = current.problems()
+    for problem in problems:
+        print(f'問題: {problem}', file=sys.stderr)
+    if not check:
+        return 0
+    if problems:
+        return 1
+    return PENDING_EXIT_CODE if current.pending else 0
+
+
+async def _resolve_migration(config: DatabaseConfig, *, version: int, mode: str) -> int:
+    migration = await resolve_dirty(config, version, 'retry' if mode == 'retry' else 'applied')
+    if mode == 'retry':
+        print(f'{migration.filename} の未完了の記録を消しました。次の migrate でこの版を最初から適用します。')
+    else:
+        print(f'{migration.filename} を適用済みとして記録しました。')
+    return 0
+
+
 # Entry point
 
 
@@ -336,7 +391,7 @@ def _snowflake_arg(value: str) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog='python -m server.cli', description='instant-news の API キーとプラットフォーム設定を操作する。設定の操作は、管理画面から締め出された場合の唯一の復旧手段である。')
+    parser = argparse.ArgumentParser(prog='python -m server.cli', description='instant-news の API キー・プラットフォーム設定・スキーマのマイグレーションを操作する。設定の操作は、管理画面から締め出された場合の唯一の復旧手段である。')
     parser.add_argument('--config', default=None, help='設定ファイルの場所(既定は環境変数 INSTANT_NEWS_CONFIG、無ければリポジトリルートの config.yaml)。読むのは database 節だけ。')
     subparsers = parser.add_subparsers(dest='command', required=True)
 
@@ -364,11 +419,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     set_setting.add_argument('key', help='設定のキー(例 admin.role_ids)。一覧は list-settings で確認できる。')
     set_setting.add_argument('value', help='JSON の値(例 \'["000000000000000000"]\'、60、\'"文字列"\')。')
+
+    subparsers.add_parser('migrate', help='未適用のスキーマのマイグレーションを順に適用する。')
+
+    migration_status = subparsers.add_parser('migration-status', help='マイグレーションの適用状況を一覧する。')
+    migration_status.add_argument('--check', action='store_true', help=f'終了コードで状態を返す(0 は最新、{PENDING_EXIT_CODE} は未適用あり、1 は適用を妨げる問題あり)。')
+
+    resolve = subparsers.add_parser('resolve-migration', help='途中で失敗した(未完了の)版を解消する。')
+    resolve.add_argument('version', type=int, help='未完了の版の番号(例 2)。')
+    resolve.add_argument('mode', choices=('retry', 'applied'), help='retry は記録を消して次の migrate で最初から適用し直す。applied は手で直したものとして適用済みにする。')
     return parser
 
 
 async def _run(args: argparse.Namespace) -> int:
-    db = Database(_load_database_config(args.config))
+    config = _load_database_config(args.config)
+    # The migration commands open their own dedicated connection, and must work on a database whose schema does not match this code yet.
+    if args.command == 'migrate':
+        return await _migrate(config)
+    if args.command == 'migration-status':
+        return await _migration_status(config, check=args.check)
+    if args.command == 'resolve-migration':
+        return await _resolve_migration(config, version=args.version, mode=args.mode)
+    db = Database(config)
     await db.connect()
     try:
         if args.command == 'issue-token':
@@ -401,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(_run(args))
     # MissingSettingsError reports that seeding has not run, naming the keys that are missing. It is an expected state, so print it as a message rather than a traceback.
-    except (CliError, FileNotFoundError, ValueError, MissingSettingsError) as exc:
+    except (CliError, FileNotFoundError, ValueError, MissingSettingsError, MigrationError) as exc:
         print(f'エラー: {exc}', file=sys.stderr)
         return 1
 

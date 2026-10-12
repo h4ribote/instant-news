@@ -1,6 +1,6 @@
 # 画像(取り込み・保存・配信)
 
-本書は instant-news における画像の取り込み・保存・配信を説明する。実装は `server/app/media/`(`store.py` / `fetch.py` / `transcode.py` / `service.py`)と `server/app/routers/media.py`、権限判定は `server/app/visibility.py` の `can_view_media` にある。保存の実体は `migrations/0001_initial.sql` の `media` / `article_media` である。本書とこれらは常に一致させる。
+本書は instant-news における画像の取り込み・保存・配信を説明する。実装は `server/app/media/`(`store.py` / `fetch.py` / `transcode.py` / `service.py`)と `server/app/routers/media.py`、権限判定は `server/app/visibility.py` の `can_view_media` にある。保存の実体は `migrations/` が作る `media` / `article_media` である。本書とこれらは常に一致させる。
 
 設定の出どころは 2 つに分かれる。画像の保存先(`media.storage_dir`)は `config.yaml` が持ち、取り込みの各上限(`media.fetch.*` / `media.max_pixels` / `media.quota_bytes_per_user`)は `settings` 表が持つ。前者は名前付きボリュームのマウント先と一体であり、後者は管理者が `/admin` の画面から変更する。本書が挙げる既定値は初期値(`config.example.yaml`)のものであり、稼働中の値は `settings` 表にある。出どころが違うことを画像の各モジュールへ持ち込まないため、呼び出し側が `common/config.py` の `effective_media_config()` で 1 つの `MediaConfig` へ畳んでから渡す。詳細は [docs/settings.md](settings.md) を参照。
 

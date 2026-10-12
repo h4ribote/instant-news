@@ -195,8 +195,65 @@ img { max-width: 100%; display: block; }
   justify-content: space-between;
   height: 30px;
 }
-.topbar .promo { color: var(--ink); }
 .topbar nav a { color: var(--muted); margin-left: 16px; }
+
+/* The rotating promo line. Every item is stacked in the same box; only .is-current is in view, the next waits below and the one leaving slides out above. js/chrome.js moves the classes, and PROMO_TRANSITION_MS there mirrors the duration here. */
+.topbar .promo {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  overflow: hidden;
+  color: var(--ink);
+}
+.promo-item {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transform: translateY(100%);
+  opacity: 0;
+  transition: transform 0.45s ease, opacity 0.45s ease;
+}
+.promo-item.is-current { transform: none; opacity: 1; }
+.promo-item.is-leaving { transform: translateY(-100%); opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .promo-item { transition: none; }
+}
+
+/* A text ad in the top bar. The label is drawn here rather than sent with the creative, so neither the advertiser nor an ad-management app can take it off. */
+.promo-ad { color: var(--ink); }
+.promo-ad:hover { text-decoration: none; }
+.promo-ad:hover .promo-ad-text { text-decoration: underline; }
+.promo-ad::before {
+  content: "広告";
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--muted);
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--muted);
+}
+.promo-ad-text { overflow: hidden; text-overflow: ellipsis; }
+.promo-ad-sponsor { flex: none; color: var(--muted); }
+
+.promo-pause {
+  flex: none;
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 30px;
+  cursor: pointer;
+}
+.promo-pause:hover { color: var(--ink); }
 
 /* The promo line folds away on phones. The reader is already on the site, so this explains rather than guides, and at narrow widths it only takes 2-3 lines and pushes the articles down. */
 @media (max-width: 600px) {
@@ -222,13 +279,20 @@ img { max-width: 100%; display: block; }
   flex: 1 1 auto;
   min-width: 0;
 }
+/* The logo colours come from the site.logo.*_color_* settings, which server/app/site_chrome.py passes as custom properties on the .logo element; an unset one falls back to the theme's colour. The dark theme reads the *-dark properties, written twice for the same reason as the palette. */
 .logo .mark {
   font-size: 26px;
   font-weight: 800;
   letter-spacing: -0.5px;
-  color: var(--brand-red);
+  color: var(--logo-primary-light, var(--brand-red));
 }
-.logo .mark span { color: var(--ink-strong); }
+.logo .mark span { color: var(--logo-secondary-light, var(--ink-strong)); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .logo .mark { color: var(--logo-primary-dark, var(--brand-red)); }
+  :root:not([data-theme="light"]) .logo .mark span { color: var(--logo-secondary-dark, var(--ink-strong)); }
+}
+:root[data-theme="dark"] .logo .mark { color: var(--logo-primary-dark, var(--brand-red)); }
+:root[data-theme="dark"] .logo .mark span { color: var(--logo-secondary-dark, var(--ink-strong)); }
 .logo .tag {
   font-size: 11px;
   color: var(--muted);
@@ -1641,6 +1705,20 @@ textarea.md {
 }
 .rolepick-empty { font-size: 12px; color: var(--muted); }
 .rolepick-raw { margin-top: 8px; }
+
+/* A colour setting: the picker and the "use the theme's default" checkbox side by side. */
+.color-field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.color-field input[type="color"] {
+  width: 56px;
+  height: var(--tap);
+  padding: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.color-field input[type="color"]:disabled { opacity: 0.4; cursor: default; }
+.color-field label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
 
 /*
  * The role picker is already a box that scrolls vertically inside itself (max-height: 220px), and at narrow widths that doubles up with the page's own scrolling until a finger cannot tell which one it is moving.

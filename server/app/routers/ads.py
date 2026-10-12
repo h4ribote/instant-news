@@ -28,7 +28,7 @@ _NO_STORE: Final = 'no-store'
 # Candidates currently running. weight = 0 rows are excluded because probability 0 in a weighted random selection means "never show this".
 # It also keeps the draw well-defined: if every candidate were 0 the weights would sum to 0 and no draw is possible.
 _SELECT_CANDIDATES: Final = """
-    SELECT id, advertiser_name, image_url, alt_text, weight
+    SELECT id, advertiser_name, image_url, body_text, alt_text, weight
     FROM ads
     WHERE slot_id = %s
       AND is_active = 1
@@ -70,14 +70,14 @@ async def serve_ad(
     slot: Annotated[str, Query(min_length=1, max_length=64, description='ad_slots.slug。フロントエンドのテンプレートが参照する枠の識別子。')],
     db: Annotated[Database, Depends(get_db)],
 ) -> AdServeOut:
-    """Select one ad for the slot; the response itself counts as one impression.
+    """Select one ad for the slot; the response itself counts as one impression. The creative is image_url for an image slot and body_text for a text slot, as format says.
 
     With no candidates, ad comes back null and the frontend removes the slot itself. Leaving an empty slot keeps only the pretence that something should be there.
 
     An unknown slot slug is a 404. Slots are a fixed set seeded by the migration, so a slug we do not know is an error in the frontend template. Treating it as zero candidates (ad: null) would let that error hide, indistinguishable from a slot that happens to have no ads.
     """
     response.headers['Cache-Control'] = _NO_STORE
-    slot_row = await db.fetch_one('SELECT id, slug FROM ad_slots WHERE slug = %s', slot)
+    slot_row = await db.fetch_one('SELECT id, slug, format FROM ad_slots WHERE slug = %s', slot)
     if slot_row is None:
         raise NotFound(f'広告枠がありません: {slot}')
     chosen = _weighted_choice(await db.fetch_all(_SELECT_CANDIDATES, slot_row['id']))
@@ -88,8 +88,10 @@ async def serve_ad(
         ad=AdServed(
             id=chosen['id'],
             slot=slot_row['slug'],
+            format=slot_row['format'],
             advertiser_name=chosen['advertiser_name'],
             image_url=chosen['image_url'],
+            body_text=chosen['body_text'],
             click_url=click_url(chosen['id']),
             alt_text=chosen['alt_text'],
         )

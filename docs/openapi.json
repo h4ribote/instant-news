@@ -2088,7 +2088,7 @@
           "ads"
         ],
         "summary": "Serve Ad",
-        "description": "Select one ad for the slot; the response itself counts as one impression.\n\nWith no candidates, ad comes back null and the frontend removes the slot itself. Leaving an empty slot keeps only the pretence that something should be there.\n\nAn unknown slot slug is a 404. Slots are a fixed set seeded by the migration, so a slug we do not know is an error in the frontend template. Treating it as zero candidates (ad: null) would let that error hide, indistinguishable from a slot that happens to have no ads.",
+        "description": "Select one ad for the slot; the response itself counts as one impression. The creative is image_url for an image slot and body_text for a text slot, as format says.\n\nWith no candidates, ad comes back null and the frontend removes the slot itself. Leaving an empty slot keeps only the pretence that something should be there.\n\nAn unknown slot slug is a 404. Slots are a fixed set seeded by the migration, so a slug we do not know is an error in the frontend template. Treating it as zero candidates (ad: null) would let that error hide, indistinguishable from a slot that happens to have no ads.",
         "operationId": "serve_ad_api_ads_serve_get",
         "parameters": [
           {
@@ -2179,7 +2179,7 @@
           "admin:ads"
         ],
         "summary": "List Ad Slots",
-        "description": "The ad slot listing. Recommended dimensions are returned so that an external management app can reproduce the appearance itself before submission: the core has no preview endpoint.",
+        "description": "The ad slot listing. Each slot's format, recommended dimensions and max text length are returned so that an external management app can reproduce the appearance itself before submission: the core has no preview endpoint.",
         "operationId": "list_ad_slots_api_admin_ad_slots_get",
         "responses": {
           "200": {
@@ -2397,7 +2397,7 @@
           "admin:ads"
         ],
         "summary": "Update Ad",
-        "description": "Partially update an ad. Omitted fields keep their current value.\n\nOmitted and explicitly set to null are treated as different things, told apart by pydantic's model_fields_set. A null for alt_text, starts_at or ends_at is a meaningful instruction: drop the alt text, start the run immediately, leave the end of the run open.",
+        "description": "Partially update an ad. Omitted fields keep their current value.\n\nOmitted and explicitly set to null are treated as different things, told apart by pydantic's model_fields_set. A null for alt_text, starts_at or ends_at is a meaningful instruction: drop the alt text, start the run immediately, leave the end of the run open. A null for image_url or body_text drops that creative, which is how an ad moves to a slot of the other format.\n\nThe creative is checked against the slot as it will stand after the update, with every unspecified field filled in from the current ad, so moving to a slot of the other format without swapping the creative is rejected.",
         "operationId": "update_ad_api_admin_ads__ad_id__patch",
         "parameters": [
           {
@@ -3161,8 +3161,26 @@
             "title": "Advertiser Name"
           },
           "image_url": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Image Url"
+          },
+          "body_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body Text"
           },
           "link_url": {
             "type": "string",
@@ -3223,14 +3241,14 @@
           "id",
           "slot",
           "advertiser_name",
-          "image_url",
           "link_url",
           "weight",
           "is_active",
           "created_at",
           "updated_at"
         ],
-        "title": "AdOut"
+        "title": "AdOut",
+        "description": "An ad. Exactly one of image_url and body_text is set, matching the slot's format."
       },
       "AdServeOut": {
         "properties": {
@@ -3259,13 +3277,39 @@
             "type": "string",
             "title": "Slot"
           },
+          "format": {
+            "type": "string",
+            "enum": [
+              "image",
+              "text"
+            ],
+            "title": "Format"
+          },
           "advertiser_name": {
             "type": "string",
             "title": "Advertiser Name"
           },
           "image_url": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Image Url"
+          },
+          "body_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body Text"
           },
           "click_url": {
             "type": "string",
@@ -3287,12 +3331,12 @@
         "required": [
           "id",
           "slot",
+          "format",
           "advertiser_name",
-          "image_url",
           "click_url"
         ],
         "title": "AdServed",
-        "description": "One served ad. click_url is returned rather than link_url so that click tracking can be interposed."
+        "description": "One served ad. click_url is returned rather than link_url so that click tracking can be interposed. format says which of image_url and body_text carries the creative."
       },
       "AdSlotOut": {
         "properties": {
@@ -3319,13 +3363,46 @@
             ],
             "title": "Description"
           },
+          "format": {
+            "type": "string",
+            "enum": [
+              "image",
+              "text"
+            ],
+            "title": "Format"
+          },
           "recommended_width": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Recommended Width"
           },
           "recommended_height": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Recommended Height"
+          },
+          "max_text_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Text Length"
           }
         },
         "type": "object",
@@ -3333,11 +3410,10 @@
           "id",
           "slug",
           "name",
-          "recommended_width",
-          "recommended_height"
+          "format"
         ],
         "title": "AdSlotOut",
-        "description": "An ad slot. The recommended dimensions are returned so that an external management app can reproduce the appearance itself before submitting a creative."
+        "description": "An ad slot. The format decides the creative it takes: an image slot an image_url, a text slot a body_text. The recommended dimensions (image) and the max text length (text) are returned so that an external management app can reproduce the appearance itself before submitting a creative."
       },
       "AdStatDay": {
         "properties": {
@@ -3432,6 +3508,19 @@
             ],
             "title": "Image Url"
           },
+          "body_text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body Text"
+          },
           "link_url": {
             "anyOf": [
               {
@@ -3508,7 +3597,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "AdWrite",
-        "description": "Submitting or updating an ad. Stopping the run is is_active=false, not deleting the row (so the performance stats survive)."
+        "description": "Submitting or updating an ad. Stopping the run is is_active=false, not deleting the row (so the performance stats survive).\n\nThe creative follows the slot's format: an image slot takes image_url (and optionally alt_text), a text slot takes body_text. The service layer checks the combination against the slot."
       },
       "AdminRoleOut": {
         "properties": {
@@ -5876,6 +5965,8 @@
               "int",
               "number",
               "str",
+              "str_list",
+              "color",
               "secret"
             ],
             "title": "Kind"
@@ -5939,6 +6030,33 @@
             ],
             "title": "Maximum"
           },
+          "max_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Length"
+          },
+          "max_items": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Items"
+          },
+          "allow_empty": {
+            "type": "boolean",
+            "title": "Allow Empty",
+            "default": false
+          },
           "value": {
             "title": "Value"
           },
@@ -5981,7 +6099,7 @@
           "is_set"
         ],
         "title": "SettingOut",
-        "description": "One setting's definition and current value. Assembled by SettingsStore.describe in common.settings.\n\nThe UI generates its input fields from this response. The definition (kind, label, description, whether it is editable) is returned together with the value so that the UI never hardcodes keys. Hardcoded, every added setting would have to be fixed in both the registry and the UI, and whichever side was forgotten would be left settable but absent from the UI, or present in the UI but unsavable.\n\nvalue is a JSON value matching kind: id is a string, id_list an array of strings. **A setting whose secret is true always has value null and reports only is_set.** The moment the raw value is returned, the bot token is handed to everyone who can open the UI. Eligibility to read the settings and being able to carry off the secret itself are different things."
+        "description": "One setting's definition and current value. Assembled by SettingsStore.describe in common.settings.\n\nThe UI generates its input fields from this response. The definition (kind, label, description, whether it is editable) is returned together with the value so that the UI never hardcodes keys. Hardcoded, every added setting would have to be fixed in both the registry and the UI, and whichever side was forgotten would be left settable but absent from the UI, or present in the UI but unsavable.\n\nvalue is a JSON value matching kind: id is a string, id_list and str_list an array of strings, color \"#rrggbb\" or null. **A setting whose secret is true always has value null and reports only is_set.** The moment the raw value is returned, the bot token is handed to everyone who can open the UI. Eligibility to read the settings and being able to carry off the secret itself are different things."
       },
       "SettingsOut": {
         "properties": {

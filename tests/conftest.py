@@ -17,6 +17,7 @@ from fastapi import FastAPI
 
 from common.config import load_config
 from common.db import Database
+from common.settings import DEFS_BY_KEY, to_json_value
 from server.app.auth import SESSION_COOKIE_NAME, create_session
 from server.app.principals import hash_secret
 from server.main import create_app
@@ -183,6 +184,18 @@ async def set_rate_limit(app: FastAPI) -> AsyncIterator[SetRateLimit]:
         yield _set
     finally:
         await store.set_many({'articles.api_rate_limit_per_hour': original}, updated_by=None)
+
+
+@pytest.fixture
+async def restore_site_settings(app: FastAPI) -> AsyncIterator[None]:
+    """Put the site.* settings back after a test that changes them. The settings table outlives the test."""
+    store = app.state.settings
+    values = await store.raw_values(force=True)
+    original = {key: to_json_value(DEFS_BY_KEY[key], value) for key, value in values.items() if key.startswith('site.')}
+    try:
+        yield
+    finally:
+        await store.set_many(original, updated_by=None)
 
 
 CreateArticle = Callable[..., Awaitable[httpx.Response]]

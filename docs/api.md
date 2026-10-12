@@ -399,30 +399,37 @@ slug は作成時に見出しから生成するか明示し、以後は **`slug`
 
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
-| `/api/ads/serve?slot={slug}` | GET | 不要 | 枠に対し `slot_id` 一致・`is_active=1`・`starts_at` が NULL か過去・`ends_at` が NULL か未来、の候補から **`weight` による重み付き抽選で 1 件**返す。この応答時点で `ad_stats_daily.impressions` を加算する(`INSERT ... ON DUPLICATE KEY UPDATE`)。候補 0 件なら `{"ad": null}` を返し、フロントは枠自体を消す。 |
+| `/api/ads/serve?slot={slug}` | GET | 不要 | 枠に対し `slot_id` 一致・`is_active=1`・`starts_at` が NULL か過去・`ends_at` が NULL か未来、の候補から **`weight` による重み付き抽選で 1 件**返す。この応答時点で `ad_stats_daily.impressions` を加算する(`INSERT ... ON DUPLICATE KEY UPDATE`)。候補 0 件なら `{"ad": null}` を返し、フロントは枠自体を消す。広告は `format`(枠の形式)を持ち、`image` なら `image_url` が、`text` なら `body_text` がクリエイティブである(もう一方は `null`)。 |
 | `/ads/{ad_id}/click` | GET | 不要 | `ad_stats_daily.clicks` を加算し `link_url` へ 302。 |
 
 ### 管理
 
 | パス | メソッド | 要求スコープ | 要点 |
 | --- | --- | --- | --- |
-| `/api/admin/ad-slots` | GET | `ads:admin` | 枠と推奨寸法・説明(`ItemList`)。 |
+| `/api/admin/ad-slots` | GET | `ads:admin` | 枠と形式・説明(`ItemList`)。画像の枠(`format: image`)は推奨寸法を、テキストの枠(`format: text`)は本文の最大文字数(`max_text_length`)を返し、もう一方は `null` である。 |
 | `/api/admin/ads?per_page=&cursor=&include_total=` | GET | `ads:admin` | 広告の `Page`(登録の新しい順。停止した広告も含む)。 |
-| `/api/admin/ads` | POST | `ads:admin` | 広告の登録。`Idempotency-Key` を受ける(前掲の「冪等性」)。 |
+| `/api/admin/ads` | POST | `ads:admin` | 広告の登録。`Idempotency-Key` を受ける(前掲の「冪等性」)。クリエイティブは枠の形式に従う(下記)。 |
 | `/api/admin/ads/{id}` | GET, PATCH, DELETE | `ads:admin` | 広告の取得・更新・停止。**DELETE は物理削除ではなく `is_active=0`**(実績を残す)。 |
 | `/api/admin/ads/{id}/stats?from=&to=` | GET | `ads:admin` | 日次実績(`ad_stats_daily`)。 |
 | `/api/admin/categories`, `/api/admin/categories/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | カテゴリの管理。一覧は `ItemList`。 |
 | `/api/admin/tags`, `/api/admin/tags/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | タグの管理。一覧は `ItemList`。 |
 | `/api/admin/publishers`, `/api/admin/publishers/{id}` | GET, POST, PATCH, DELETE | `taxonomy:admin` | 報道社の管理。一覧は `ItemList`。 |
 | `/api/admin/roles` | GET | 管理者(スコープではない) | 対象 guild のロールの一覧(`ItemList`)。各項目は `id` / `name` / `color` / `position` / `is_administrator`。ロールを指す設定の欄と報道社の所属ロールの選択肢に使う。**権限ビットそのものは返さず、Administrator かどうかを `is_administrator` に解決して返す。** |
-| `/api/admin/settings` | GET | `settings:admin` | プラットフォームの設定の一覧(`items`)。各項目は `key` / `kind` / `label` / `description` / `editable` / `restart_required` / `secret` / `ref` / `minimum` / `exclusive_minimum` / `maximum` / `value` / `is_set` / `updated_at` / `updated_by` を持つ。**秘密の設定は生値を返さず、`value` は `null`、設定済みかどうかは `is_set` が示す。** |
+| `/api/admin/settings` | GET | `settings:admin` | プラットフォームの設定の一覧(`items`)。各項目は `key` / `kind` / `label` / `description` / `editable` / `restart_required` / `secret` / `ref` / `minimum` / `exclusive_minimum` / `maximum` / `max_length` / `max_items` / `allow_empty` / `value` / `is_set` / `updated_at` / `updated_by` を持つ。**秘密の設定は生値を返さず、`value` は `null`、設定済みかどうかは `is_set` が示す。** |
 | `/api/admin/settings` | PATCH | `settings:admin` | 設定の**部分更新**。本体は `{"updates": {"<key>": <value>, ...}}`。応答は変更したキーの一覧(`updated_keys`)と、更新後の一覧(GET と同じ `items`)。 |
+
+広告のクリエイティブは枠の形式(`ad_slots.format`)で決まる。
+
+- **画像の枠(`header` / `article_inline` / `sidebar`)は `image_url` が必須で、`body_text` を受け付けない。**`alt_text` は任意。
+- **テキストの枠(`promo`)は `body_text` が必須で、`image_url` と `alt_text` を受け付けない。**`body_text` は 1 行の文字列であり、改行と制御文字を含められず、空白だけにもできず、枠の `max_text_length` を超えられない。
+- 形式に合わない項目は無視せず 400 で断る。保存しても表示されないクリエイティブを、入稿側は掲載中だと信じることになるためである。
+- PATCH は、省いた項目を現在の値で補った更新後の姿で検査する。したがって形式の異なる枠へ移すときは、`slot_id` と同時に新しいクリエイティブを送り、古い方に `null` を指定する(例: `{"slot_id": "<画像の枠>", "image_url": "...", "body_text": null}`)。
 
 設定の各キーの意味・型・変更可否は [docs/settings.md](settings.md) にある。本書は API の面だけを扱う。API の面で押さえるべき点は次のとおりである。
 
 - **秘密の設定(bot のトークン・OAuth2 のクライアントシークレット)の生値は GET が返さない。**返した時点で、画面を開ける者すべてに bot のトークンが渡ることになる。設定済みかどうか(`is_set`)だけを返し、値そのものは書き込み専用として扱う。
 - **PATCH は部分更新であり、`updates` に現れないキーは変更しない。**これは秘密の設定を「変更しない」と表現する唯一の手段でもある。生値を読めない以上、全項目を送り返す方式では、秘密の欄に何を入れれば「現状のまま」になるのかを画面が表現できない(空文字を送れば秘密を消してしまう)。
-- **入力欄の生成に要る記述は GET が全て返す。**値域(`minimum` / `maximum` / `exclusive_minimum`)と参照先(`ref`)まで含まれる。`ref` は ID がどの実体を指すかを表し、`kind` が `id` / `id_list` の設定にだけ意味を持つ。現在の唯一の値は `role`(Discord のロール。`admin.role_ids` と速報の各ロールが該当し、画面は `/api/admin/roles` の一覧から選ばせる)であり、それ以外の ID(通知先チャンネル等)は `ref` が `null` で、ID を直接入力させる。画面がこれらをサーバー任せにするのは、値域や参照先を画面側に書き写すと登録簿と食い違い、その食い違いが「保存を押して初めて 400 で上限を知る」「キー名で分岐した欄にだけ選択 UI が出る」形で現れるためである。
+- **入力欄の生成に要る記述は GET が全て返す。**値域(`minimum` / `maximum` / `exclusive_minimum`)、文字列の制約(`max_length` / `max_items` / `allow_empty`)と参照先(`ref`)まで含まれる。`ref` は ID がどの実体を指すかを表し、`kind` が `id` / `id_list` の設定にだけ意味を持つ。現在の唯一の値は `role`(Discord のロール。`admin.role_ids` と速報の各ロールが該当し、画面は `/api/admin/roles` の一覧から選ばせる)であり、それ以外の ID(通知先チャンネル等)は `ref` が `null` で、ID を直接入力させる。画面がこれらをサーバー任せにするのは、値域や参照先を画面側に書き写すと登録簿と食い違い、その食い違いが「保存を押して初めて 400 で上限を知る」「キー名で分岐した欄にだけ選択 UI が出る」形で現れるためである。
 - **`/api/admin/roles` はスコープではなく管理者資格で守る(API キーでは通らない)。**ロールの一覧は `settings:admin` の設定欄と `taxonomy:admin` の報道社の双方が要するが、どちらか一方のスコープに紐づけると、そのキーが自分の担当を越えたものを読めるようになる。ロールの名前・色・並びは guild のメンバーが Discord で見られる情報であり、これを必要とするのは Web UI(常にセッションで動く)である。機械のクライアントがロールの一覧を要するようになった時点で、それを名指すスコープを設ける。
 - **変更できない設定(`editable=false`。`discord.guild_id`)への変更要求は 400 になる。**黙って無視して 200 を返さない。要求した変更が起きなかったことは、必ず要求元に伝える。
 - 値の検証は全件まとめて先に行い、1 つでも不正なら何も書かない(一部だけ適用された中途半端な設定を作らないため)。未知のキー・型不正・値域外は 400 で、理由を含む本文を返す。
@@ -463,6 +470,8 @@ slug は作成時に見出しから生成するか明示し、以後は **`slug`
 
 これらのページがどう組み立てられ、どの幅で何が変わるのかは [docs/frontend.md](frontend.md) が持つ。
 
+どのページも、テンプレートの `<!-- site:topbar -->` と `<!-- site:logo -->` を、`site.*` の設定から生成したトップバーとロゴで置換して返す(`server/app/site_chrome.py`)。管理者が設定を変えると次のページ表示から反映されるよう、ページの応答は `Cache-Control: no-cache` を持つ。設定の内容は [docs/settings.md](settings.md) の「サイトの表示」を参照。
+
 記事ページは `web/article.html` の `<!-- og:meta -->` プレースホルダを生成したメタタグ群で置換する。**`og:image` と本文の抜粋を出すのは `visibility='public'` かつ `status='published'` の記事に限る。**それ以外はタイトルも含めて出さない(未公開・限定記事の内容がクローラへ漏れる)。カバー画像は認証なしで配信されるため `og:image` に使えるが、**本文中の画像は認証を挟むため `og:image` には使えない**。
 
 ## 広告にプレビュー用エンドポイントを設けない
@@ -472,7 +481,7 @@ slug は作成時に見出しから生成するか明示し、以後は **`slug`
 - **必要とする者が資格を持たない。**見え方を確認したいのは広告主であり、広告主は `ads:admin` を持たない(持つのは入稿を代行する管理者・広告管理アプリである)。資格を持つ者にとってプレビューは既に不要であり、資格を持たない者に開けば、それは認証のない機能になる。
 - **認証なしの強制表示型プレビューは、誰にでも「実際のニュースサイトに任意の画像を表示させたリンク」を作らせることを意味する。**任意の `image_url` をクエリで受け取ってサイトのレイアウトに嵌めて返す口は、そのドメインの信用を貸し出す装置になる。プレビューという名目は、それを踏む人には見えない。
 
-**本当の需要は枠の仕様である。**「この枠にはどんな寸法の画像が、どんな背景で出るのか」が分かれば、入稿側は自前で見え方を再現できる。その解は `ad_slots` が `recommended_width` / `recommended_height` / `description` を返すことであり、`GET /api/admin/ad-slots` がそれを提供する。`description` には「既定はダークテーマのため、白背景のロゴは背景に溶ける」といった、寸法だけでは伝わらない注意事項を持たせる。
+**本当の需要は枠の仕様である。**「この枠にはどんな寸法の画像が、どんな背景で出るのか」が分かれば、入稿側は自前で見え方を再現できる。その解は `ad_slots` が `format` / `recommended_width` / `recommended_height` / `max_text_length` / `description` を返すことであり、`GET /api/admin/ad-slots` がそれを提供する。`description` には「既定はダークテーマのため、白背景のロゴは背景に溶ける」といった、寸法だけでは伝わらない注意事項を持たせる。
 
 ## エラー
 

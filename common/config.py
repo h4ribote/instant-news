@@ -4,7 +4,7 @@ This file handles two kinds of settings.
 
 config.yaml is always the source of truth for exactly three values: server, database, and the image storage directory (storage_dir). The first two are needed before settings can be read from the DB (the DB's own config cannot be read out of the DB). storage_dir is inseparable from the named volume's mount point and is decided outside the container: change only this value without moving the mount and no images are found, and every existing image becomes unreachable the moment it changes, so there is no point letting the UI touch it. These three are required.
 
-Everything else (the discord / admin / articles / media limits) is only a seed value copied into the settings table on first boot and never read again. The source of truth is the DB, and admins change it from the frontend. See settings.py.
+Everything else (the discord / admin / articles / site sections and the media limits) is only a seed value copied into the settings table on first boot and never read again. The source of truth is the DB, and admins change it from the frontend. See settings.py.
 
 The seed-value sections are **optional**. Keys left out fall back to the registry's defaults (REGISTRY in settings.py). They are optional for two reasons. First, once the seed values are in, those keys need not stay in config.yaml, and requiring them would contradict the "never read again" description. Second, requiring them would mean every added setting stops existing deployments from booting until their config.yaml is edited. Only settings that can have no default (values determined solely by the environment, such as the guild ID or credentials) must be supplied at first boot; if one is missing, settings.py's bootstrap fails and lists which keys are missing.
 
@@ -35,9 +35,9 @@ _REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 _ROOT_LABEL: Final = '(トップレベル)'
 
 # Sections allowed at the top level.
-_TOP_LEVEL: Final = ('server', 'database', 'discord', 'admin', 'articles', 'media')
+_TOP_LEVEL: Final = ('server', 'database', 'discord', 'admin', 'articles', 'media', 'site')
 # Sections that may carry seed values. Every leaf appearing here must be a registry key, except media.storage_dir.
-_BOOTSTRAP_SECTIONS: Final = ('discord', 'admin', 'articles', 'media')
+_BOOTSTRAP_SECTIONS: Final = ('discord', 'admin', 'articles', 'media', 'site')
 # The media section is the only one where a runtime-environment value (storage_dir) sits alongside seed values (the ingest limits).
 _MEDIA_RUNTIME_KEY: Final = 'media.storage_dir'
 

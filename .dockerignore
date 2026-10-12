@@ -21,6 +21,9 @@ __pycache__/
 .venv/
 venv/
 
+# Database dumps taken by scripts/update.sh. They hold the database's credentials and content, so they must never land in an image layer.
+backups/
+
 # Runtime artifacts.
 *.log
 *.db

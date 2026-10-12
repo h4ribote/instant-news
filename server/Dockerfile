@@ -26,6 +26,8 @@ RUN python -c "from PIL import features; assert features.check('webp'), 'Pillow 
 
 COPY common/ ./common/
 COPY server/ ./server/
+# The schema migrations: the migrate service applies them with this image, and startup checks the database against them.
+COPY migrations/ ./migrations/
 
 # Directory holding the image blobs, kept in step with the default of media.storage_dir in config.yaml. At runtime a named volume is mounted over it (docker-compose.yml). Shipping the directory with its owner already set makes Docker inherit that owner when it first creates the volume, so the non-root user can write to the volume.
 RUN useradd --create-home --uid 10001 app \
