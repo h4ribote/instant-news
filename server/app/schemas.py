@@ -92,7 +92,7 @@ UtcDateTime = Annotated[
     PlainSerializer(_isoformat_z, return_type=str, when_used='unless-none'),
 ]
 
-# The Literals below mirror the DB's ENUMs. The source of truth for the value sets is migrations/0001_initial.sql.
+# The Literals below mirror the DB's ENUMs. The source of truth for the value sets is the schema migrations/ builds.
 ArticleStatus = Literal['draft', 'in_review', 'scheduled', 'published', 'archived']
 Visibility = Literal['public', 'members', 'restricted']
 BylineMode = Literal['author', 'publisher']

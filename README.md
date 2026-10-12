@@ -113,7 +113,7 @@ docker compose up -d --build
 docker compose logs -f server bot
 ```
 
-bot が guild を取り込んだこと、server の healthcheck が healthy になったことを確認してください。`migrations/` の SQL はデータディレクトリが空のとき(初回起動時)にしか実行されません。
+bot が guild を取り込んだこと、server の healthcheck が healthy になったことを確認してください。スキーマは、server と bot より先に動く `migrate` サービスが `migrations/` の SQL を順に適用して作ります(詳細は [docs/migrations.md](docs/migrations.md))。
 
 ### 5. ログインしてカテゴリを作る
 
@@ -126,14 +126,18 @@ bot が guild を取り込んだこと、server の healthcheck が healthy に�
 ### 更新する
 
 ```bash
-docker compose up -d --build
+scripts/update.sh
 ```
 
-DB と画像の実体は名前付きボリュームに残ります。ただし `migrations/` の SQL は再実行されないため、スキーマ変更を含む更新では追加分の SQL を自分で適用してください。`docker compose down -v` は記事・画像を含めすべて消すため注意してください。
+upstream のブランチへ fast-forward し、イメージをビルドしてから、未適用のマイグレーションがあれば DB を `backups/` にダンプし、server と bot を止めて適用します。最後に全サービスを起動し、healthy になるまで待ちます。チェックアウトをそのままデプロイするときは `--no-pull` を付けます。
+
+マイグレーションが失敗した場合は server と bot を止めたまま、バックアップの場所と戻し方を表示して終了します。`scripts/restore-db.sh <バックアップ>` で DB を更新前に戻せます。手順と失敗時の対処は [docs/migrations.md](docs/migrations.md) を参照してください。
+
+DB と画像の実体は名前付きボリュームに残ります。`docker compose down -v` は記事・画像を含めすべて消すため注意してください。
 
 ## テスト
 
-統合テストは、本番の構成とは独立したテスト用のコンテナで実行します。使い捨ての MySQL(データは tmpfs 上にあり、起動のたびに `migrations/` から作り直します)と pytest の実行コンテナからなり、ポートを公開せず `.env` も読まないため、稼働中のデプロイと並べて動かせます。
+統合テストは、本番の構成とは独立したテスト用のコンテナで実行します。使い捨ての MySQL(データは tmpfs 上にあり、起動のたびに本番と同じ `migrate` サービスで `migrations/` から作り直します)と pytest の実行コンテナからなり、ポートを公開せず `.env` も読まないため、稼働中のデプロイと並べて動かせます。
 
 ```bash
 docker compose -f docker-compose.test.yml run --rm --build tests
@@ -154,6 +158,7 @@ docker compose -f docker-compose.test.yml run --rm --no-deps -T tests python -m 
 | ドキュメント | 内容 |
 | --- | --- |
 | [docs/data-model.md](docs/data-model.md) | データモデル(DB スキーマ)の設計。テーブルの責務、記事の状態遷移、閲覧範囲、Discord との対応関係、通知の待ち行列。 |
+| [docs/migrations.md](docs/migrations.md) | スキーマのマイグレーションと更新の取り込み。版のファイルの規則、履歴表と起動時のチェック、`scripts/update.sh` の流れ、失敗時の復旧。 |
 | [docs/api.md](docs/api.md) | HTTP API のエンドポイント一覧と表現の規約。API キーの発行資格とスコープ、署名の凍結と権限の都度判定、監査証跡、レート制限。 |
 | [docs/settings.md](docs/settings.md) | 設定の全キー(型・変更可否・再起動の要否)。`config.yaml` と `settings` 表の役割分担、CLI による復旧手段。 |
 | [docs/media.md](docs/media.md) | 画像の取り込み・変換・配信。SSRF 対策、WebP への再エンコード、内容アドレスでの保存、配信時の閲覧範囲の判定。 |

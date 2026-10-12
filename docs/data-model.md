@@ -1,6 +1,6 @@
 # データモデル(DB スキーマ)設計
 
-本書は instant-news のデータモデルを説明する。実体は `migrations/0001_initial.sql` にあり、本書と当該 SQL は常に一致させる。前提として instant-news は単一コミュニティ構成をとり、1 デプロイが `settings` 表の `discord.guild_id`(初期値は `config.yaml`)で指定する 1 つの Discord サーバー(guild)にのみ対応する。したがってスキーマは guild を跨ぐ列を持たない。
+本書は instant-news のデータモデルを説明する。実体は `migrations/` の SQL を版の順に適用した結果であり(仕組みは [docs/migrations.md](migrations.md))、本書とそれらの SQL は常に一致させる。前提として instant-news は単一コミュニティ構成をとり、1 デプロイが `settings` 表の `discord.guild_id`(初期値は `config.yaml`)で指定する 1 つの Discord サーバー(guild)にのみ対応する。したがってスキーマは guild を跨ぐ列を持たない。
 
 ## 設計方針
 

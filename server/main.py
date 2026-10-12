@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from common.config import Config, load_config
 from common.db import Database
+from common.migrations import ensure_current
 from common.settings import MissingSettingsError, SettingsStore
 
 from .app import pages
@@ -83,6 +84,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     store: SettingsStore = app.state.settings
     await db.connect()
     try:
+        # Refuse to serve against a schema this code was not written for; the settings table itself is part of that schema.
+        await ensure_current(db)
         # Settings are read from the DB, so do this right after connecting and before starting the scheduler.
         await _bootstrap_settings(store, config)
         scheduler = asyncio.create_task(run_publish_scheduler(app), name='publish-scheduler')

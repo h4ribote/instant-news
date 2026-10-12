@@ -6,6 +6,8 @@ local/
 config.yaml
 # DB credentials passed to compose. Secret like config.yaml, and tracking it would ship the committed values to production unchanged.
 .env
+# Database dumps scripts/update.sh takes before migrating. They hold every article, user and credential in the database.
+backups/
 
 .venv/
 venv/
