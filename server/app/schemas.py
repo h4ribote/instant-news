@@ -98,6 +98,7 @@ Visibility = Literal['public', 'members', 'restricted']
 BylineMode = Literal['author', 'publisher']
 PublisherStance = Literal['independent', 'state']
 Scope = Literal['articles:write', 'articles:write:any', 'ads:admin', 'taxonomy:admin', 'settings:admin']
+AdFormat = Literal['image', 'text']
 
 # The base quantity an article ranking orders on. 'views' ranks by view count (the access ranking); 'featured' by the reader-facing score plus replies (the featured card). Both are then weighted by recency in the query; the weighting is not a value set the client chooses. See app.article_query.fetch_ranked_articles.
 ArticleRankingMetric = Literal['views', 'featured']
@@ -631,21 +632,28 @@ class MediaOut(_OutModel):
 
 
 class AdSlotOut(_OutModel):
-    """An ad slot. The recommended dimensions are returned so that an external management app can reproduce the appearance itself before submitting a creative."""
+    """An ad slot. The format decides the creative it takes: an image slot an image_url, a text slot a body_text. The recommended dimensions (image) and the max text length (text) are returned so that an external management app can reproduce the appearance itself before submitting a creative."""
 
     id: IdOut
     slug: str
     name: str
     description: str | None = None
-    recommended_width: int
-    recommended_height: int
+    format: AdFormat
+    # Set for an image slot, null for a text slot.
+    recommended_width: int | None = None
+    recommended_height: int | None = None
+    # Set for a text slot, null for an image slot.
+    max_text_length: int | None = None
 
 
 class AdOut(_OutModel):
+    """An ad. Exactly one of image_url and body_text is set, matching the slot's format."""
+
     id: IdOut
     slot: AdSlotOut
     advertiser_name: str
-    image_url: str
+    image_url: str | None = None
+    body_text: str | None = None
     link_url: str
     alt_text: str | None = None
     weight: int
@@ -657,11 +665,15 @@ class AdOut(_OutModel):
 
 
 class AdWrite(_WriteModel):
-    """Submitting or updating an ad. Stopping the run is is_active=false, not deleting the row (so the performance stats survive)."""
+    """Submitting or updating an ad. Stopping the run is is_active=false, not deleting the row (so the performance stats survive).
+
+    The creative follows the slot's format: an image slot takes image_url (and optionally alt_text), a text slot takes body_text. The service layer checks the combination against the slot.
+    """
 
     slot_id: IdIn | None = None
     advertiser_name: str | None = Field(default=None, min_length=1, max_length=100)
     image_url: str | None = Field(default=None, min_length=1, max_length=1000)
+    body_text: str | None = Field(default=None, min_length=1, max_length=200)
     link_url: str | None = Field(default=None, min_length=1, max_length=1000)
     alt_text: str | None = Field(default=None, max_length=200)
     # The weight for the weighted random selection. Held at 1 or above because allowing 0 would let a state exist where candidates are present yet the weights total 0 (to stop the run, use is_active=false).
@@ -672,12 +684,14 @@ class AdWrite(_WriteModel):
 
 
 class AdServed(_OutModel):
-    """One served ad. click_url is returned rather than link_url so that click tracking can be interposed."""
+    """One served ad. click_url is returned rather than link_url so that click tracking can be interposed. format says which of image_url and body_text carries the creative."""
 
     id: IdOut
     slot: str
+    format: AdFormat
     advertiser_name: str
-    image_url: str
+    image_url: str | None = None
+    body_text: str | None = None
     click_url: str
     alt_text: str | None = None
 
@@ -709,7 +723,7 @@ class SettingOut(_OutModel):
 
     The UI generates its input fields from this response. The definition (kind, label, description, whether it is editable) is returned together with the value so that the UI never hardcodes keys. Hardcoded, every added setting would have to be fixed in both the registry and the UI, and whichever side was forgotten would be left settable but absent from the UI, or present in the UI but unsavable.
 
-    value is a JSON value matching kind: id is a string, id_list an array of strings. **A setting whose secret is true always has value null and reports only is_set.** The moment the raw value is returned, the bot token is handed to everyone who can open the UI. Eligibility to read the settings and being able to carry off the secret itself are different things.
+    value is a JSON value matching kind: id is a string, id_list and str_list an array of strings, color "#rrggbb" or null. **A setting whose secret is true always has value null and reports only is_set.** The moment the raw value is returned, the bot token is handed to everyone who can open the UI. Eligibility to read the settings and being able to carry off the secret itself are different things.
     """
 
     key: str
@@ -727,7 +741,11 @@ class SettingOut(_OutModel):
     minimum: float | None = None
     exclusive_minimum: bool = False
     maximum: float | None = None
-    # The value, matching kind. Always null for a secret setting.
+    # Text limits: max characters of a str (or of each item of a str_list), max items of a str_list, and whether a str may be empty.
+    max_length: int | None = None
+    max_items: int | None = None
+    allow_empty: bool = False
+    # The value, matching kind. Always null for a secret setting, and null for a color setting that keeps the theme's default.
     value: Any = None
     # Whether a value is present. Exists so that a secret setting can report whether it is set without returning the raw value.
     is_set: bool

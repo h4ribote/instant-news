@@ -359,6 +359,161 @@ function mountNavFade() {
   }
 }
 
+/* The width at and below which style.css removes the top bar (display: none). Mirrors the media query there. */
+const NARROW_QUERY = '(max-width: 600px)';
+
+/* How long one item takes to slide out. Mirrors the transition on .promo-item in style.css. */
+const PROMO_TRANSITION_MS = 450;
+
+/** One served ad for the promo slot, or null when there is none to show. A failed request is also null: the bar then shows its messages alone for the rest of this page view. */
+async function fetchPromoAd() {
+  try {
+    const data = await get('/api/ads/serve' + qs({ slot: 'promo' }));
+    const ad = data && data.ad;
+    return ad && ad.format === 'text' && ad.body_text ? ad : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** The element for a text ad. The ad label is drawn by .promo-ad::before in style.css, so the creative cannot remove it; the advertiser's name is always attached so the reader can tell whose ad it is. */
+function promoAdElement(ad) {
+  const link = document.createElement('a');
+  link.className = 'promo-item promo-ad';
+  link.href = `/ads/${encodeURIComponent(ad.id)}/click`;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.dataset.adId = ad.id;
+  const text = document.createElement('span');
+  text.className = 'promo-ad-text';
+  text.textContent = ad.body_text;
+  const sponsor = document.createElement('span');
+  sponsor.className = 'promo-ad-sponsor';
+  sponsor.textContent = `提供: ${ad.advertiser_name}`;
+  link.append(text, sponsor);
+  return link;
+}
+
+/**
+ * Rotates the top bar: each message the server rendered in turn, then one ad from the promo slot, then back to the first message.
+ *
+ * The ad is requested only when its turn comes, and every request is one counted impression, so an impression is counted exactly when the ad slides into view. Nothing advances while the bar cannot be seen (a background tab, or a phone width where style.css removes the bar) or while the reader is pointing at it, focused in it or has pressed pause, so no impression is counted for an ad nobody saw.
+ * With no message at all, the ad is requested once and stays put: re-requesting the same slot every interval would count impressions for a display that never changed. Without an ad either, the bar is removed.
+ */
+function mountPromo() {
+  const bar = document.querySelector('[data-promo-bar]');
+  const box = bar && bar.querySelector('[data-promo]');
+  if (!box || bar.dataset.mounted) return;
+  bar.dataset.mounted = '1';
+
+  const pauseBtn = bar.querySelector('[data-promo-pause]');
+  const narrow = window.matchMedia(NARROW_QUERY);
+  const intervalMs = (Number(box.dataset.interval) || 6) * 1000;
+  const messages = [...box.querySelectorAll('.promo-item')];
+  let current = messages[0] || null;
+  let pos = 0;
+  let adAvailable = true;
+  let hovered = false;
+  let focused = false;
+  let userPaused = false;
+
+  const visible = () => !document.hidden && !narrow.matches;
+
+  function show(next) {
+    if (next === current) return;
+    const leaving = current;
+    if (leaving) {
+      leaving.classList.remove('is-current');
+      leaving.classList.add('is-leaving');
+      leaving.setAttribute('aria-hidden', 'true');
+      if (leaving.matches('a')) leaving.tabIndex = -1;
+      setTimeout(() => {
+        // An ad is requested afresh each turn, so the one that left is discarded; a message goes back to waiting below.
+        if (leaving.classList.contains('promo-ad')) leaving.remove();
+        else leaving.classList.remove('is-leaving');
+      }, PROMO_TRANSITION_MS);
+    }
+    next.removeAttribute('aria-hidden');
+    next.classList.add('is-current');
+    current = next;
+  }
+
+  function showAd(ad) {
+    const el = promoAdElement(ad);
+    box.appendChild(el);
+    // Lay the new element out at its starting position first, or the transition to is-current does not run.
+    void el.offsetWidth;
+    show(el);
+  }
+
+  if (messages.length === 0) {
+    let tried = false;
+    const tryAd = async () => {
+      if (tried || !visible()) return;
+      tried = true;
+      document.removeEventListener('visibilitychange', tryAd);
+      narrow.removeEventListener('change', tryAd);
+      const ad = await fetchPromoAd();
+      if (!ad) {
+        bar.remove();
+        return;
+      }
+      bar.hidden = false;
+      showAd(ad);
+    };
+    document.addEventListener('visibilitychange', tryAd);
+    narrow.addEventListener('change', tryAd);
+    tryAd();
+    return;
+  }
+
+  const rotating = () => messages.length >= 2 || adAvailable;
+  const paused = () => userPaused || hovered || focused || !visible();
+
+  /** Move to the next item. pos is the message last shown, so after the ad the rotation resumes from the first message. */
+  async function advance() {
+    if (!current.classList.contains('promo-ad') && pos === messages.length - 1 && adAvailable) {
+      const ad = await fetchPromoAd();
+      if (ad) {
+        showAd(ad);
+        if (pauseBtn) pauseBtn.hidden = false;
+        return;
+      }
+      adAvailable = false;
+    }
+    pos = (pos + 1) % messages.length;
+    show(messages[pos]);
+  }
+
+  async function tick() {
+    if (!paused()) await advance();
+    if (rotating()) {
+      setTimeout(tick, intervalMs);
+    } else if (pauseBtn) {
+      // A single message with no ad: nothing is left to rotate, so the pause control would control nothing.
+      pauseBtn.hidden = true;
+    }
+  }
+
+  bar.addEventListener('mouseenter', () => { hovered = true; });
+  bar.addEventListener('mouseleave', () => { hovered = false; });
+  bar.addEventListener('focusin', () => { focused = true; });
+  bar.addEventListener('focusout', (e) => { focused = bar.contains(e.relatedTarget); });
+
+  // Auto-updating content needs a way to stop it that does not depend on hovering (WCAG 2.2.2).
+  if (pauseBtn) {
+    pauseBtn.hidden = messages.length < 2;
+    pauseBtn.addEventListener('click', () => {
+      userPaused = !userPaused;
+      pauseBtn.setAttribute('aria-pressed', userPaused ? 'true' : 'false');
+      pauseBtn.setAttribute('aria-label', userPaused ? 'トップバーの切り替えを再開する' : 'トップバーの切り替えを止める');
+      pauseBtn.textContent = userPaused ? '▶' : '⏸';
+    });
+  }
+
+  setTimeout(tick, intervalMs);
+}
+
 /**
  * Wires up the header's account area, the utility links, the global nav's categories, and the phone drawer and search.
  * For pages carrying `data-actions` (the header's action group) and `data-globalnav` (the nav bar, holding a `.spacer`).
@@ -368,6 +523,8 @@ function mountNavFade() {
  * Returns the resolved viewer (null when signed out), which the caller can use to go on and render its own page.
  */
 export async function mountChrome(viewer, { activeCategory = null, categories } = {}) {
+  // The top bar needs nothing from the viewer, so its rotation starts before anything is awaited.
+  mountPromo();
   let resolved = viewer;
   if (resolved === undefined) {
     try {

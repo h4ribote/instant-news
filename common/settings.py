@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -26,7 +27,13 @@ if TYPE_CHECKING:
 # Settings reload interval, in seconds. server and bot are separate processes, and re-reading is the only way one learns of a setting the other changed. A shorter interval propagates changes sooner but queries the DB more often; changes are rare and a few seconds of lag does no real harm. Whoever made the change sees it immediately, since set_many drops its own process's cache.
 CACHE_TTL_SECONDS: Final = 10.0
 
-SettingKind = Literal['id', 'id_list', 'int', 'number', 'str', 'secret']
+SettingKind = Literal['id', 'id_list', 'int', 'number', 'str', 'str_list', 'color', 'secret']
+
+# A color setting holds #rrggbb, normalized to lowercase. The value is interpolated into a style attribute, so nothing outside this shape is ever accepted.
+_COLOR_PATTERN: Final = re.compile(r'^#[0-9a-fA-F]{6}$')
+
+# Control characters, line breaks included. A str / str_list value is shown on one line of the page, and a line break would only be collapsed by the browser into a space nobody typed.
+_CONTROL_CHARS: Final = re.compile(r'[\x00-\x1f\x7f]')
 
 # Marker for which entity an ID points at. kind only states the shape of the value (id or id_list), so without this there is no way to tell the UI "this setting is an array of roles" and it would have to branch on the key name. Branching on key names breaks the registry's design of never hardcoding keys in the UI, and the day an id_list pointing at some other entity is added, that field gets the list of roles too.
 # Only entities the DB holds rows for can be expressed here. Adding a channel would require the bot to import channels the way it imports discord_roles (there is no such table today, so notify channels are entered as raw IDs).
@@ -62,6 +69,12 @@ class SettingDef:
     # Treat minimum as "greater than" rather than "at least". For settings where 0 is meaningless, such as timeouts.
     exclusive_minimum: bool = False
     maximum: float | None = None
+    # Max characters of a str value, or of each item of a str_list.
+    max_length: int | None = None
+    # Max items of a str_list.
+    max_items: int | None = None
+    # Whether a str may be the empty string. Off by default, so a credential cannot be blanked by mistake.
+    allow_empty: bool = False
     # Default used when config.yaml omits this setting on first boot. REQUIRED means config.yaml must supply it. Giving a setting a default is what lets one be added without existing deployments having to edit their config.yaml.
     default: Any = REQUIRED
 
@@ -172,6 +185,52 @@ REGISTRY: Final[tuple[SettingDef, ...]] = (
         label='1 利用者あたりの画像の総容量',
         description='1 人が取り込める画像の合計バイト数の上限。',
     ),
+    SettingDef(
+        key='site.logo.primary', kind='str', max_length=40, default='instant',
+        label='ロゴの前半',
+        description='ヘッダのロゴの前半。ブランドの色(既定は赤)で表示する。',
+    ),
+    SettingDef(
+        key='site.logo.secondary', kind='str', max_length=40, allow_empty=True, default='-news',
+        label='ロゴの後半',
+        description='ロゴの前半に続けて本文の色で表示する部分。空にするとロゴは前半だけになる。',
+    ),
+    SettingDef(
+        key='site.logo.tagline', kind='str', max_length=60, allow_empty=True, default='Discord コミュニティの報道社連合',
+        label='ロゴのキャッチコピー',
+        description='ロゴの右に小さく添える文言。空にすると表示しない。幅 600px 以下の画面では常に表示しない。',
+    ),
+    SettingDef(
+        key='site.logo.primary_color_light', kind='color', default=None,
+        label='ロゴの前半の色(ライトテーマ)',
+        description='#rrggbb の形式。未指定ならテーマの既定色(ブランドの赤)を使う。',
+    ),
+    SettingDef(
+        key='site.logo.primary_color_dark', kind='color', default=None,
+        label='ロゴの前半の色(ダークテーマ)',
+        description='#rrggbb の形式。未指定ならテーマの既定色(ブランドの赤)を使う。',
+    ),
+    SettingDef(
+        key='site.logo.secondary_color_light', kind='color', default=None,
+        label='ロゴの後半の色(ライトテーマ)',
+        description='#rrggbb の形式。未指定ならテーマの既定色(見出しの文字色)を使う。',
+    ),
+    SettingDef(
+        key='site.logo.secondary_color_dark', kind='color', default=None,
+        label='ロゴの後半の色(ダークテーマ)',
+        description='#rrggbb の形式。未指定ならテーマの既定色(見出しの文字色)を使う。',
+    ),
+    SettingDef(
+        key='site.promo.messages', kind='str_list', max_length=120, max_items=10,
+        default=('Discord サーバーのメンバーとロールに基づいて閲覧範囲が決まるニュースプラットフォームです',),
+        label='トップバーの文言',
+        description='ページ最上部の帯に順に切り替えて表示する文言。1 行に 1 件。広告枠 promo に掲載中の広告があれば、文言の一巡ごとにそれも挟む。文言が空で広告も無ければ帯を出さない。',
+    ),
+    SettingDef(
+        key='site.promo.interval_seconds', kind='int', minimum=3, maximum=60, default=6,
+        label='トップバーの切り替え間隔(秒)',
+        description='トップバーの表示を次の文言(または広告)へ切り替える間隔。',
+    ),
 )
 
 DEFS_BY_KEY: Final[dict[str, SettingDef]] = {d.key: d for d in REGISTRY}
@@ -263,6 +322,35 @@ class MediaLimits:
 
 
 @dataclass(frozen=True)
+class LogoConfig:
+    """The masthead logo: a primary part in the brand colour, a secondary part in the ink colour, and a tagline. A colour of None means the theme's default."""
+
+    primary: str
+    secondary: str
+    tagline: str
+    primary_color_light: str | None
+    primary_color_dark: str | None
+    secondary_color_light: str | None
+    secondary_color_dark: str | None
+
+
+@dataclass(frozen=True)
+class PromoConfig:
+    """The messages the top bar rotates through, and how long each stays up."""
+
+    messages: tuple[str, ...]
+    interval_seconds: int
+
+
+@dataclass(frozen=True)
+class SiteConfig:
+    """What every page shows around the content: the logo and the top bar."""
+
+    logo: LogoConfig
+    promo: PromoConfig
+
+
+@dataclass(frozen=True)
 class RuntimeSettings:
     """The full set of settings held in the settings table. The same type is built from config.yaml's seed values."""
 
@@ -270,6 +358,7 @@ class RuntimeSettings:
     admin: AdminConfig
     articles: ArticlesConfig
     media: MediaLimits
+    site: SiteConfig
 
 
 # Validating and normalizing values. API input and config.yaml seed values pass through the same gate.
@@ -316,14 +405,44 @@ def coerce_value(defn: SettingDef, raw: Any) -> Any:
             raise ValueError(f'設定 {defn.key}: 数値である必要があります(実際は {_type_name(raw)})。')
         return float(_check_range(defn, float(raw)))
 
-    if defn.kind in ('str', 'secret'):
+    if defn.kind == 'secret':
         if not isinstance(raw, str):
             raise ValueError(f'設定 {defn.key}: 文字列である必要があります(実際は {_type_name(raw)})。')
         if not raw.strip():
             raise ValueError(f'設定 {defn.key}: 空にできません。')
         return raw
 
+    if defn.kind == 'str':
+        return _check_line(defn, defn.key, raw, allow_empty=defn.allow_empty)
+
+    if defn.kind == 'str_list':
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError(f'設定 {defn.key}: 文字列の配列である必要があります(実際は {_type_name(raw)})。指定しない場合は空の配列にしてください。')
+        if defn.max_items is not None and len(raw) > defn.max_items:
+            raise ValueError(f'設定 {defn.key}: {defn.max_items} 件以下である必要があります(実際は {len(raw)} 件)。')
+        return tuple(_check_line(defn, f'{defn.key}[{index}]', item, allow_empty=False) for index, item in enumerate(raw))
+
+    if defn.kind == 'color':
+        if raw is None:
+            return None
+        if not isinstance(raw, str) or not _COLOR_PATTERN.match(raw):
+            raise ValueError(f'設定 {defn.key}: #rrggbb 形式の色か null である必要があります(実際は {raw!r})。')
+        return raw.lower()
+
     raise ValueError(f'設定 {defn.key}: 未知の型 {defn.kind} です。')
+
+
+def _check_line(defn: SettingDef, label: str, raw: Any, *, allow_empty: bool) -> str:
+    """Validate one line of text: a string with no control characters, within max_length, and non-blank unless allow_empty."""
+    if not isinstance(raw, str):
+        raise ValueError(f'設定 {label}: 文字列である必要があります(実際は {_type_name(raw)})。')
+    if _CONTROL_CHARS.search(raw):
+        raise ValueError(f'設定 {label}: 改行や制御文字は使えません。')
+    if not allow_empty and not raw.strip():
+        raise ValueError(f'設定 {label}: 空にできません。')
+    if defn.max_length is not None and len(raw) > defn.max_length:
+        raise ValueError(f'設定 {label}: {defn.max_length} 文字以下である必要があります(実際は {len(raw)} 文字)。')
+    return raw
 
 
 def _check_range(defn: SettingDef, value: float) -> Any:
@@ -343,6 +462,8 @@ def to_json_value(defn: SettingDef, value: Any) -> Any:
         return str(value)
     if defn.kind == 'id_list':
         return [str(item) for item in value]
+    if defn.kind == 'str_list':
+        return list(value)
     return value
 
 
@@ -384,6 +505,21 @@ def build(values: Mapping[str, Any]) -> RuntimeSettings:
             ),
             max_pixels=values['media.max_pixels'],
             quota_bytes_per_user=values['media.quota_bytes_per_user'],
+        ),
+        site=SiteConfig(
+            logo=LogoConfig(
+                primary=values['site.logo.primary'],
+                secondary=values['site.logo.secondary'],
+                tagline=values['site.logo.tagline'],
+                primary_color_light=values['site.logo.primary_color_light'],
+                primary_color_dark=values['site.logo.primary_color_dark'],
+                secondary_color_light=values['site.logo.secondary_color_light'],
+                secondary_color_dark=values['site.logo.secondary_color_dark'],
+            ),
+            promo=PromoConfig(
+                messages=values['site.promo.messages'],
+                interval_seconds=values['site.promo.interval_seconds'],
+            ),
         ),
     )
 
@@ -534,6 +670,9 @@ class SettingsStore:
                 'minimum': defn.minimum,
                 'exclusive_minimum': defn.exclusive_minimum,
                 'maximum': defn.maximum,
+                'max_length': defn.max_length,
+                'max_items': defn.max_items,
+                'allow_empty': defn.allow_empty,
                 'updated_at': row['updated_at'] if row else None,
                 'updated_by': str(row['updated_by']) if row and row['updated_by'] is not None else None,
             }

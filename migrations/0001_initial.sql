@@ -471,14 +471,17 @@ CREATE TABLE article_subscription_notices (
 -- Ads
 
 -- Ad slots, referenced by slug from the frontend templates.
--- The recommended dimensions are held so an external management app can reproduce the look itself before a creative is submitted; the core has no preview endpoint.
+-- format decides the creative a slot takes: an image slot shows ads.image_url, a text slot shows ads.body_text as one line of the top bar.
+-- The recommended dimensions (image) and the max text length (text) are held so an external management app can reproduce the look itself before a creative is submitted; the core has no preview endpoint.
 CREATE TABLE ad_slots (
     id                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     slug                VARCHAR(64)     NOT NULL,               -- The identifier the frontend references.
     name                VARCHAR(100)    NOT NULL,
     description         VARCHAR(500)    NULL,                   -- Notes for whoever submits the creative (that the default is a dark theme, and so on).
-    recommended_width   INT UNSIGNED    NOT NULL,               -- Recommended creative dimensions.
-    recommended_height  INT UNSIGNED    NOT NULL,
+    format              ENUM('image','text') NOT NULL DEFAULT 'image',
+    recommended_width   INT UNSIGNED    NULL,                   -- Recommended creative dimensions. Image slots only.
+    recommended_height  INT UNSIGNED    NULL,
+    max_text_length     INT UNSIGNED    NULL,                   -- Max characters of body_text. Text slots only.
     PRIMARY KEY (id),
     UNIQUE KEY uq_ad_slots_slug (slug)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -489,8 +492,9 @@ CREATE TABLE ads (
     id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     slot_id          BIGINT UNSIGNED NOT NULL,
     advertiser_name  VARCHAR(100)    NOT NULL,                  -- For display and for reconciling performance stats. The external app manages advertisers.
-    image_url        VARCHAR(1000)   NOT NULL,
-    link_url         VARCHAR(1000)   NOT NULL,
+    image_url        VARCHAR(1000)   NULL,                      -- The creative of an ad in an image slot.
+    body_text        VARCHAR(200)    NULL,                      -- The creative of an ad in a text slot: one line of plain text.
+    link_url        VARCHAR(1000)   NOT NULL,
     alt_text         VARCHAR(200)    NULL,                      -- Alt text, for screen readers and for when the image does not arrive.
     weight           INT UNSIGNED    NOT NULL DEFAULT 1,        -- Weight for the weighted random selection.
     starts_at        DATETIME        NULL,                      -- Start of the run (NULL means immediately).
@@ -500,7 +504,9 @@ CREATE TABLE ads (
     updated_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     KEY idx_ads_serving (slot_id, is_active, starts_at, ends_at),
-    CONSTRAINT fk_ads_slot FOREIGN KEY (slot_id) REFERENCES ad_slots (id) ON DELETE RESTRICT
+    CONSTRAINT fk_ads_slot FOREIGN KEY (slot_id) REFERENCES ad_slots (id) ON DELETE RESTRICT,
+    -- Exactly one creative. Which one must match the slot's format is checked by the API, since a CHECK cannot read another table.
+    CONSTRAINT chk_ads_one_creative CHECK ((image_url IS NULL) <> (body_text IS NULL))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Daily rollup. Recording one row per event would add a row on every impression, so the counts are added up per day (INSERT ... ON DUPLICATE KEY UPDATE). Per-second analysis can be added at the point it turns out to be needed.
@@ -514,7 +520,8 @@ CREATE TABLE ad_stats_daily (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- The known ad slots. The frontend templates reference these slugs, so the migration seeds them.
-INSERT INTO ad_slots (slug, name, description, recommended_width, recommended_height) VALUES
-    ('header',         'ヘッダー',   'トップの見出し直上に出る横長のバナー。既定はダークテーマのため、白背景のロゴは背景に溶ける。', 728,  90),
-    ('article_inline', '記事内',     '記事本文の途中に挟まる枠。本文と誤読されない境界と「広告」ラベルをコアが描画する。',       640, 200),
-    ('sidebar',        'サイドバー', 'サイドバーの縦長の枠。既定はダークテーマのため、白背景のロゴは背景に溶ける。',             300, 250);
+INSERT INTO ad_slots (slug, name, description, format, recommended_width, recommended_height, max_text_length) VALUES
+    ('header',         'ヘッダー',   'トップの見出し直上に出る横長のバナー。既定はダークテーマのため、白背景のロゴは背景に溶ける。', 'image', 728,  90,   NULL),
+    ('article_inline', '記事内',     '記事本文の途中に挟まる枠。本文と誤読されない境界と「広告」ラベルをコアが描画する。',       'image', 640,  200,  NULL),
+    ('sidebar',        'サイドバー', 'サイドバーの縦長の枠。既定はダークテーマのため、白背景のロゴは背景に溶ける。',             'image', 300,  250,  NULL),
+    ('promo',          'トップバー', 'ページ最上部の帯に、運営の文言と交互に切り替わって出る 1 行のテキスト広告。「広告」ラベルと提供元の名前をコアが添える。幅 600px 以下の画面では帯ごと表示しない。', 'text', NULL, NULL, 80);

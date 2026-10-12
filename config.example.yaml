@@ -5,7 +5,7 @@
 # Runtime environment: server / database / media.storage_dir. This file is always the source of truth for these.
 #   Reading settings from the DB means connecting to the DB first, so this part holds only the values needed before that point, plus the values decided outside the container (the image storage directory is meaningless unless it matches the named volume's mount point).
 #
-# Seed values: discord / admin / articles / media.fetch / media.max_pixels / media.quota_bytes_per_user.
+# Seed values: discord / admin / articles / site / media.fetch / media.max_pixels / media.quota_bytes_per_user.
 #   They are copied into the MySQL settings table on first boot and never read again. The source of truth moves to the DB and admins change them from /admin in the frontend, so rewriting them here on any later boot does nothing.
 #   Having the config file overwrite the DB on every boot would silently revert values changed from the UI at the next restart, so exactly one side is made authoritative.
 #
@@ -117,3 +117,24 @@ articles:
   # Rate limit on article creates and updates per API key, per hour; a key over the limit gets 429.
   # Automated posting can inherently run away, so the limit is per key. Default 60, minimum 0.
   api_rate_limit_per_hour: 60
+
+# What every page shows around the content. Each value is plain text on one line; line breaks and control characters are rejected.
+site:
+  logo:
+    # The first part of the masthead logo, in the brand colour. Default "instant", 1-40 characters.
+    primary: "instant"
+    # The part following it, in the ink colour. Default "-news", 0-40 characters; empty leaves the logo with the first part alone.
+    secondary: "-news"
+    # The small line beside the logo. Default "Discord コミュニティの報道社連合", 0-60 characters; empty hides it. Never shown at 600px and narrower.
+    tagline: "Discord コミュニティの報道社連合"
+    # Colours as "#rrggbb", one for each theme. null (the default) keeps the theme's own colour.
+    primary_color_light: null
+    primary_color_dark: null
+    secondary_color_light: null
+    secondary_color_dark: null
+  promo:
+    # The messages the top bar rotates through, in order. At most 10, each 1-120 characters. An ad running in the promo ad slot is slotted in once per round.
+    messages:
+      - "Discord サーバーのメンバーとロールに基づいて閲覧範囲が決まるニュースプラットフォームです"
+    # Seconds each message stays up. Default 6, range 3-60.
+    interval_seconds: 6

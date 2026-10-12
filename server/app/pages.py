@@ -1,4 +1,6 @@
-"""Serving the static HTML pages, and injecting og meta into the article page.
+"""Serving the HTML pages: the logo and the top bar from the settings into every page, og meta into the article page.
+
+Every page passes through site_chrome.apply_site_chrome, so an admin's change to the site.* settings shows from the next page view. The responses carry Cache-Control: no-cache for that reason.
 
 The frontend is static HTML and JavaScript that fetches its content from the JSON API and renders it. Social and Discord crawlers do not run JavaScript, so a shared link's card comes out empty. The article page alone is served with og meta already filled in server-side.
 
@@ -18,7 +20,7 @@ from typing import Any, Final
 from urllib.parse import quote, urljoin
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from common.config import Config
 from common.db import Database
@@ -28,6 +30,7 @@ from .articles import resolve_moved_slug
 from .deps import get_config, get_db, get_principal_optional, get_settings
 from .errors import AppError, NotFound
 from .principals import Principal
+from .site_chrome import apply_site_chrome
 from .visibility import can_view_article
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,9 @@ OG_PLACEHOLDER: Final = '<!-- og:meta -->'
 
 # Name appended to <title>, so the card title and the tab title match.
 SITE_NAME: Final = 'instant-news'
+
+# Pages embed settings that an admin can change, so the browser revalidates instead of reusing a stale copy.
+_PAGE_HEADERS: Final = {'Cache-Control': 'no-cache'}
 
 # og:description length. The major social sites cut anything longer, so truncate here rather than leave the cut up to them.
 DESCRIPTION_LIMIT: Final = 200
@@ -181,9 +187,9 @@ def _read_template(filename: str) -> str:
     return _page_path(filename).read_text(encoding='utf-8')
 
 
-def _serve(filename: str) -> FileResponse:
-    """Return a static page as is. JavaScript fetches the content from the API and renders it."""
-    return FileResponse(_page_path(filename))
+def _serve(filename: str, settings: RuntimeSettings) -> HTMLResponse:
+    """Return a page with the logo and the top bar filled in. JavaScript fetches the content from the API and renders it."""
+    return HTMLResponse(apply_site_chrome(_read_template(filename), filename, settings.site), headers=_PAGE_HEADERS)
 
 
 async def render_article_page(db: Database, config: Config, settings: RuntimeSettings, slug: str, principal: Principal | None) -> Response:
@@ -204,16 +210,17 @@ async def render_article_page(db: Database, config: Config, settings: RuntimeSet
         raise NotFound('記事が見つかりません。')
     if not await can_view_article(db, principal, article, settings=settings):
         raise NotFound('記事が見つかりません。')
-    return HTMLResponse(_inject_meta(_read_template('article.html'), _build_meta(config, article)))
+    page = _inject_meta(_read_template('article.html'), _build_meta(config, article))
+    return HTMLResponse(apply_site_chrome(page, 'article.html', settings.site), headers=_PAGE_HEADERS)
 
 
 # Routes. Each one carries a fixed prefix so it cannot collide with the API (/api/...), images (/media/...) or static assets (/static/...).
 
 
 @router.get('/', include_in_schema=False)
-async def index_page() -> FileResponse:
+async def index_page(settings: RuntimeSettings = Depends(get_settings)) -> HTMLResponse:
     """Home. The latest articles listing."""
-    return _serve('index.html')
+    return _serve('index.html', settings)
 
 
 @router.get('/articles/{slug}', include_in_schema=False)
@@ -229,39 +236,39 @@ async def article_page(
 
 
 @router.get('/tags/{slug}', include_in_schema=False)
-async def tag_page(slug: str) -> FileResponse:
+async def tag_page(slug: str, settings: RuntimeSettings = Depends(get_settings)) -> HTMLResponse:
     """The tag page: a dedicated hub for a topic."""
-    return _serve('tag.html')
+    return _serve('tag.html', settings)
 
 
 @router.get('/publishers/{slug}', include_in_schema=False)
-async def publisher_page(slug: str) -> FileResponse:
+async def publisher_page(slug: str, settings: RuntimeSettings = Depends(get_settings)) -> HTMLResponse:
     """A publisher's profile."""
-    return _serve('publisher.html')
+    return _serve('publisher.html', settings)
 
 
 @router.get('/categories/{slug}', include_in_schema=False)
-async def category_page(slug: str) -> FileResponse:
+async def category_page(slug: str, settings: RuntimeSettings = Depends(get_settings)) -> HTMLResponse:
     """The per-category listing. Uses the same template as the home page; JavaScript reads the filter from the URL."""
-    return _serve('index.html')
+    return _serve('index.html', settings)
 
 
 @router.get('/editor', include_in_schema=False)
-async def editor_page() -> FileResponse:
+async def editor_page(settings: RuntimeSettings = Depends(get_settings)) -> HTMLResponse:
     """The editor: create and edit articles."""
-    return _serve('editor.html')
+    return _serve('editor.html', settings)
 
 
 @router.get('/settings', include_in_schema=False)
-async def settings_page() -> FileResponse:
+async def settings_page(settings: RuntimeSettings = Depends(get_settings)) -> HTMLResponse:
     """The user's own settings page (API keys, tag subscriptions)."""
-    return _serve('settings.html')
+    return _serve('settings.html', settings)
 
 
 @router.get('/admin', include_in_schema=False)
-async def admin_page() -> FileResponse:
+async def admin_page(settings: RuntimeSettings = Depends(get_settings)) -> HTMLResponse:
     """The platform settings screen (every key in the settings table).
 
-    Only the template is returned here; the setting values are obtainable solely from an API that requires settings:admin. Who they are shown to is decided by that API, not by this route.
+    Only the template, with the public logo and top bar, is returned here; the setting values are obtainable solely from an API that requires settings:admin. Who they are shown to is decided by that API, not by this route.
     """
-    return _serve('admin.html')
+    return _serve('admin.html', settings)
